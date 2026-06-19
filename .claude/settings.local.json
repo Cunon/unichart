@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import unichart; print\\('UnichartNotebook' in dir\\(unichart\\)\\); from unichart import UnichartNotebook; print\\('OK', UnichartNotebook\\)\")",
+      "Bash(python3 -m pip install --quiet build)",
+      "Bash(python3 -m build --sdist --wheel)",
+      "Read(//tmp/**)",
+      "Bash(rm -rf uctest)",
+      "Bash(python3 -m venv uctest)",
+      "Bash(/tmp/uctest/bin/pip install *)",
+      "Bash(/tmp/uctest/bin/python -m build)",
+      "Bash(/tmp/uctest/bin/python -m build /home/tom/Documents/GitHub/unichart --outdir /tmp/ucdist)",
+      "Bash(/tmp/uctest/bin/python -c \"from unichart import UnichartNotebook; print\\('Installed import OK:', UnichartNotebook\\)\")",
+      "Bash(rm -rf /tmp/ucdist2)",
+      "Bash(/tmp/uctest/bin/python -m build /home/tom/Documents/GitHub/unichart --outdir /tmp/ucdist2)"
+    ]
+  }
+}

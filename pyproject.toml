@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unichart"
+version = "0.1.0"
+description = "A plotting and notebook dashboard tool built on Plotly"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Cunon", email = "tomtravelsto@gmail.com" }]
+keywords = ["plotly", "plotting", "visualization", "jupyter", "dashboard"]
+dependencies = [
+    "pandas",
+    "numpy",
+    "plotly",
+    "scipy",
+    "ipywidgets",
+    "ipython",
+]
+
+[project.optional-dependencies]
+# Trend lines via LOWESS smoothing
+trend = ["statsmodels"]
+# Interactive web dashboards (unichart_dashboard.dashboard / nb.dashboard)
+dashboard = ["dash"]
+# Everything
+all = ["statsmodels", "dash"]
+
+[project.urls]
+Homepage = "https://github.com/Cunon/unichart"
+Repository = "https://github.com/Cunon/unichart"
+
+[tool.setuptools]
+# Flat top-level modules: `import unichart` and `from unichart_dashboard import dashboard`
+py-modules = ["unichart", "unichart_dashboard"]

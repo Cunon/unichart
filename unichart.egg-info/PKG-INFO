@@ -1,0 +1,64 @@
+Metadata-Version: 2.4
+Name: unichart
+Version: 0.1.0
+Summary: A plotting and notebook dashboard tool built on Plotly
+Author-email: Tom <tomtravelsto@gmail.com>
+Project-URL: Homepage, https://github.com/tomtravelsto/unichart
+Project-URL: Repository, https://github.com/tomtravelsto/unichart
+Keywords: plotly,plotting,visualization,jupyter,dashboard
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: pandas
+Requires-Dist: numpy
+Requires-Dist: plotly
+Requires-Dist: scipy
+Requires-Dist: ipywidgets
+Requires-Dist: ipython
+Provides-Extra: trend
+Requires-Dist: statsmodels; extra == "trend"
+Provides-Extra: dashboard
+Requires-Dist: dash; extra == "dashboard"
+Provides-Extra: all
+Requires-Dist: statsmodels; extra == "all"
+Requires-Dist: dash; extra == "all"
+
+# unichart
+
+A plotting and notebook dashboard tool built on [Plotly](https://plotly.com/python/).
+
+## Installation
+
+Install directly from GitHub with pip:
+
+```bash
+pip install git+https://github.com/OWNER/unichart.git
+```
+
+> Replace `OWNER` with the GitHub account/org that hosts this repo.
+
+Optional extras:
+
+```bash
+# Trend lines (LOWESS smoothing via statsmodels)
+pip install "unichart[trend] @ git+https://github.com/OWNER/unichart.git"
+
+# Interactive web dashboards (Dash)
+pip install "unichart[dashboard] @ git+https://github.com/OWNER/unichart.git"
+
+# Everything
+pip install "unichart[all] @ git+https://github.com/OWNER/unichart.git"
+```
+
+## Usage
+
+```python
+from unichart import UnichartNotebook
+
+nb = UnichartNotebook()
+```
+
+## Requirements
+
+- Python >= 3.9
+- pandas, numpy, plotly, scipy, ipywidgets, ipython (installed automatically)
+- Optional: `statsmodels` for trend lines, `dash` for dashboards

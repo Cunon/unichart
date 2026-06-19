@@ -1,0 +1,16 @@
+pandas
+numpy
+plotly
+scipy
+ipywidgets
+ipython
+
+[all]
+statsmodels
+dash
+
+[dashboard]
+dash
+
+[trend]
+statsmodels
