@@ -1,7 +1,19 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3 *)"
+      "Bash(python3 *)",
+      "Bash(awk -F: '$1 > 1080 && $1 < 2100')",
+      "Bash(awk -F: '$1 >= 4863 && $1 <= 4965')",
+      "Bash(awk -F: '$1 >= 4863 && $1 <= 4970 {print}')",
+      "Bash(awk -F: '$1>2100 && $1<3400')",
+      "Bash(awk -F: '$1>3000 && $1<4800')",
+      "Bash(sed 's#</body></html>#<script>\\\\nwindow.addEventListener\\(\"load\", function\\(\\){\\\\n setTimeout\\(function\\(\\){\\\\n var summary = function\\(\\){ return [].map.call\\(document.querySelectorAll\\(\".plotly-graph-div\"\\), function\\(gd\\){ return gd.data.map\\(function\\(t\\){ return t.visible === false ? 0 : 1; }\\).join\\(\"\"\\); }\\).join\\(\"|\"\\); };\\\\n var before = summary\\(\\);\\\\n document.querySelector\\(\".gsel input[value=\\\\\\\\\"1\\\\\\\\\"]\"\\).checked = false;\\\\n window.__applyGlobalSelect\\(\\).then\\(function\\(\\){\\\\n var el = document.createElement\\(\"div\"\\); el.id = \"test-out\";\\\\n el.textContent = \"BEFORE=\" + before + \" AFTER=\" + summary\\(\\);\\\\n document.body.appendChild\\(el\\);\\\\n }\\);\\\\n }, 1500\\);\\\\n}\\);\\\\n</script></body></html>#' proto_board.html)",
+      "Bash(google-chrome --headless=new --dump-dom --virtual-time-budget=20000 --window-size=1400,1400 proto_test.html)",
+      "Bash(google-chrome --headless=new --screenshot=proto_after.png --virtual-time-budget=20000 --window-size=1400,1400 proto_test.html)",
+      "Bash(google-chrome --headless=new --dump-dom --virtual-time-budget=25000 --window-size=1400,1800 /tmp/claude-1000/-home-tom-Documents-GitHub-unichart-demo-notebooks/78e35678-5ac9-4ba8-a7e5-1c009b400065/scratchpad/board_gsel_test.html)",
+      "Bash(google-chrome --headless=new --screenshot=/tmp/claude-1000/-home-tom-Documents-GitHub-unichart-demo-notebooks/78e35678-5ac9-4ba8-a7e5-1c009b400065/scratchpad/board_gsel.png --virtual-time-budget=25000 --window-size=1000,1600 /tmp/claude-1000/-home-tom-Documents-GitHub-unichart-demo-notebooks/78e35678-5ac9-4ba8-a7e5-1c009b400065/scratchpad/board_gsel.html)",
+      "Bash(awk -F: '$1>5470 && $1<5700')",
+      "Bash(google-chrome --headless=new --screenshot=/tmp/claude-1000/-home-tom-Documents-GitHub-unichart-demo-notebooks/78e35678-5ac9-4ba8-a7e5-1c009b400065/scratchpad/table_full.png --virtual-time-budget=20000 --window-size=1000,1600 --hide-scrollbars /tmp/claude-1000/-home-tom-Documents-GitHub-unichart-demo-notebooks/78e35678-5ac9-4ba8-a7e5-1c009b400065/scratchpad/board_sort_test.html)"
     ]
   }
 }

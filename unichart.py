@@ -2514,6 +2514,25 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
     return _show_or_return(fig, return_axes)
 
 class UnichartNotebook:
+    """Interactive multi-dataset plotting environment for notebooks.
+
+    A notebook holds any number of datasets (``nb.sets``, each a :class:`Dataset`)
+    backed by a single shared DataFrame, and turns them into Plotly figures with a
+    concise, stateful API. The typical workflow is:
+
+        1. Load data          -> ``load_df`` / ``load`` / ``load_clipboard``
+        2. Select what to show -> ``select`` / ``omit`` / ``query``
+        3. Plot                -> ``plot`` / ``plot_ymult``
+        4. Style               -> ``color`` / ``marker`` / ``var_format`` /
+                                  ``set_default_format``
+        5. Analyse             -> ``delta`` / ``table`` / ``combine_sets``
+
+    Plot calls remember their last arguments (``last_x``, ``last_y``, ...), so
+    follow-up styling and analysis calls can be made without re-specifying them.
+    Call ``nb.help()`` for a categorized method listing, or ``nb.help('name')``
+    for the full documentation of a single method.
+    """
+
     def __init__(self):
         self.sets = []
         self._combined_df = pd.DataFrame({_SET_ID_COL: pd.Series(dtype='int64')})
@@ -3890,28 +3909,32 @@ class UnichartNotebook:
     def delta(self, base_idx, study_indices, align_on=None, delta_parms=None,
               passed_parms=None, keep_parms=None,
               direction='nearest', tolerance=None,
-              x_ins=None, interp='both', kind=None):
+              x_ins=None, interp='both', kind=None, name_as_study=False):
         """Compute deltas (absolute and %) between each study dataset and the base.
 
-        The resulting delta dataset is anchored on the BASE dataset's rows: every
-        column of the base set is carried through under its original name. On top
+        The resulting delta dataset is anchored on the STUDY dataset's rows: every
+        column of the study set is carried through under its original name. On top
         of that, for each delta parameter ``P`` the result gains:
 
             DL_<P>      study value minus base value
             DLPCT_<P>   100 * (study - base) / base   (NaN where base == 0)
 
-        Study-side values are surfaced only under a standardized ``<name>_STUDY``
-        name, via two complementary controls — nothing from the study set is
+        Base-side values are surfaced only under a standardized ``<name>_BASE``
+        name, via two complementary controls — nothing from the base set is
         added under any other name:
 
-            keep_parms    keep the raw study value of selected *delta* parameters
+            keep_parms    keep the raw base value of selected *delta* parameters
                           (a subset of delta_parms, or True / 'all' for all of them)
-            passed_parms  pass through additional study columns for context
+            passed_parms  pass through additional base columns for context
+
+        The delta set inherits the study set's colour and marker, so it reads as a
+        visual continuation of the study series it was derived from. Pass
+        ``name_as_study=True`` to also title it after the study set.
 
         Parameters
         ----------
         base_idx : int
-            Index of the baseline dataset.
+            Index of the baseline (reference) dataset.
         study_indices : int | list | 'all'
             Dataset(s) to compare against the base. The base itself is always skipped.
         align_on : str | None
@@ -3919,14 +3942,14 @@ class UnichartNotebook:
         delta_parms : str | list | None
             Columns to compute deltas for. Defaults to last_y.
         passed_parms : str | list | None
-            Extra STUDY column(s) to carry into the result as ``<name>_STUDY``.
+            Extra BASE column(s) to carry into the result as ``<name>_BASE``.
             Intended for context columns that are not themselves being deltaed.
         keep_parms : str | list | bool | None
-            Which delta parameters' raw STUDY values to keep, as ``<name>_STUDY``.
+            Which delta parameters' raw BASE values to keep, as ``<name>_BASE``.
             Pass a subset of delta_parms, or True / 'all' to keep every one.
-            None / False keeps no study values (only the deltas and base columns).
+            None / False keeps no base values (only the deltas and study columns).
         direction : 'nearest' | 'forward' | 'backward'
-            Passed to merge_asof — controls which study row matches each base row.
+            Passed to merge_asof — controls which base row matches each study row.
             Only used in the default (non-``x_ins``) row-matching mode.
         tolerance : numeric | None
             Maximum allowed distance between matched align_on values. Unmatched rows get NaN.
@@ -3934,8 +3957,8 @@ class UnichartNotebook:
 
         Interpolation mode (``x_ins``)
         ------------------------------
-        By default the result is anchored on the base dataset's rows, with each
-        study row matched by a nearest/forward/backward ``merge_asof``. Pass
+        By default the result is anchored on the study dataset's rows, with each
+        base row matched by a nearest/forward/backward ``merge_asof``. Pass
         ``x_ins`` (a scalar or list-like of ``align_on`` values) to instead place
         the result rows at exactly those ``align_on`` values, reading the base
         and/or study values off an interpolated curve at each point — mirroring
@@ -3950,7 +3973,7 @@ class UnichartNotebook:
             The non-selected side — and any non-numeric column on either side —
             is read from the row whose ``align_on`` is nearest each requested
             value. Note every column of an interpolated side is fitted, including
-            base context columns that are not delta parameters, since the whole
+            study context columns that are not delta parameters, since the whole
             row is synthetic.
         kind : str | tuple | None
             Regression/interpolation spec applied to the interpolated side(s),
@@ -3962,6 +3985,10 @@ class UnichartNotebook:
             naming how each side's numeric values were produced (the regression
             label, ``'Table'`` for 1-D linear interpolation, or ``'Nearest'``).
             Only used when ``x_ins`` is given.
+        name_as_study : bool
+            When ``True``, title each delta set after its study set instead of the
+            default ``'Delta {base}-{study}'``. The study set's colour and marker
+            are inherited regardless of this flag.
         """
         if x_ins is not None and interp not in ('base', 'study', 'both'):
             raise ValueError("interp must be 'base', 'study', or 'both'.")
@@ -3986,8 +4013,8 @@ class UnichartNotebook:
 
         # align_on is the merge key, not a delta target. If it slipped into
         # delta_parms (e.g. a SETNUMBER/INDEX column that is also last_x, or an
-        # explicit list that includes the align column), drop it — the study side
-        # keeps the key un-renamed, so a '<align_on>_STUDY' column never exists and
+        # explicit list that includes the align column), drop it — the base side
+        # keeps the key un-renamed, so a '<align_on>_BASE' column never exists and
         # deltaing the key against itself is meaningless.
         if align_on in delta_parms:
             print(f"Note: '{align_on}' is the alignment key, not a delta parameter — "
@@ -4065,18 +4092,11 @@ class UnichartNotebook:
             print("No study datasets to process (base dataset excluded if present in selection).")
             return []
 
-        # --- Base side: every base column, anchored and sorted on align_on. ---
-        # Prepared once: base_ds.df materializes a fresh slice of the combined
-        # frame on every access, and the dedup/sort don't depend on the study
-        # set. Ownership already excludes other sets' all-NaN phantom columns
-        # from the view, so the NaN scan below only spans the base set's own
-        # width (it exists to drop genuinely empty own columns; the per-study
-        # drop stays in the loop because it depends on valid_parms).
-        base_raw = base_ds.df
-        if base_raw.columns.duplicated().any():
-            base_raw = base_raw.loc[:, ~base_raw.columns.duplicated()]
-        base_sorted = base_raw.sort_values(align_on).reset_index(drop=True)
-        base_all_nan = base_sorted.isna().all()
+        # --- Base side: the reference. Only its column labels are needed up front,
+        # to resolve which delta parms exist on both sides; the base's values are
+        # pulled per study as a narrow '<name>_BASE' slice inside the loop. The
+        # result now carries the STUDY set, so the full-width prep is per-study.
+        base_cols = list(base_ds.columns)
 
         created = []
 
@@ -4091,7 +4111,7 @@ class UnichartNotebook:
                 continue
 
             valid_parms = [p for p in delta_parms
-                           if p in base_sorted.columns and p in study_cols]
+                           if p in base_cols and p in study_cols]
             skipped = sorted(set(delta_parms) - set(valid_parms))
             if skipped:
                 print(f"Warning: skipping columns not present in both datasets: {skipped}")
@@ -4099,8 +4119,8 @@ class UnichartNotebook:
                 print(f"Warning: skipping '{study_ds.title}' — no valid delta columns found.")
                 continue
 
-            # Resolve study-side keep (a subset of delta parms) and passthrough columns.
-            # align_on is always the merge key and is never duplicated as a *_STUDY col.
+            # Resolve base-side keep (a subset of delta parms) and passthrough columns.
+            # align_on is always the merge key and is never duplicated as a *_BASE col.
             keep_valid = [p for p in keep_parms if p != align_on and p in valid_parms]
             keep_dropped = [p for p in keep_parms if p != align_on and p not in valid_parms]
             if keep_dropped:
@@ -4108,44 +4128,50 @@ class UnichartNotebook:
                       f"{sorted(set(keep_dropped))}")
 
             passed_valid = [c for c in passed_parms
-                            if c != align_on and c in study_cols]
+                            if c != align_on and c in base_cols]
             passed_missing = [c for c in passed_parms
-                              if c != align_on and c not in study_cols]
+                              if c != align_on and c not in base_cols]
             if passed_missing:
-                print(f"Warning: passed_parms not in study '{study_ds.title}' (ignored): {passed_missing}")
+                print(f"Warning: passed_parms not in base '{base_ds.title}' (ignored): {passed_missing}")
 
-            # Ownership keeps other sets' phantom columns (e.g. the DL_/DLPCT_/
-            # METHOD outputs of a previous delta) out of the base view; this
-            # drop removes the base set's own genuinely all-NaN columns so they
-            # are not carried into the result as empty context — but never the
-            # align key or an actual delta parameter.
-            df_base = base_sorted
-            phantom = [c for c in df_base.columns
-                       if c != align_on and c not in valid_parms and base_all_nan[c]]
+            # --- Study side: every study column, anchored and sorted on align_on. ---
+            # study_ds.df materializes a fresh slice of the combined frame; ownership
+            # already excludes other sets' phantom columns (e.g. the DL_/DLPCT_/
+            # METHOD outputs of a previous delta) from the view, so the NaN scan
+            # below only spans the study set's own width. It drops the study set's
+            # own genuinely all-NaN columns so they are not carried into the result
+            # as empty context — but never the align key or an actual delta parameter.
+            study_raw = study_ds.df
+            if study_raw.columns.duplicated().any():
+                study_raw = study_raw.loc[:, ~study_raw.columns.duplicated()]
+            df_study = study_raw.sort_values(align_on).reset_index(drop=True)
+            study_all_nan = df_study.isna().all()
+            phantom = [c for c in df_study.columns
+                       if c != align_on and c not in valid_parms and study_all_nan[c]]
             if phantom:
-                df_base = df_base.drop(columns=phantom)
+                df_study = df_study.drop(columns=phantom)
 
-            # --- Study side: align_on + (delta parms ∪ passthroughs), renamed *_STUDY. ---
+            # --- Base side: align_on + (delta parms ∪ passthroughs), renamed *_BASE. ---
             # ds.cols keeps the first occurrence of any duplicated label and only
-            # copies the named columns, never the study set's full width.
-            study_need = list(dict.fromkeys([align_on] + valid_parms + passed_valid))
-            df_study = (study_ds.cols(study_need)
-                        .sort_values(align_on).reset_index(drop=True))
-            df_study = df_study.rename(
-                columns={c: f"{c}_STUDY" for c in df_study.columns if c != align_on})
+            # copies the named columns, never the base set's full width.
+            base_need = list(dict.fromkeys([align_on] + valid_parms + passed_valid))
+            df_base = (base_ds.cols(base_need)
+                       .sort_values(align_on).reset_index(drop=True))
+            df_base = df_base.rename(
+                columns={c: f"{c}_BASE" for c in df_base.columns if c != align_on})
 
-            # Guard against a pathological base column already named like a *_STUDY col;
-            # study values win for that name so the merge stays clean.
-            overlap = (set(df_base.columns) & set(df_study.columns)) - {align_on}
+            # Guard against a pathological study column already named like a *_BASE col;
+            # base values win for that name so the merge stays clean.
+            overlap = (set(df_study.columns) & set(df_base.columns)) - {align_on}
             if overlap:
-                print(f"Warning: base column(s) collide with study '*_STUDY' names and were "
-                      f"dropped in favor of study values: {sorted(overlap)}")
-                df_base = df_base.drop(columns=list(overlap))
+                print(f"Warning: study column(s) collide with base '*_BASE' names and were "
+                      f"dropped in favor of base values: {sorted(overlap)}")
+                df_study = df_study.drop(columns=list(overlap))
 
-            # Build `merged`: align_on + base columns (original names) + study
-            # columns (renamed *_STUDY). Two ways to populate it, both yielding
+            # Build `merged`: align_on + study columns (original names) + base
+            # columns (renamed *_BASE). Two ways to populate it, both yielding
             # the same column shape so the delta math below is shared:
-            #   - default: nearest/forward/backward merge_asof on the base rows.
+            #   - default: nearest/forward/backward merge_asof on the study rows.
             #   - x_ins:   rows at the requested align_on values, each side read
             #              off an interpolated curve (or nearest raw row).
             base_methods = study_methods = None
@@ -4153,7 +4179,7 @@ class UnichartNotebook:
                 merge_kwargs = dict(on=align_on, direction=direction)
                 if tolerance is not None:
                     merge_kwargs['tolerance'] = tolerance
-                merged = pd.merge_asof(df_base, df_study, **merge_kwargs)
+                merged = pd.merge_asof(df_study, df_base, **merge_kwargs)
             else:
                 x_arr = np.atleast_1d(x_ins).astype(float)
                 base_spec = kind if kind is not None else base_ds.reg_order
@@ -4163,18 +4189,11 @@ class UnichartNotebook:
 
                 # Collect columns in a dict and build the frame once — per-column
                 # df[c] = ... inserts fragment the frame (PerformanceWarning) on
-                # wide base sets.
+                # wide study sets.
                 data = {align_on: x_arr}
                 base_methods, study_methods = set(), set()
-                base_key = _nearest_key(df_base, align_on)
                 study_key = _nearest_key(df_study, align_on)
-                for c in df_base.columns:
-                    if c == align_on:
-                        continue
-                    data[c], m = _read_col_at(
-                        df_base, align_on, c, x_arr, base_interp, base_spec, *base_key)
-                    if pd.api.types.is_numeric_dtype(df_base[c]):
-                        base_methods.add(m)
+                base_key = _nearest_key(df_base, align_on)
                 for c in df_study.columns:
                     if c == align_on:
                         continue
@@ -4182,30 +4201,38 @@ class UnichartNotebook:
                         df_study, align_on, c, x_arr, study_interp, study_spec, *study_key)
                     if pd.api.types.is_numeric_dtype(df_study[c]):
                         study_methods.add(m)
+                for c in df_base.columns:
+                    if c == align_on:
+                        continue
+                    data[c], m = _read_col_at(
+                        df_base, align_on, c, x_arr, base_interp, base_spec, *base_key)
+                    if pd.api.types.is_numeric_dtype(df_base[c]):
+                        base_methods.add(m)
                 merged = pd.DataFrame(data)
 
             # Only parms that are numeric on BOTH sides can be subtracted. Anything
             # else (strings, categoricals, datetimes, object dtype) is carried
-            # through as a base/study side-by-side pair instead of crashing the
+            # through as a study/base side-by-side pair instead of crashing the
             # subtraction. dtype is checked post-merge so unmatched rows (NaN) and
             # any merge upcasting are reflected.
             numeric_parms, nonnumeric_parms = [], []
             for parm in valid_parms:
-                b_num = pd.api.types.is_numeric_dtype(merged[parm])
-                s_num = pd.api.types.is_numeric_dtype(merged[f"{parm}_STUDY"])
+                s_num = pd.api.types.is_numeric_dtype(merged[parm])
+                b_num = pd.api.types.is_numeric_dtype(merged[f"{parm}_BASE"])
                 (numeric_parms if (b_num and s_num) else nonnumeric_parms).append(parm)
 
             if nonnumeric_parms:
                 print(f"Warning: '{study_ds.title}' — cannot compute a numeric delta for "
-                      f"non-numeric column(s) {nonnumeric_parms}; carrying base and study "
-                      f"values side-by-side (as '<name>' and '<name>_STUDY') instead.")
+                      f"non-numeric column(s) {nonnumeric_parms}; carrying study and base "
+                      f"values side-by-side (as '<name>' and '<name>_BASE') instead.")
 
-            # Deltas (numeric parms only): base value keeps its original name,
-            # study value is *_STUDY. Appended in one concat rather than
-            # per-column inserts, which fragment the frame.
+            # Deltas (numeric parms only): study value keeps its original name,
+            # base value is *_BASE. Deltas stay base-referenced (study − base, and
+            # % of base). Appended in one concat rather than per-column inserts,
+            # which fragment the frame.
             delta_cols = {}
             for parm in numeric_parms:
-                b_col, s_col = parm, f"{parm}_STUDY"
+                s_col, b_col = parm, f"{parm}_BASE"
                 delta_cols[f"DL_{parm}"] = merged[s_col] - merged[b_col]
                 delta_cols[f"DLPCT_{parm}"] = np.where(
                     merged[b_col] == 0, np.nan,
@@ -4215,38 +4242,38 @@ class UnichartNotebook:
                 merged = pd.concat(
                     [merged, pd.DataFrame(delta_cols, index=merged.index)], axis=1)
 
-            # Which study *_STUDY columns survive into the result: explicit keeps,
+            # Which base *_BASE columns survive into the result: explicit keeps,
             # every non-numeric parm (so a carried string is actually comparable),
             # and the passthroughs.
-            study_keep_cols = ({f"{p}_STUDY" for p in keep_valid}
-                               | {f"{p}_STUDY" for p in nonnumeric_parms}
-                               | {f"{c}_STUDY" for c in passed_valid})
+            base_keep_cols = ({f"{p}_BASE" for p in keep_valid}
+                              | {f"{p}_BASE" for p in nonnumeric_parms}
+                              | {f"{c}_BASE" for c in passed_valid})
 
             # Assemble result with a predictable, plot-friendly column order:
             #   1. align_on
             #   2. per-parm block:
-            #        numeric     -> <P>, <P>_STUDY (if kept), DL_<P>, DLPCT_<P>
-            #        non-numeric -> <P>, <P>_STUDY            (no delta)
-            #   3. remaining base context columns (full base set, original names)
-            #   4. study passthrough columns (<name>_STUDY)
+            #        numeric     -> <P>, <P>_BASE (if kept), DL_<P>, DLPCT_<P>
+            #        non-numeric -> <P>, <P>_BASE            (no delta)
+            #   3. remaining study context columns (full study set, original names)
+            #   4. base passthrough columns (<name>_BASE)
             # Built as an ordered name list + one selection (not per-column
-            # inserts, which fragment the frame on wide base sets).
+            # inserts, which fragment the frame on wide study sets).
             ordered = [align_on]
             for parm in valid_parms:
-                ordered.append(parm)                              # base value (original name)
-                s_col = f"{parm}_STUDY"
+                ordered.append(parm)                              # study value (original name)
+                b_col = f"{parm}_BASE"
                 if parm in nonnumeric_parms:
-                    ordered.append(s_col)                         # study value, no delta
+                    ordered.append(b_col)                         # base value, no delta
                 else:
-                    if s_col in study_keep_cols:
-                        ordered.append(s_col)                     # study value (kept)
+                    if b_col in base_keep_cols:
+                        ordered.append(b_col)                     # base value (kept)
                     ordered.append(f"DL_{parm}")
                     ordered.append(f"DLPCT_{parm}")
 
-            ordered.extend(c for c in df_base.columns             # remaining base context
+            ordered.extend(c for c in df_study.columns            # remaining study context
                            if c not in ordered)
-            ordered.extend(s_col for c in passed_valid            # study passthroughs
-                           if (s_col := f"{c}_STUDY") not in ordered)
+            ordered.extend(b_col for c in passed_valid            # base passthroughs
+                           if (b_col := f"{c}_BASE") not in ordered)
             result = merged.loc[:, list(dict.fromkeys(ordered))].copy()
 
             # On the x_ins path, every row is synthetic: record how each side's
@@ -4261,10 +4288,14 @@ class UnichartNotebook:
                     print(f"Warning: '{study_ds.title}' — {nan_frac:.0%} of delta rows are NaN "
                           f"(large alignment gaps; consider tolerance= or a different direction=).")
 
-            new_title = f"Delta {base_ds.index}-{study_ds.index}"
+            new_title = study_ds.title if name_as_study else f"Delta {base_ds.index}-{study_ds.index}"
             ds = self._register_set(result, new_title)
             ds.set_type = 'delta'
             ds.delta_sets = {'base': base_ds.index, 'study': study_ds.index}
+            # Inherit the study set's colour and marker so the delta reads as a
+            # visual continuation of the study series it was derived from.
+            ds.color = study_ds.color
+            ds.marker = study_ds.marker
             if x_ins is not None:
                 ds.delta_sets['x_ins'] = [float(v) for v in x_arr]
                 ds.delta_sets['interp'] = interp
@@ -4306,6 +4337,10 @@ class UnichartNotebook:
         new_ds = self._register_set(combined, new_title)
         print(f"Loaded Set {new_ds.index}: {new_title} ({len(combined)} rows from {len(sources)} datasets)")
         return new_ds
+
+    def combine(self, uset_slice, title=None, ignore_index=True):
+        """Alias for :meth:`combine_sets`: concatenate datasets into a new set."""
+        return self.combine_sets(uset_slice, title=title, ignore_index=ignore_index)
 
     # ------------------------------------------------------------------
     # Axes Based Decorations (Lines/Highlights/Scale)
@@ -4910,6 +4945,21 @@ class UnichartNotebook:
         """
         from unichart_dashboard import dashboard as _dashboard
         return _dashboard(self, panels, **kwargs)
+
+    def dashboard_to_html(self, panels, path, **kwargs):
+        """Export a dashboard to a self-contained static HTML file.
+
+        Thin wrapper around :func:`unichart_dashboard.to_html`; imported lazily.
+        Renders each panel once and writes an offline board whose charts stay
+        interactive (hover / zoom / modebar) and, by default, keep a global
+        dataset filter in the header (``global_select=True``) that re-slices
+        every panel client-side, seeded from the notebook's current selection.
+        The rest of the editing chrome (dropdowns, theme switch) is dropped.
+        See that function for the keyword options (``ncols``, ``width``,
+        ``height``, ``title``, ``embed_js``, ``global_select``).
+        """
+        from unichart_dashboard import to_html as _to_html
+        return _to_html(self, panels, path, **kwargs)
 
     # ------------------------------------------------------------------
     # The bar Command
@@ -5869,59 +5919,156 @@ class UnichartNotebook:
 
         return df
 
-    def help(self):
+    # Method groupings for help(). A method left out of every list still shows,
+    # under "Other" (help() fills that bucket by set-difference), so a newly
+    # added method is never silently hidden; names here that no longer exist are
+    # simply skipped.
+    _HELP_CATEGORIES = [
+        ("Loading & data",   ['load', 'load_df', 'load_clipboard', 'combine_sets',
+                              'combine', 'add_column', 'set_column']),
+        ("Selection",        ['select', 'selected', 'omit', 'query', 'restore',
+                              'clear_data']),
+        ("Plotting",         ['plot', 'plot_ymult', 'plot_type', 'bar', 'box',
+                              'contour', 'histogram', 'line', 'highlight',
+                              'save_png', 'dashboard']),
+        ("Styling & format", ['color', 'marker', 'markersize', 'alpha', 'fill',
+                              'linestyle', 'linewidth', 'edgewidth', 'hue',
+                              'hue_palette', 'reg_order', 'set_color_palette',
+                              'var_format', 'clear_var_format', 'list_var_formats',
+                              'set_display_parms', 'set_title', 'set_default_format',
+                              'reset_format', 'set_font_sizes', 'get_font_sizes',
+                              'toggle_darkmode', 'scale', 'set_plot_size',
+                              'set_static_images']),
+        ("Analysis & stats", ['delta', 'table', 'table_read', 'summary', 'reg_info',
+                              'min', 'max', 'mean', 'median']),
+        ("Info",             ['list_sets', 'list_parms', 'refresh_own_columns',
+                              'help']),
+    ]
+
+    def _help_sig(self, name):
+        """Signature of a public method with ``self`` dropped (rendered off the
+        bound method), falling back gracefully when inspect can't build one."""
+        try:
+            return str(inspect.signature(getattr(self, name)))
+        except (ValueError, TypeError):
+            return "(...)"
+
+    def _help_method_line(self, name, func):
+        """Two-line overview entry: signature + first docstring line."""
+        doc = inspect.getdoc(func)
+        preview = doc.split('\n')[0] if doc else "No description available."
+        print(f"  • {name}{self._help_sig(name)}")
+        print(f"      → {preview}")
+
+    @staticmethod
+    def _help_attr_line(name, val):
+        s = str(val)
+        if len(s) > 100:
+            s = s[:100] + "..."
+        return f"  • {name}: {type(val).__name__} = {s}"
+
+    def _help_topic(self, key):
+        """Detailed help for a single method or a category (see :meth:`help`)."""
+        cls = self.__class__
+        func = getattr(cls, key, None)
+        if callable(func) and not key.startswith('_'):
+            print("=" * 70)
+            print(f"📖 {key}{self._help_sig(key)}")
+            print("=" * 70)
+            print(inspect.getdoc(func) or "No description available.")
+            return
+        for label, names in self._HELP_CATEGORIES:
+            if key.lower() == label.lower():
+                print(f"📂 {label}")
+                print("-" * 70)
+                for n in names:
+                    f = getattr(cls, n, None)
+                    if f is not None:
+                        self._help_method_line(n, f)
+                return
+        import difflib
+        public = [n for n, _ in inspect.getmembers(cls, inspect.isfunction)
+                  if not n.startswith('_')]
+        close = difflib.get_close_matches(key, public, n=5)
+        print(f"No method or category named {key!r}.")
+        print("Did you mean: " + ", ".join(close) + " ?" if close
+              else "Call nb.help() for the full list.")
+
+    def help(self, topic=None):
+        """Show a categorized overview of the notebook API, or detailed help
+        for a single method or category.
+
+        Parameters
+        ----------
+        topic : str | None
+            ``None`` (default) prints the categorized method and attribute
+            overview. A method name (e.g. ``'delta'``) prints that method's full
+            signature and docstring; a category name (e.g. ``'Plotting'``) lists
+            just that group. An unknown topic suggests the closest matches.
         """
-        Display help information for the UnichartNotebook class.
-        """
+        if topic is not None:
+            self._help_topic(str(topic).strip())
+            return
+
         print("=" * 70)
         print("📚 UnichartNotebook HELP")
         print("=" * 70)
-        
+
         cls = self.__class__
-        if cls.__doc__:
+        doc = inspect.getdoc(cls)
+        if doc:
             print("\n📋 CLASS DESCRIPTION:")
-            print(cls.__doc__)
-        else:
-            print("\n⚠️  No class docstring found.")
+            print(doc)
 
-        methods = inspect.getmembers(cls, predicate=inspect.isfunction)
-        public_methods = [m for m in methods if not m[0].startswith('_') or m[0] in ['__init__', '__repr__']]
-
-        print("\n🔍 PUBLIC METHODS:")
+        # Methods, grouped. Anything not mapped falls into "Other" via
+        # set-difference so nothing is ever hidden.
+        public = {n: f for n, f in inspect.getmembers(cls, inspect.isfunction)
+                  if not n.startswith('_')}
+        print("\n🔍 PUBLIC METHODS  (call nb.help('name') for full details):")
         print("-" * 70)
-        for name, func in public_methods:
-            sig = inspect.signature(func)
-            doc = inspect.getdoc(func) or "No description available."
-            doc_preview = doc.split('\n')[0] if doc else ""
-            print(f"• {name}{sig}")
-            print(f"  → {doc_preview}")
-            print()
-        
-        print("🛠️  PUBLIC ATTRIBUTES (Instance):")
-        print("-" * 70)
-        attrs = []
-        for attr, value in self.__dict__.items():
-            if not attr.startswith('_'):
-                attrs.append((attr, value))
+        shown = set()
+        for label, names in self._HELP_CATEGORIES:
+            entries = [n for n in names if n in public]
+            if not entries:
+                continue
+            print(f"\n{label}")
+            for n in entries:
+                self._help_method_line(n, public[n])
+                shown.add(n)
+        leftover = sorted(set(public) - shown)
+        if leftover:
+            print("\nOther")
+            for n in leftover:
+                self._help_method_line(n, public[n])
 
+        # Attributes, split into user-facing config vs internal plot memory
+        # (the volatile ``last_*`` cache). The rule is prefix-based rather than a
+        # fixed list, so a new attribute defaults to Config and stays visible.
+        print("\n🛠️  ATTRIBUTES:")
+        print("-" * 70)
+        attrs = {a: v for a, v in self.__dict__.items() if not a.startswith('_')}
         if not attrs:
             print("No public instance attributes found.")
         else:
-            for name, val in sorted(attrs):
-                val_str = str(val)[:100]
-                if len(str(val)) > 100:
-                    val_str += "..."
-                print(f"• {name}: {type(val).__name__} = {val_str}")
+            config = {a: v for a, v in attrs.items() if not a.startswith('last_')}
+            state = {a: v for a, v in attrs.items() if a.startswith('last_')}
+            if config:
+                print("\nConfig")
+                for name in sorted(config):
+                    print(self._help_attr_line(name, config[name]))
+            if state:
+                print("\nState (last-plot memory)")
+                for name in sorted(state):
+                    print(self._help_attr_line(name, state[name]))
 
-        print("\n💡 QUICK START TIPS:")
+        print("\n💡 QUICK START:")
         print("-" * 70)
         print("1. Load data:       nb.load_df(df, title='MyData')")
         print("2. Select datasets: nb.select([0, 1])")
         print("3. Plot:            nb.plot(x='time', y='value')")
         print("4. Multi-Y plot:    nb.plot_ymult(x='time', y=['Temp', 'Pressure'])")
         print("5. Variable format: nb.var_format('Temp', linestyle='--')")
-        print("6. View help:       nb.help()")
-        print("\nSee method signatures above for full parameters.")
+        print("6. Method details:  nb.help('delta')")
 
         print("\n" + "=" * 70)
 
