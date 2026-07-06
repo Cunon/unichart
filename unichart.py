@@ -3909,7 +3909,8 @@ class UnichartNotebook:
     def delta(self, base_idx, study_indices, align_on=None, delta_parms=None,
               passed_parms=None, keep_parms=None,
               direction='nearest', tolerance=None,
-              x_ins=None, interp='both', kind=None, name_as_study=False):
+              x_ins=None, interp='both', kind=None, name_as_study=False,
+              name_by='index'):
         """Compute deltas (absolute and %) between each study dataset and the base.
 
         The resulting delta dataset is anchored on the STUDY dataset's rows: every
@@ -3987,11 +3988,17 @@ class UnichartNotebook:
             Only used when ``x_ins`` is given.
         name_as_study : bool
             When ``True``, title each delta set after its study set instead of the
-            default ``'Delta {base}-{study}'``. The study set's colour and marker
-            are inherited regardless of this flag.
+            default ``'Set {study} rel. to Set {base}'``. The study set's colour
+            and marker are inherited regardless of this flag.
+        name_by : 'index' | 'name'
+            What identifies each set in the default title: ``'index'`` (default)
+            uses the set indices, ``'name'`` uses the set titles. Ignored when
+            ``name_as_study=True``.
         """
         if x_ins is not None and interp not in ('base', 'study', 'both'):
             raise ValueError("interp must be 'base', 'study', or 'both'.")
+        if name_by not in ('index', 'name', 'title', 'settitle'):
+            raise ValueError("name_by must be 'index' or 'name'.")
         # Resolve align_on from last plot state
         if align_on is None:
             lx = self.last_x
@@ -4288,7 +4295,12 @@ class UnichartNotebook:
                     print(f"Warning: '{study_ds.title}' — {nan_frac:.0%} of delta rows are NaN "
                           f"(large alignment gaps; consider tolerance= or a different direction=).")
 
-            new_title = study_ds.title if name_as_study else f"Delta {base_ds.index}-{study_ds.index}"
+            if name_as_study:
+                new_title = study_ds.title
+            elif name_by.lower() in ['name', 'title', 'settitle']:
+                new_title = f"{study_ds.title} rel. to {base_ds.title}"
+            else:
+                new_title = f"Set {study_ds.index} rel. to Set {base_ds.index}"
             ds = self._register_set(result, new_title)
             ds.set_type = 'delta'
             ds.delta_sets = {'base': base_ds.index, 'study': study_ds.index}
