@@ -277,7 +277,13 @@ def _subplot_refs(row, col, ncols):
 # -----------------------------------------------------------------------------
 # Variable Format Resolver (used by multi-y plot)
 # -----------------------------------------------------------------------------
-_VAR_FORMAT_KEYS = ('color', 'marker', 'linestyle', 'markersize', 'linewidth', 'alpha')
+_VAR_FORMAT_KEYS = ('color', 'marker', 'linestyle', 'markersize', 'linewidth', 'alpha', 'style')
+
+# Rendering styles for bar-plot overlay columns (the ``markers=`` argument of
+# ``unibar``/``unibar_per_dataset``). 'marker' is the classic symbol overlay;
+# 'tick' draws a horizontal dash at the value (bullet-chart target); 'whisker'
+# adds a stem connecting that dash to the top of its bar.
+_OVERLAY_STYLES = ('marker', 'tick', 'whisker')
 
 # Sentinel for ``default_format['marker']`` meaning "assign per-index from
 # marker_map" (the historical behavior). A concrete marker string instead pins
@@ -328,6 +334,54 @@ def _resolve_var_format(dataset, variable, variable_formats=None):
         'edgewidth':  getattr(dataset, 'edgewidth', 1),
         'fill':       getattr(dataset, 'fill', True),
     }
+
+
+def _overlay_marker_kw(style, symbol, color, size, alpha, edge_color,
+                       values=None, bar_values=None,
+                       stem_dash='solid', stem_width=2):
+    """Marker (and, for 'whisker', error-bar) kwargs for a bar-overlay Scatter
+    trace, per the _OVERLAY_STYLES contract. 'tick' and 'whisker' render a
+    horizontal 'line-ew' dash at the value — line symbols only draw their
+    outline, so the column color goes on ``marker.line``. 'whisker'
+    additionally draws a stem spanning the gap between ``values`` (the overlay
+    column) and ``bar_values`` (the bar column it sits on).
+
+    The error-bar stem only exists for ``stem_dash='solid'`` (Plotly error
+    bars cannot dash); dashed stems are drawn by a companion line trace built
+    with ``_whisker_stem_kw``, and ``stem_dash=None`` means no stem at all."""
+    if style not in ('tick', 'whisker'):
+        return dict(marker=dict(
+            symbol=symbol, size=size, color=color, opacity=alpha,
+            line=dict(width=1.5, color=edge_color),
+        ))
+    kw = dict(marker=dict(
+        symbol='line-ew', size=max(size, 16), opacity=alpha,
+        color=color, line=dict(width=3, color=color),
+    ))
+    if style == 'whisker' and bar_values is not None and stem_dash == 'solid':
+        delta = values - bar_values           # + when value sits above its bar
+        kw['error_y'] = dict(
+            type='data', symmetric=False,
+            array=(-delta).clip(lower=0),     # stem up to a bar top above the value
+            arrayminus=delta.clip(lower=0),   # stem down to a bar top below the value
+            color=color, thickness=stem_width, width=0,
+        )
+    return kw
+
+
+def _whisker_stem_kw(x, values, bar_values, color, alpha, dash, width):
+    """Kwargs for a whisker stem drawn as explicit None-separated line
+    segments (one vertical segment per bar, value -> bar top). Used instead of
+    the error-bar stem when a dashed linestyle is requested."""
+    xs, ys = [], []
+    for xi, v, b in zip(x, values, bar_values):
+        if pd.isna(v) or pd.isna(b):
+            continue
+        xs += [xi, xi, None]
+        ys += [v, b, None]
+    return dict(x=xs, y=ys, mode='lines',
+                line=dict(color=color, dash=dash, width=width),
+                opacity=alpha, hoverinfo='skip', showlegend=False)
 
 
 def _fill_marker_kw(color, fill, edgewidth=1):
@@ -1453,10 +1507,14 @@ def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
     nrows, ncols = _calc_grid(n_y, nrows, ncols)
 
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles or y_list)
+    # scattermode='group' makes the marker/tick/whisker overlays honor their
+    # offsetgroup so they sit over their own bar instead of the category
+    # center. Only valid when bars themselves are offset (barmode='group').
     fig.update_layout(**_base_layout(
         darkmode, suptitle or f"Bar Comparison: {x}", figsize,
         barmode=barmode, showlegend=True,
-        legend=dict(orientation="h")
+        legend=dict(orientation="h"),
+        **({'scattermode': 'group'} if barmode == 'group' else {})
     ))
 
     edge_default = 'white' if darkmode else 'black'
@@ -1496,6 +1554,12 @@ def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
                 m_color  = var_fmt.get('color') or (color if color else ds.color)
                 m_size   = var_fmt.get('markersize', max(ds.markersize, 10))
                 m_alpha  = var_fmt.get('alpha', ds.alpha)
+                m_style  = var_fmt.get('style', 'marker')
+                # linestyle/linewidth drive the whisker stem: dash style and
+                # thickness. 'None' linestyles suppress the stem entirely.
+                m_dash   = (get_plotly_linestyle(var_fmt['linestyle'])
+                            if var_fmt.get('linestyle') is not None else 'solid')
+                m_lw     = var_fmt.get('linewidth', 2)
 
                 # Legend strategy:
                 #   styled marker      -> ONE entry per (marker_col, subplot), named just the column
@@ -1519,17 +1583,27 @@ def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
                     legendgroup=legend_group,
                     offsetgroup=offset_group,
                     alignmentgroup="bars",
-                    marker=dict(
-                        symbol=m_symbol,
-                        size=m_size,
-                        color=m_color,
-                        opacity=m_alpha,
-                        line=dict(width=1.5, color=edge_default),
-                    ),
+                    **_overlay_marker_kw(m_style, m_symbol, m_color, m_size,
+                                         m_alpha, edge_default,
+                                         values=df[m_col], bar_values=df[yi],
+                                         stem_dash=m_dash, stem_width=m_lw),
                     showlegend=show,
                     hovertemplate=(f"<b>{ds.title}</b><br>{x}: %{{x}}<br>"
                                    f"{m_col}: %{{y:.4g}}<extra></extra>")
                 ), row=row, col=col)
+
+                # Dashed stems can't ride on the marker trace's error bars
+                # (always solid), so they get a companion line trace tied to
+                # the same legend group.
+                if m_style == 'whisker' and m_dash and m_dash != 'solid':
+                    fig.add_trace(go.Scatter(
+                        name=f"{trace_name} (stem)",
+                        legendgroup=legend_group,
+                        offsetgroup=offset_group,
+                        alignmentgroup="bars",
+                        **_whisker_stem_kw(df[x], df[m_col], df[yi],
+                                           m_color, m_alpha, m_dash, m_lw),
+                    ), row=row, col=col)
 
     fig.update_xaxes(title_text=xlabel or x)
     fig.update_yaxes(title_text=ylabel or "Value")
@@ -1558,7 +1632,8 @@ def unibar_per_dataset(list_of_datasets, x, y, markers=None, variable_formats=No
     fig.update_layout(**_base_layout(
         darkmode, suptitle or "Dataset Bar Comparison", figsize,
         barmode=barmode,
-        legend=dict(orientation="h")
+        legend=dict(orientation="h"),
+        **({'scattermode': 'group'} if barmode == 'group' else {})
     ))
 
     edge_default = 'white' if darkmode else 'black'
@@ -1595,22 +1670,43 @@ def unibar_per_dataset(list_of_datasets, x, y, markers=None, variable_formats=No
             m_color  = var_fmt.get('color') or color_cycle[(len(y_list) + m_idx) % len(color_cycle)]
             m_size   = var_fmt.get('markersize', 12)
             m_alpha  = var_fmt.get('alpha', 1.0)
+            m_style  = var_fmt.get('style', 'marker')
+            m_dash   = (get_plotly_linestyle(var_fmt['linestyle'])
+                        if var_fmt.get('linestyle') is not None else 'solid')
+            m_lw     = var_fmt.get('linewidth', 2)
+
+            # Color encodes variable in this view, so an overlay column isn't
+            # tied to one bar series: tick/whisker glyphs attach to the FIRST
+            # plotted y variable's bars (classic markers stay at the category
+            # center, as before).
+            anchor = next((yy for yy in y_list if yy in df.columns), None)
+            attach = m_style in ('tick', 'whisker') and anchor is not None
+            group_kw = ({'offsetgroup': f"var_{anchor}", 'alignmentgroup': "bars"}
+                        if attach else {})
 
             fig.add_trace(go.Scatter(
                 x=df[x], y=df[m_col],
                 mode='markers',
                 name=m_col,
                 legendgroup=f"marker_{m_col}",
-                marker=dict(
-                    symbol=m_symbol,
-                    size=m_size,
-                    color=m_color,
-                    opacity=m_alpha,
-                    line=dict(width=1.5, color=edge_default),
-                ),
+                **group_kw,
+                **_overlay_marker_kw(m_style, m_symbol, m_color, m_size,
+                                     m_alpha, edge_default,
+                                     values=df[m_col],
+                                     bar_values=df[anchor] if attach else None,
+                                     stem_dash=m_dash, stem_width=m_lw),
                 showlegend=(idx_ds == 0),
                 hovertemplate=f"<b>{m_col}</b><br>{x}: %{{x}}<br>%{{y:.4g}}<extra></extra>"
             ), row=row, col=col)
+
+            if m_style == 'whisker' and attach and m_dash and m_dash != 'solid':
+                fig.add_trace(go.Scatter(
+                    name=f"{m_col} (stem)",
+                    legendgroup=f"marker_{m_col}",
+                    **group_kw,
+                    **_whisker_stem_kw(df[x], df[m_col], df[anchor],
+                                       m_color, m_alpha, m_dash, m_lw),
+                ), row=row, col=col)
 
     fig.update_xaxes(title_text=x)
     if y_lim: fig.update_yaxes(range=y_lim)
@@ -3429,7 +3525,7 @@ class UnichartNotebook:
     # Variable-level formatting overrides
     # ------------------------------------------------------------------
     def var_format(self, variable, color=None, marker=None, linestyle=None,
-                   markersize=None, linewidth=None, alpha=None):
+                   markersize=None, linewidth=None, alpha=None, style=None):
         """
         Set persistent per-variable formatting overrides.
 
@@ -3439,15 +3535,26 @@ class UnichartNotebook:
 
         Pass the string 'reset' as the value to clear a single attribute.
 
+        `style` only affects bar-plot overlay columns (the `markers=` argument
+        of `nb.bar`): 'marker' (default symbol overlay), 'tick' (horizontal
+        dash at the value), or 'whisker' (dash plus a stem down/up to the top
+        of the bar). For `style='whisker'`, `linestyle` sets the stem's dash
+        pattern ('-', '--', '-.', ':'; 'None' hides the stem) and `linewidth`
+        its thickness.
+
         Examples
         --------
         nb.var_format('Temperature', linestyle='--')         # all Temp lines dashed
         nb.var_format('Pressure', color='blue', marker='s')  # Pressure forced blue squares
         nb.var_format('Pressure', color='reset')             # remove just the color override
+        nb.var_format('EGT_LIMIT', style='whisker', color='red')
         """
+        if style is not None and style != 'reset' and style not in _OVERLAY_STYLES:
+            raise ValueError(f"style must be one of {_OVERLAY_STYLES}, got {style!r}")
         fmt = self.variable_formats.setdefault(variable, {})
         pairs = {'color': color, 'marker': marker, 'linestyle': linestyle,
-                 'markersize': markersize, 'linewidth': linewidth, 'alpha': alpha}
+                 'markersize': markersize, 'linewidth': linewidth, 'alpha': alpha,
+                 'style': style}
         for k, v in pairs.items():
             if v is None:
                 continue
@@ -4991,6 +5098,11 @@ class UnichartNotebook:
         Marker overlay formatting is controlled via `var_format`. Examples:
             nb.var_format('EGT_LIMIT', color='red', marker='*', markersize=18)
             nb.bar(x='PHASE', y='EGT', markers='EGT_LIMIT')
+
+        An overlay column can also render as a tick or whisker instead of a
+        marker symbol, via the `style` key of `var_format`:
+            nb.var_format('EGT_LIMIT', style='tick')     # horizontal dash at the value
+            nb.var_format('EGT_LIMIT', style='whisker')  # dash + stem to the bar top
         """
         if figsize is None: figsize = self.figsize
         barmode = self._apply_default('barmode', barmode, 'group')
