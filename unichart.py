@@ -2227,7 +2227,26 @@ def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', 
 
     return _show_or_return(fig, return_axes)
 
-def unibar_datasets_as_x(list_of_datasets, y, agg='mean', variable_formats=None,
+def _agg_column(ds, col, agg):
+    """Aggregate one dataset column to a scalar per the ``agg`` rule; None when
+    the column is absent or all-NaN."""
+    if col not in ds.columns:
+        return None
+    valid_data = ds[col].dropna()
+    if valid_data.empty:
+        return None
+    if agg == 'mean': return valid_data.mean()
+    if agg == 'sum': return valid_data.sum()
+    if agg == 'max': return valid_data.max()
+    if agg == 'min': return valid_data.min()
+    if agg == 'median': return valid_data.median()
+    if agg == 'first': return valid_data.iloc[0]
+    if agg == 'last': return valid_data.iloc[-1]
+    print(f"Warning: Unknown agg '{agg}', defaulting to mean.")
+    return valid_data.mean()
+
+
+def unibar_datasets_as_x(list_of_datasets, y, agg='mean', markers=None, variable_formats=None,
                          suptitle=None, darkmode=False,
                          figsize=(12, 8), axis_limits=None, return_axes=False):
     """
@@ -2235,10 +2254,17 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', variable_formats=None,
     and the bars are the different Y-variables, each scaled to their own Y-axis.
     Includes an 'agg' parameter to handle multi-row datasets.
 
+    ``markers`` columns are aggregated with the same ``agg`` rule and overlaid
+    as marker/tick/whisker glyphs (per the ``style`` key of their
+    ``variable_formats`` entry). Overlays share the FIRST y variable's axis
+    and, for tick/whisker, attach to its bars — the same anchor rule as
+    ``unibar_per_dataset``.
+
     Per-variable ``variable_formats`` overrides apply here: a variable's
     ``color`` recolors its bar and its Y-axis (overriding the default color
-    cycle), and ``alpha`` sets the bar opacity. Other format attributes
-    (marker/linestyle/etc.) have no meaning in this chart and are ignored.
+    cycle), and ``alpha`` sets the bar opacity. Marker columns additionally
+    honor ``marker``/``markersize``/``style`` and ``linestyle``/``linewidth``
+    (the whisker stem).
     """
     active_ds = [d for d in list_of_datasets if d.select]
     if not active_ds:
@@ -2246,6 +2272,7 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', variable_formats=None,
         return None
 
     y_list = y if isinstance(y, list) else [y]
+    markers_list = markers if isinstance(markers, list) else ([markers] if markers else [])
     axis_limits = axis_limits or {}
     variable_formats = variable_formats or {}
     color_cycle = px.colors.qualitative.Plotly
@@ -2264,25 +2291,7 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', variable_formats=None,
         var_color = var_fmt.get('color', color_cycle[idx_y % len(color_cycle)])
         var_alpha = var_fmt.get('alpha')
 
-        y_data = []
-        for ds in active_ds:
-            if yi in ds.columns:
-                valid_data = ds[yi].dropna()
-                if valid_data.empty:
-                    val = None
-                elif agg == 'mean': val = valid_data.mean()
-                elif agg == 'sum': val = valid_data.sum()
-                elif agg == 'max': val = valid_data.max()
-                elif agg == 'min': val = valid_data.min()
-                elif agg == 'median': val = valid_data.median()
-                elif agg == 'first': val = valid_data.iloc[0]
-                elif agg == 'last': val = valid_data.iloc[-1]
-                else:
-                    print(f"Warning: Unknown agg '{agg}', defaulting to mean.")
-                    val = valid_data.mean()
-                y_data.append(val)
-            else:
-                y_data.append(None)
+        y_data = [_agg_column(ds, yi, agg) for ds in active_ds]
 
         y_axis_name = "y" if idx_y == 0 else f"y{idx_y + 1}"
 
@@ -2316,12 +2325,65 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', variable_formats=None,
             axis_layout.update(dict(overlaying='y', side='right', anchor='free', position=pos))
             fig.update_layout({f"yaxis{idx_y + 1}": axis_layout})
 
+    edge_default = 'white' if darkmode else 'black'
+    anchor_vals = pd.Series([_agg_column(ds, y_list[0], agg) for ds in active_ds],
+                            dtype=float)
+
+    for m_idx, m_col in enumerate(markers_list):
+        m_vals = pd.Series([_agg_column(ds, m_col, agg) for ds in active_ds],
+                           dtype=float)
+        if m_vals.isna().all():
+            continue
+
+        var_fmt = variable_formats.get(m_col, {})
+        m_symbol = get_plotly_marker(var_fmt.get('marker') or marker_map(m_idx))
+        m_color  = var_fmt.get('color') or color_cycle[(len(y_list) + m_idx) % len(color_cycle)]
+        m_size   = var_fmt.get('markersize', 12)
+        m_alpha  = var_fmt.get('alpha', 1.0)
+        m_style  = var_fmt.get('style', 'marker')
+        m_dash   = (get_plotly_linestyle(var_fmt['linestyle'])
+                    if var_fmt.get('linestyle') is not None else 'solid')
+        m_lw     = var_fmt.get('linewidth', 2)
+
+        # Overlays live on the first y variable's axis; tick/whisker glyphs
+        # additionally attach to its bars via its offsetgroup (classic markers
+        # stay at the category center).
+        attach = m_style in ('tick', 'whisker') and anchor_vals.notna().any()
+        group_kw = ({'offsetgroup': '0', 'alignmentgroup': 'bars'}
+                    if attach else {})
+
+        fig.add_trace(go.Scatter(
+            x=x_labels, y=m_vals,
+            mode='markers',
+            name=m_col,
+            legendgroup=f"marker_{m_col}",
+            yaxis='y',
+            **group_kw,
+            **_overlay_marker_kw(m_style, m_symbol, m_color, m_size,
+                                 m_alpha, edge_default,
+                                 values=m_vals,
+                                 bar_values=anchor_vals if attach else None,
+                                 stem_dash=m_dash, stem_width=m_lw),
+            hovertemplate=f"<b>{m_col}</b><br>%{{x}}<br>%{{y:.4g}}<extra></extra>"
+        ))
+
+        if m_style == 'whisker' and attach and m_dash and m_dash != 'solid':
+            fig.add_trace(go.Scatter(
+                name=f"{m_col} (stem)",
+                legendgroup=f"marker_{m_col}",
+                yaxis='y',
+                **group_kw,
+                **_whisker_stem_kw(x_labels, m_vals, anchor_vals,
+                                   m_color, m_alpha, m_dash, m_lw),
+            ))
+
     fig.update_layout(**_base_layout(
         darkmode, suptitle or f"Variables by Dataset ({agg})", figsize,
         barmode='group',
         xaxis=dict(domain=[0, x_domain_end], title="Dataset"),
         margin=dict(r=50 + (extras_count * 80)),
-        legend=dict(orientation="h")
+        legend=dict(orientation="h"),
+        scattermode='group'
     ))
 
     return _show_or_return(fig, return_axes)
@@ -5118,10 +5180,8 @@ class UnichartNotebook:
         y_list = y if isinstance(y, list) else [y]
 
         if by == 'dataset_x':
-            if markers:
-                print("Warning: `markers` is not supported with by='dataset_x'.")
             fig = unibar_datasets_as_x(
-                list_of_datasets=self.sets, y=y_list, agg=agg,
+                list_of_datasets=self.sets, y=y_list, agg=agg, markers=markers,
                 variable_formats=self.variable_formats,         # <-- pass through
                 suptitle=suptitle or self.suptitle, figsize=figsize,
                 darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
