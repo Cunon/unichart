@@ -2256,9 +2256,12 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', markers=None, variable
 
     ``markers`` columns are aggregated with the same ``agg`` rule and overlaid
     as marker/tick/whisker glyphs (per the ``style`` key of their
-    ``variable_formats`` entry). Overlays share the FIRST y variable's axis
-    and, for tick/whisker, attach to its bars — the same anchor rule as
-    ``unibar_per_dataset``.
+    ``variable_formats`` entry). Overlays pair positionally with the y
+    variables: the i-th marker column rides on the i-th y variable's axis
+    and, for tick/whisker, attaches to its bars (so ``y=['T41','RU'],
+    markers=['T41_LIMIT','RU_LIMIT']`` puts each limit on its own variable's
+    scale). Markers beyond the number of y variables fall back to the first
+    axis.
 
     Per-variable ``variable_formats`` overrides apply here: a variable's
     ``color`` recolors its bar and its Y-axis (overriding the default color
@@ -2326,14 +2329,19 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', markers=None, variable
             fig.update_layout({f"yaxis{idx_y + 1}": axis_layout})
 
     edge_default = 'white' if darkmode else 'black'
-    anchor_vals = pd.Series([_agg_column(ds, y_list[0], agg) for ds in active_ds],
-                            dtype=float)
 
     for m_idx, m_col in enumerate(markers_list):
         m_vals = pd.Series([_agg_column(ds, m_col, agg) for ds in active_ds],
                            dtype=float)
         if m_vals.isna().all():
             continue
+
+        # Positional pairing: the i-th marker column anchors to the i-th y
+        # variable (its axis, its bars); extras fall back to the first.
+        anchor_idx = m_idx if m_idx < len(y_list) else 0
+        anchor_axis = 'y' if anchor_idx == 0 else f"y{anchor_idx + 1}"
+        anchor_vals = pd.Series([_agg_column(ds, y_list[anchor_idx], agg)
+                                 for ds in active_ds], dtype=float)
 
         var_fmt = variable_formats.get(m_col, {})
         m_symbol = get_plotly_marker(var_fmt.get('marker') or marker_map(m_idx))
@@ -2345,11 +2353,10 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', markers=None, variable
                     if var_fmt.get('linestyle') is not None else 'solid')
         m_lw     = var_fmt.get('linewidth', 2)
 
-        # Overlays live on the first y variable's axis; tick/whisker glyphs
-        # additionally attach to its bars via its offsetgroup (classic markers
-        # stay at the category center).
+        # Tick/whisker glyphs attach to the anchor variable's bars via its
+        # offsetgroup (classic markers stay at the category center).
         attach = m_style in ('tick', 'whisker') and anchor_vals.notna().any()
-        group_kw = ({'offsetgroup': '0', 'alignmentgroup': 'bars'}
+        group_kw = ({'offsetgroup': str(anchor_idx), 'alignmentgroup': 'bars'}
                     if attach else {})
 
         fig.add_trace(go.Scatter(
@@ -2357,7 +2364,7 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', markers=None, variable
             mode='markers',
             name=m_col,
             legendgroup=f"marker_{m_col}",
-            yaxis='y',
+            yaxis=anchor_axis,
             **group_kw,
             **_overlay_marker_kw(m_style, m_symbol, m_color, m_size,
                                  m_alpha, edge_default,
@@ -2371,7 +2378,7 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', markers=None, variable
             fig.add_trace(go.Scatter(
                 name=f"{m_col} (stem)",
                 legendgroup=f"marker_{m_col}",
-                yaxis='y',
+                yaxis=anchor_axis,
                 **group_kw,
                 **_whisker_stem_kw(x_labels, m_vals, anchor_vals,
                                    m_color, m_alpha, m_dash, m_lw),
