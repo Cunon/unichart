@@ -5451,11 +5451,13 @@ class UnichartNotebook:
         if fig:
             z_list = z if isinstance(z, list) else [z]
             if by in ['sets', 'datasets']:
-                fig = self._apply_decorations(fig, [x], [y], 'sets', 1)
+                fig = self._apply_decorations(fig, [x], [y], 'sets', 1,
+                                              highlight_layer='above')
             else:
                 _nc = max(1, _calc_grid(len(z_list), nrows, ncols)[1])
                 fig = self._apply_decorations(fig, [x], [y], 'vars', _nc,
-                                              [(x, y) for _ in z_list])
+                                              [(x, y) for _ in z_list],
+                                              highlight_layer='above')
             if limit_x: fig.update_xaxes(range=limit_x)
             if limit_y: fig.update_yaxes(range=limit_y)
             fig = self._finalize(fig, suppress_legends, footer=footer or self.footer)
@@ -6273,9 +6275,16 @@ class UnichartNotebook:
             self.last_fig.layout = {}
             self.last_fig = None
 
-    def _apply_decorations(self, fig, x_vars, y_vars, mode, calc_ncols, plot_items=None):
+    def _apply_decorations(self, fig, x_vars, y_vars, mode, calc_ncols, plot_items=None,
+                           highlight_layer='below'):
         """
         Apply stored lines and highlights to a figure.
+
+        ``highlight_layer`` controls whether highlight rectangles are drawn below
+        or above the traces. It defaults to ``'below'`` so data marks stay on top
+        (correct for scatter/line/bar/box/histogram). Contour plots pass
+        ``'above'`` because their opaque filled field would otherwise hide a
+        highlight; the highlight's ``alpha`` keeps the contours visible through it.
         """
         x_list = x_vars if isinstance(x_vars, list) else ([x_vars] if x_vars else [])
         y_list = y_vars if isinstance(y_vars, list) else ([y_vars] if y_vars else [])
@@ -6324,12 +6333,12 @@ class UnichartNotebook:
                                 fig.add_shape(
                                     type='rect', x0=h['range'][0], x1=h['range'][1], y0=0, y1=1,
                                     xref=xref, yref=f'{yref} domain',
-                                    fillcolor=h['color'], opacity=h['alpha'], layer='below', line_width=0
+                                    fillcolor=h['color'], opacity=h['alpha'], layer=highlight_layer, line_width=0
                                 )
                 else:
                     for h in hls:
                         fig.add_vrect(x0=h['range'][0], x1=h['range'][1], fillcolor=h['color'],
-                                      opacity=h['alpha'], layer='below', line_width=0)
+                                      opacity=h['alpha'], layer=highlight_layer, line_width=0)
 
             if col_name in y_list:
                 if mode == 'vars' and plot_items:
@@ -6341,11 +6350,11 @@ class UnichartNotebook:
                                 fig.add_shape(
                                     type='rect', x0=0, x1=1, y0=h['range'][0], y1=h['range'][1],
                                     xref=f'{xref} domain', yref=yref,
-                                    fillcolor=h['color'], opacity=h['alpha'], layer='below', line_width=0
+                                    fillcolor=h['color'], opacity=h['alpha'], layer=highlight_layer, line_width=0
                                 )
                 else:
                     for h in hls:
                         fig.add_hrect(y0=h['range'][0], y1=h['range'][1], fillcolor=h['color'],
-                                      opacity=h['alpha'], layer='below', line_width=0)
+                                      opacity=h['alpha'], layer=highlight_layer, line_width=0)
 
         return fig
