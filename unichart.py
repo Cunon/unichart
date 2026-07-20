@@ -392,6 +392,25 @@ def _fill_marker_kw(color, fill, edgewidth=1):
         return {'color': color}
     return {'color': 'rgba(0,0,0,0)', 'line': dict(width=edgewidth, color=color)}
 
+
+def _union_ranges(ranges):
+    """Union a list of (min, max) axis-range tuples into one spanning range.
+
+    ``None`` entries are ignored. Returns ``None`` when nothing is supplied,
+    the sole tuple unchanged when only one contributes (preserving a
+    deliberately reversed axis), else the (min, max) spanning all endpoints.
+
+    Used so a ``scale()`` set on a bar-overlay column (marker/tick/whisker),
+    which shares the bar's y-axis, widens that axis to keep both the bars and
+    the overlay in frame instead of being silently dropped."""
+    ranges = [r for r in ranges if r is not None]
+    if not ranges:
+        return None
+    if len(ranges) == 1:
+        return tuple(ranges[0])
+    pts = [p for r in ranges for p in r]
+    return (min(pts), max(pts))
+
 # -----------------------------------------------------------------------------
 # Dataset Class
 # -----------------------------------------------------------------------------
@@ -2312,11 +2331,18 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', markers=None, variable
             title=yi,
             title_font=dict(color=var_color),
             tickfont=dict(color=var_color),
-            showgrid=(idx_y == 0) 
+            showgrid=(idx_y == 0)
         )
 
-        if yi in axis_limits:
-            axis_layout['range'] = axis_limits[yi]
+        # A marker column pairs positionally to the idx-th y variable's axis
+        # (see the marker loop below), so its scale() unions into that axis.
+        marker_lims = [axis_limits[markers_list[mi]]
+                       for mi in range(len(markers_list))
+                       if (mi if mi < len(y_list) else 0) == idx_y
+                       and markers_list[mi] in axis_limits]
+        yr = _union_ranges([axis_limits.get(yi)] + marker_lims)
+        if yr is not None:
+            axis_layout['range'] = yr
 
         if idx_y == 0:
             fig.update_layout(yaxis=axis_layout)
@@ -3401,8 +3427,9 @@ class UnichartNotebook:
                 variable name(s) to target.
             color_val (str or int): A color spec, or an integer set index.
                 - str: a standard color name ('red'), hex code ('#FF5733'),
-                or RGB/RGBA string ('rgb(255, 0, 0)'). Pass ``'reset'`` when
-                targeting a variable to clear its color override.
+                or RGB/RGBA string ('rgb(255, 0, 0)'). Pass ``'reset'`` to
+                restore the default: on a variable it clears the color
+                override, on dataset(s) it restores the ``color_map`` color.
                 - int: resolves to the color that set index would be assigned
                 from ``color_map`` at load time, independent of any recoloring
                 that set has since received. E.g. color(5, 2) gives set 5 the
@@ -3414,6 +3441,7 @@ class UnichartNotebook:
         nb.color(0, 'blue')                 # dataset 0 blue
         nb.color('Temperature', 'blue')     # the Temperature variable blue
         nb.color('Temperature', 'reset')    # clear that variable override
+        nb.color('all', 'reset')            # back to the color_map colors
         """
         if isinstance(color_val, int) and not isinstance(color_val, bool):
             color_val = self._color_at(color_val)
@@ -3422,8 +3450,7 @@ class UnichartNotebook:
             for v in variables:
                 self.var_format(v, color=color_val)
             return
-        for ds in self._get_uset_slice(uset_slice):
-            ds.color = color_val
+        self._set_or_reset(uset_slice, 'color', color_val)
 
     def marker(self, uset_slice=None, marker_val=None):
         """
@@ -3440,7 +3467,9 @@ class UnichartNotebook:
             marker_val (str or int): A marker spec, or an integer set index.
                 - str: Matplotlib-style marker ('o', 's', '^', 'D', '.')
                 or Plotly-style marker ('circle', 'square'). Pass ``'reset'``
-                when targeting a variable to clear its marker override.
+                to restore the default: on a variable it clears the marker
+                override, on dataset(s) it restores the ``marker_map`` /
+                ``set_default_format`` marker.
                 - int: resolves to the marker that set index would be assigned
                 from ``marker_map`` at load time, independent of any later
                 restyling. E.g. marker(5, 2) gives set 5 the ``marker_map``
@@ -3450,6 +3479,7 @@ class UnichartNotebook:
         --------
         nb.marker('all', 's')             # every dataset uses squares
         nb.marker('Pressure', '^')        # the Pressure variable uses triangles
+        nb.marker('all', 'reset')         # back to the marker_map markers
         """
         if isinstance(marker_val, int) and not isinstance(marker_val, bool):
             marker_val = self._marker_at(marker_val)
@@ -3458,8 +3488,7 @@ class UnichartNotebook:
             for v in variables:
                 self.var_format(v, marker=marker_val)
             return
-        for ds in self._get_uset_slice(uset_slice):
-            ds.marker = marker_val
+        self._set_or_reset(uset_slice, 'marker', marker_val)
 
     def linestyle(self, uset_slice=None, style_val=None):
         """
@@ -3475,8 +3504,9 @@ class UnichartNotebook:
                 variable name(s) to target.
             style_val (str): Matplotlib-style string ('-', '--', '-.', ':')
                              or Plotly string ('solid', 'dash', 'dashdot', 'dot').
-                             Pass ``'reset'`` when targeting a variable to clear
-                             its linestyle override.
+                             Pass ``'reset'`` to restore the default (clears a
+                             variable override; restores the default linestyle
+                             on dataset(s)).
 
         Examples
         --------
@@ -3488,8 +3518,7 @@ class UnichartNotebook:
             for v in variables:
                 self.var_format(v, linestyle=style_val)
             return
-        for ds in self._get_uset_slice(uset_slice):
-            ds.linestyle = style_val
+        self._set_or_reset(uset_slice, 'linestyle', style_val)
 
     def markersize(self, uset_slice=None, size_val=None):
         """
@@ -3498,15 +3527,15 @@ class UnichartNotebook:
         The target is autodetected: a dataset selector (int / list / 'all' /
         None / ``Dataset``) sets it per dataset; a variable/parameter name (or
         list of names) applies a per-variable override via :meth:`var_format`.
-        Pass ``'reset'`` when targeting a variable to clear the override.
+        Pass ``'reset'`` to restore the default (clears a variable override;
+        restores the default markersize on dataset(s)).
         """
         variables = self._var_targets(uset_slice)
         if variables is not None:
             for v in variables:
                 self.var_format(v, markersize=size_val)
             return
-        for ds in self._get_uset_slice(uset_slice):
-            ds.markersize = size_val
+        self._set_or_reset(uset_slice, 'markersize', size_val)
 
     def linewidth(self, uset_slice=None, width_val=None):
         """
@@ -3515,15 +3544,15 @@ class UnichartNotebook:
         The target is autodetected: a dataset selector (int / list / 'all' /
         None / ``Dataset``) sets it per dataset; a variable/parameter name (or
         list of names) applies a per-variable override via :meth:`var_format`.
-        Pass ``'reset'`` when targeting a variable to clear the override.
+        Pass ``'reset'`` to restore the default (clears a variable override;
+        restores the default linewidth on dataset(s)).
         """
         variables = self._var_targets(uset_slice)
         if variables is not None:
             for v in variables:
                 self.var_format(v, linewidth=width_val)
             return
-        for ds in self._get_uset_slice(uset_slice):
-            ds.linewidth = width_val
+        self._set_or_reset(uset_slice, 'linewidth', width_val)
 
     def edgewidth(self, uset_slice, width_val):
         """
@@ -3531,10 +3560,10 @@ class UnichartNotebook:
 
         Args:
             uset_slice (int, list, or 'all'): The dataset index or indices to modify.
-            width_val (int or float): The thickness of the marker edge. Must be >= 0.
+            width_val (int, float, or 'reset'): The thickness of the marker edge
+                                                (>= 0), or 'reset' for the default.
         """
-        for ds in self._get_uset_slice(uset_slice):
-            ds.edgewidth = width_val
+        self._set_or_reset(uset_slice, 'edgewidth', width_val)
 
     def fill(self, uset_slice, fill_val):
         """
@@ -3542,25 +3571,25 @@ class UnichartNotebook:
 
         Args:
             uset_slice (int, list, or 'all'): The dataset index or indices to modify.
-            fill_val (bool, int, or str): True/False (or 'on'/'off', '1'/'0', 't'/'f') 
-                                          to enable or disable marker fill.
+            fill_val (bool, int, or str): True/False (or 'on'/'off', '1'/'0', 't'/'f')
+                                          to enable or disable marker fill, or
+                                          'reset' for the default.
         """
-        for ds in self._get_uset_slice(uset_slice):
-            ds.fill = fill_val
+        self._set_or_reset(uset_slice, 'fill', fill_val)
 
     def hue(self, uset_slice, col_name):
         """
         Map a dataframe column to the color scale for the specified dataset(s).
+        Pass 'reset' to remove the hue mapping.
         """
-        for ds in self._get_uset_slice(uset_slice):
-            ds.hue = col_name
+        self._set_or_reset(uset_slice, 'hue', col_name)
 
     def hue_palette(self, uset_slice, hue_palette):
         """
         Set the color scale/palette used when `hue` is mapped to a variable.
+        Pass 'reset' to restore the default palette.
         """
-        for ds in self._get_uset_slice(uset_slice):
-            ds.hue_palette = hue_palette
+        self._set_or_reset(uset_slice, 'hue_palette', hue_palette)
 
     def alpha(self, uset_slice=None, alpha_val=None):
         """
@@ -3569,26 +3598,27 @@ class UnichartNotebook:
         The target is autodetected: a dataset selector (int / list / 'all' /
         None / ``Dataset``) sets it per dataset; a variable/parameter name (or
         list of names) applies a per-variable override via :meth:`var_format`.
-        Pass ``'reset'`` when targeting a variable to clear the override.
+        Pass ``'reset'`` to restore the default (clears a variable override;
+        restores the default alpha on dataset(s)).
         """
         variables = self._var_targets(uset_slice)
         if variables is not None:
             for v in variables:
                 self.var_format(v, alpha=alpha_val)
             return
-        for ds in self._get_uset_slice(uset_slice):
-            ds.alpha = alpha_val
+        self._set_or_reset(uset_slice, 'alpha', alpha_val)
 
     def plot_type(self, uset_slice, type_val):
-        for ds in self._get_uset_slice(uset_slice):
-            ds.plot_type = type_val
+        """Set the plot type ('scatter', 'contour', 'histogram') for the
+        specified dataset(s). Pass 'reset' to restore 'scatter'."""
+        self._set_or_reset(uset_slice, 'plot_type', type_val)
 
     def reg_order(self, uset_slice, order):
         """
         Set a regression/trendline for the specified dataset(s).
+        Pass 'reset' (or None) to remove it.
         """
-        for ds in self._get_uset_slice(uset_slice):
-            ds.reg_order = order
+        self._set_or_reset(uset_slice, 'reg_order', order)
 
     # ------------------------------------------------------------------
     # Variable-level formatting overrides
@@ -3636,7 +3666,8 @@ class UnichartNotebook:
         return self.variable_formats.get(variable, {})
 
     def clear_var_format(self, variable=None):
-        """Clear variable formatting. Pass None (or no arg) to clear everything."""
+        """Clear variable formatting. Pass None (or no arg) to clear everything.
+        Equivalent to ``reset_format(vars=variable)`` / ``reset_format('vars')``."""
         if variable is None:
             self.variable_formats.clear()
         else:
@@ -3652,86 +3683,206 @@ class UnichartNotebook:
             items = ", ".join(f"{k}={v!r}" for k, v in fmt.items())
             print(f"  {var}: {items}")
 
-    def reset_format(self, uset_slice=None, sets=True, vars=True,
-                     lines=True, highlights=True, scale=True, fonts=True):
+    # ------------------------------------------------------------------
+    # Resetting formatting — reset_format() is the single hub; every
+    # formatting setter also accepts the universal 'reset' sentinel.
+    # ------------------------------------------------------------------
+
+    # Scope names reset_format understands, plus forgiving aliases.
+    _RESET_SCOPES = ('sets', 'vars', 'lines', 'highlights', 'scales',
+                     'fonts', 'plot_size', 'defaults')
+    _RESET_ALIASES = {'set': 'sets', 'var': 'vars', 'variable': 'vars',
+                      'variables': 'vars', 'line': 'lines',
+                      'highlight': 'highlights', 'scale': 'scales',
+                      'limits': 'scales', 'axis_limits': 'scales',
+                      'font': 'fonts', 'font_sizes': 'fonts',
+                      'plotsize': 'plot_size', 'default': 'defaults'}
+    # What a plain reset_format() sweeps. 'defaults' (the values behind
+    # set_default_format) is deliberately excluded — resetting applied
+    # formatting shouldn't silently discard the user's chosen defaults;
+    # ask for it by name or with 'all'.
+    _RESET_DEFAULT_SWEEP = ('sets', 'vars', 'lines', 'highlights', 'scales',
+                            'fonts', 'plot_size')
+
+    def _reset_set_attrs(self, ds, attrs=None):
+        """Restore per-dataset formatting attribute(s) to the current defaults:
+        color from ``color_map``, marker from ``marker_map`` (or the
+        ``set_default_format`` marker), the rest from ``default_format``.
+        ``attrs`` is an iterable of attribute names; None means the full
+        formatting sweep (everything except ``plot_type``, which only resets
+        when asked for by name so contour/histogram sets survive a bulk reset).
         """
-        Reset formatting state back to defaults.
+        fmt = getattr(self, 'default_format', _DATASET_FORMAT_DEFAULTS)
+        default_marker = fmt.get('marker', _MARKER_BY_INDEX)
+        defaults = {
+            'color':       lambda: self._color_at(ds.index),
+            'marker':      lambda: (self._marker_at(ds.index)
+                                    if default_marker is _MARKER_BY_INDEX
+                                    else default_marker),
+            'linestyle':   lambda: fmt.get('linestyle', None),
+            'markersize':  lambda: fmt.get('markersize', 10),
+            'linewidth':   lambda: fmt.get('linewidth', 2),
+            'edgewidth':   lambda: fmt.get('edgewidth', 1),
+            'alpha':       lambda: fmt.get('alpha', 1),
+            'edge_color':  lambda: fmt.get('edge_color', 'black'),
+            'fill':        lambda: fmt.get('fill', True),
+            'hue':         lambda: "",
+            'hue_palette': lambda: "Jet",
+            'hue_order':   lambda: None,
+            'reg_order':   lambda: None,
+            'plot_type':   lambda: 'scatter',
+        }
+        if attrs is None:
+            attrs = [a for a in defaults if a != 'plot_type']
+        for attr in attrs:
+            setattr(ds, attr, defaults[attr]())
+
+    def _set_or_reset(self, uset_slice, attr, value):
+        """Assign a per-dataset formatting attribute across a selector,
+        honoring the universal ``'reset'`` sentinel (restore that attribute
+        to its current default via :meth:`_reset_set_attrs`)."""
+        for ds in self._get_uset_slice(uset_slice):
+            if isinstance(value, str) and value == 'reset':
+                self._reset_set_attrs(ds, (attr,))
+            else:
+                setattr(ds, attr, value)
+
+    def _reset_defaults(self):
+        """Restore default_format, figsize, and the per-call plot defaults to
+        built-ins. Shared by set_default_format(reset=True) and
+        reset_format('defaults')."""
+        self.default_format = dict(_DATASET_FORMAT_DEFAULTS)
+        self.figsize = (12, 8)
+        self.plot_defaults = {k: None for k in self.plot_defaults}
+
+    def reset_format(self, *what, uset_slice=None, sets=None, vars=None,
+                     lines=None, highlights=None, scale=None, fonts=None):
+        """
+        Reset formatting back to defaults — the one entry point for all of it.
+
+        Call with no arguments to reset every piece of *applied* formatting
+        (dataset styles, variable overrides, lines, highlights, axis limits,
+        font sizes, pinned plot size). Pass scope names to reset only those.
+        The *defaults themselves* (``set_default_format`` state, figsize,
+        per-call plot defaults) are only reset when you ask for ``'defaults'``
+        explicitly, or reset everything with ``'all'``.
 
         Parameters
         ----------
-        uset_slice : int | list | 'all' | None
-            Which datasets to reset. None/'all' resets every dataset.
-            Ignored when `sets=False`.
-        sets : bool
-            Reset per-dataset visual attributes (color, marker, linestyle,
-            markersize, linewidth, edgewidth, alpha, hue, hue_palette,
-            reg_order) back to their Dataset.__init__ defaults.
-        vars : bool
-            Clear all variable-level formatting overrides (variable_formats).
-        lines : bool
-            Clear all stored reference lines.
-        highlights : bool
-            Clear all stored highlight regions.
-        scale : bool
-            Clear all stored axis limits (axis_limits).
-        fonts : bool
-            Reset all font-size overrides to None (use Plotly defaults).
+        *what : scope name(s) and/or dataset selector(s)
+            Scope names: 'sets', 'vars', 'lines', 'highlights', 'scales',
+            'fonts', 'plot_size', 'defaults', or 'all' (everything, defaults
+            included). Common aliases work too ('scale', 'variables', ...).
+            A non-string positional (int, list, Dataset) is a dataset
+            selector, same as ``uset_slice``.
+        uset_slice : int | list | Dataset | 'all' | None
+            Which datasets the 'sets' scope applies to (None/'all' = every
+            dataset). Passing a selector with no scope names resets *only*
+            those datasets' formatting.
+        sets, vars, lines, highlights, scale, fonts : bool or name(s)
+            Fine-grained include/exclude, kept from the old API: ``True``
+            adds the scope, ``False`` removes it from the sweep. For
+            ``vars`` / ``lines`` / ``highlights`` / ``scale`` you may instead
+            pass a variable/column name (or list of names) to reset just
+            those entries, e.g. ``reset_format(vars='CHT', lines='ALT')``.
+
+        Every formatting setter also accepts ``'reset'`` as its value for
+        per-attribute resets: ``nb.color(0, 'reset')``,
+        ``nb.color('CHT', 'reset')``, ``nb.line('all', 'reset')``,
+        ``nb.scale('all', 'reset')``, ``nb.var_format('CHT', color='reset')``.
 
         Examples
         --------
-        nb.reset_format()                  # reset everything
-        nb.reset_format(sets=False)        # keep per-dataset formatting, clear rest
-        nb.reset_format(uset_slice=[0,1])  # only reset datasets 0 and 1
-        nb.reset_format(lines=True, highlights=True, sets=False, vars=False,
-                        scale=False, fonts=False)  # only clear decorations
+        nb.reset_format()                       # all applied formatting
+        nb.reset_format('all')                  # ...plus the stored defaults
+        nb.reset_format('lines', 'scales')      # just those scopes
+        nb.reset_format([0, 1])                 # only datasets 0 and 1
+        nb.reset_format('sets', uset_slice=0)   # same, explicit form
+        nb.reset_format(vars='CHT')             # one variable's overrides
+        nb.reset_format(sets=False)             # everything except datasets
         """
-        if sets:
-            targets = (self.sets if uset_slice is None
-                       else self._get_uset_slice(uset_slice))
-            fmt = getattr(self, 'default_format', _DATASET_FORMAT_DEFAULTS)
-            default_marker = fmt.get('marker', _MARKER_BY_INDEX)
+        # --- Parse positionals: scope names vs dataset selectors -----------
+        scopes, selectors, full = [], [], False
+        for item in what:
+            if isinstance(item, str):
+                key = self._RESET_ALIASES.get(item.lower(), item.lower())
+                if key in ('all', 'everything'):
+                    full = True
+                elif key in self._RESET_SCOPES:
+                    scopes.append(key)
+                else:
+                    valid = ', '.join(self._RESET_SCOPES + ('all',))
+                    raise ValueError(
+                        f"Unknown reset scope {item!r}. Valid scopes: {valid}. "
+                        f"To clear one variable's overrides use "
+                        f"reset_format(vars={item!r}).")
+            else:
+                selectors.append(item)
+        if selectors:
+            merged = selectors[0] if len(selectors) == 1 else selectors
+            uset_slice = merged if uset_slice is None else [uset_slice, merged]
+
+        # --- Determine the active scopes ------------------------------------
+        flag_map = {'sets': sets, 'vars': vars, 'lines': lines,
+                    'highlights': highlights, 'scales': scale, 'fonts': fonts}
+        any_flags = any(v is not None for v in flag_map.values())
+        if full:
+            active = set(self._RESET_SCOPES)
+        elif scopes:
+            active = set(scopes)
+        elif uset_slice is not None and not any_flags:
+            active = {'sets'}          # bare selector: just re-style those sets
+        else:
+            active = set(self._RESET_DEFAULT_SWEEP)
+
+        # --- Boolean / targeted kwargs adjust the active set ----------------
+        targeted = {}                  # scope -> specific names to clear
+        for scope, val in flag_map.items():
+            if val is None:
+                continue
+            if val is True:
+                active.add(scope)
+            elif val is False:
+                active.discard(scope)
+            elif scope in ('vars', 'lines', 'highlights', 'scales'):
+                targeted[scope] = [val] if isinstance(val, str) else list(val)
+                active.add(scope)
+            else:
+                raise TypeError(f"{scope} must be True or False, got {val!r}")
+
+        # --- Perform the resets (defaults first, so 'sets' picks them up) ---
+        done = []
+        if 'defaults' in active:
+            self._reset_defaults()
+            done.append("style/plot defaults")
+        if 'sets' in active:
+            targets = self._get_uset_slice(uset_slice)
             for ds in targets:
-                ds._color      = self._color_at(ds.index)
-                ds._marker     = (self._marker_at(ds.index)
-                                  if default_marker is _MARKER_BY_INDEX else default_marker)
-                ds._linestyle  = fmt.get('linestyle', None)
-                ds.markersize  = fmt.get('markersize', 10)
-                ds.linewidth   = fmt.get('linewidth', 2)
-                ds.edgewidth   = fmt.get('edgewidth', 1)
-                ds.alpha       = fmt.get('alpha', 1)
-                ds._edge_color = fmt.get('edge_color', 'black')
-                ds._fill       = fmt.get('fill', True)
-                ds.hue         = ""
-                ds.hue_palette = "Jet"
-                ds.hue_order   = None
-                ds.reg_order   = None
-
-        if vars:
-            self.variable_formats.clear()
-
-        if lines:
-            self.lines.clear()
-
-        if highlights:
-            self.highlights.clear()
-
-        if scale:
-            self.axis_limits.clear()
-
-        if fonts:
-            for attr in ('suptitle_size', 'footer_size', 'legend_size', 'axes_title_size',
-                         'axes_tick_size', 'subplot_title_size',
-                         'colorbar_size', 'hover_size'):
-                setattr(self, attr, None)
-
-        parts = []
-        if sets:      parts.append("dataset formatting")
-        if vars:      parts.append("variable formats")
-        if lines:     parts.append("lines")
-        if highlights: parts.append("highlights")
-        if scale:     parts.append("axis limits")
-        if fonts:     parts.append("font sizes")
-        print(f"Reset: {', '.join(parts) if parts else 'nothing'}.")
+                self._reset_set_attrs(ds)
+            label = "dataset formatting"
+            if uset_slice is not None and uset_slice != 'all':
+                label += f" ({len(targets)} set{'s' if len(targets) != 1 else ''})"
+            done.append(label)
+        for scope, store, label in (('vars', self.variable_formats, "variable formats"),
+                                    ('lines', self.lines, "lines"),
+                                    ('highlights', self.highlights, "highlights"),
+                                    ('scales', self.axis_limits, "axis limits")):
+            if scope not in active:
+                continue
+            if scope in targeted:
+                for name in targeted[scope]:
+                    store.pop(name, None)
+                done.append(f"{label} ({', '.join(targeted[scope])})")
+            else:
+                store.clear()
+                done.append(label)
+        if 'fonts' in active:
+            self.set_font_sizes(reset=True)
+            done.append("font sizes")
+        if 'plot_size' in active:
+            self.plot_size = None
+            done.append("plot size")
+        print(f"Reset: {', '.join(done) if done else 'nothing'}.")
 
     def _apply_default(self, key, value, builtin):
         """Resolve a per-call plotting arg: an explicit ``value`` (not None) wins;
@@ -3773,7 +3924,8 @@ class UnichartNotebook:
         persist. Color remains controlled by ``color_map``.
 
         ``reset=True`` restores *all* of the above — per-dataset styles, figsize,
-        and the per-call defaults — to their built-ins, and ignores other args.
+        and the per-call defaults — to their built-ins, and ignores other args
+        (equivalent to ``reset_format('defaults')``).
 
         Parameters
         ----------
@@ -3816,9 +3968,7 @@ class UnichartNotebook:
         nb.set_default_format(reset=True)    # clear styles, figsize, and defaults
         """
         if reset:
-            self.default_format = dict(_DATASET_FORMAT_DEFAULTS)
-            self.figsize = (12, 8)
-            self.plot_defaults = {k: None for k in self.plot_defaults}
+            self._reset_defaults()
             print("Default format, figsize, and plot defaults reset to built-ins.")
             return
 
@@ -4538,9 +4688,10 @@ class UnichartNotebook:
 
         Args:
             column (str): The variable the line is keyed to (x-var -> vertical
-                line; y-var -> horizontal line). Use 'all' with level='clear'.
-            level (float or 'clear'): The line position, or 'clear' to remove
-                the line(s) for ``column`` ('all' clears every line).
+                line; y-var -> horizontal line). Use 'all' with level='reset'.
+            level (float or 'reset'): The line position, or 'reset' (alias
+                'clear') to remove the line(s) for ``column`` ('all' removes
+                every line; also available as ``reset_format('lines')``).
             color (str): Line color.
             linestyle (str, optional): Line style — Matplotlib-style
                 ('-', '--', '-.', ':') or Plotly-style ('solid', 'dash',
@@ -4548,7 +4699,7 @@ class UnichartNotebook:
             dash (str, optional): Deprecated alias for ``linestyle``, kept for
                 backwards compatibility. Ignored if ``linestyle`` is given.
         """
-        if level == 'clear':
+        if level in ('clear', 'reset'):
             if column == 'all':
                 self.lines.clear()
             else:
@@ -4564,11 +4715,16 @@ class UnichartNotebook:
         self.lines[column].append({'level': level, 'color': color, 'dash': plotly_dash})
 
     def highlight(self, column, range_tuple, color='yellow', alpha=0.2, opacity=None):
-        """Add a highlighted region to the next plot."""
+        """Add a highlighted region to the next plot.
+
+        Pass ``'reset'`` (alias ``'clear'``) as ``range_tuple`` to remove the
+        highlight(s) for ``column`` ('all' removes every highlight; also
+        available as ``reset_format('highlights')``).
+        """
         if opacity is not None:
             warnings.warn("'opacity' is deprecated, use 'alpha'", DeprecationWarning, stacklevel=2)
             alpha = opacity
-        if range_tuple == 'clear':
+        if range_tuple in ('clear', 'reset'):
             if column == 'all':
                 self.highlights.clear()
             else:
@@ -4584,14 +4740,28 @@ class UnichartNotebook:
 
         ``column`` may be a single parameter name or a list/tuple of names,
         in which case the same ``range_tuple`` is applied to each.
+
+        Pass ``'reset'`` (alias ``'clear'``, or None) as ``range_tuple`` to
+        remove the stored limits; ``column='all'`` then clears every axis
+        limit (also available as ``reset_format('scales')``).
+
+        For bar charts, a marker/tick/whisker overlay column (passed via
+        ``bar(markers=...)``) is a valid ``column`` here: it shares the bar's
+        y-axis, so its range is unioned with the bar variable's own scale.
         """
+        clearing = range_tuple in ('clear', 'reset') or range_tuple is None
+        if clearing and column == 'all':
+            self.axis_limits.clear()
+            print("All axis limits cleared.")
+            return
+
         if isinstance(column, (list, tuple)):
             columns = column
         else:
             columns = [column]
 
         for col in columns:
-            if range_tuple == 'clear' or range_tuple is None:
+            if clearing:
                 if col in self.axis_limits:
                     del self.axis_limits[col]
                     print(f"Limits cleared for '{col}'.")
@@ -4622,7 +4792,8 @@ class UnichartNotebook:
         all : float or str
             Set all font sizes at once (overridden by individual parameters).
         reset : bool
-            Reset all font sizes to defaults.
+            Reset all font sizes to defaults (equivalent to
+            ``reset_format('fonts')``).
         """
         keys = ('suptitle_size', 'footer_size', 'legend_size', 'axes_title_size', 'axes_tick_size',
                 'subplot_title_size', 'colorbar_size', 'hover_size', 'table_header_size', 'table_cell_size')
@@ -4694,7 +4865,8 @@ class UnichartNotebook:
         while margins absorb the title/legend. Pass only the dimension(s) you want
         to pin — ``None`` leaves that dimension driven by ``figsize``. Each call
         replaces the previous setting (calling with only ``height`` drops a prior
-        ``width`` pin). ``reset=True`` (or both ``None``) clears it.
+        ``width`` pin). ``reset=True`` (or both ``None``) clears it — equivalent
+        to ``reset_format('plot_size')``.
 
         Note: the arithmetic is exact when Plotly's margin ``autoexpand`` stays
         inert, which it does for the suptitle and the (downward-growing) legend.
@@ -5172,6 +5344,12 @@ class UnichartNotebook:
         marker symbol, via the `style` key of `var_format`:
             nb.var_format('EGT_LIMIT', style='tick')     # horizontal dash at the value
             nb.var_format('EGT_LIMIT', style='whisker')  # dash + stem to the bar top
+
+        `scale()` accepts an overlay column too, since the overlay shares the
+        bar's y-axis. Its range is unioned with the bar variable's own scale so
+        both the bars and the limit line stay in frame. In a multi-panel
+        `by='vars'` chart the overlay is drawn on every panel, so scaling it
+        widens every panel.
         """
         if figsize is None: figsize = self.figsize
         barmode = self._apply_default('barmode', barmode, 'group')
@@ -5223,16 +5401,24 @@ class UnichartNotebook:
             n_items = len(active_sets) if by in ['sets', 'datasets'] else len(y_list)
             calc_ncols = max(1, _calc_grid(n_items, nrows, ncols)[1])
 
+            # Overlay columns (markers=) share the bar's y-axis and are drawn on
+            # every subplot, so a scale() on one of them widens each y-axis
+            # (unioned with that subplot's y-var scale) rather than being ignored.
+            markers_list = markers if isinstance(markers, list) else ([markers] if markers else [])
+            marker_lims = [self.axis_limits[m] for m in markers_list if m in self.axis_limits]
+
             if by in ['sets', 'datasets']:
                 primary_y = y_list[0]
-                if primary_y in self.axis_limits:
-                    fig.update_yaxes(range=self.axis_limits[primary_y])
+                yr = _union_ranges([self.axis_limits.get(primary_y)] + marker_lims)
+                if yr is not None:
+                    fig.update_yaxes(range=yr)
             else:
                 for idx, yi in enumerate(y_list):
-                    if yi in self.axis_limits:
+                    yr = _union_ranges([self.axis_limits.get(yi)] + marker_lims)
+                    if yr is not None:
                         r = (idx // calc_ncols) + 1
                         c = (idx % calc_ncols) + 1
-                        fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
+                        fig.update_yaxes(range=yr, row=r, col=c)
 
             dec_mode = 'sets' if by in ['sets', 'datasets'] else 'vars'
             dec_items = [(x, yi) for yi in y_list] if dec_mode == 'vars' else None

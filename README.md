@@ -197,6 +197,40 @@ nb.scale('pressure', (0, 100))                            # fix an axis range
 nb.suptitle = 'Overview'; nb.footer = 'source: rig A'      # figure text
 ```
 
+### Resetting formatting
+
+Two consistent rules cover every reset:
+
+1. **Any formatting setter accepts `'reset'` as its value** to restore the
+   default for whatever it targets — a dataset attribute, a variable override,
+   or a decoration:
+
+   ```python
+   nb.color(0, 'reset')             # dataset 0 back to its color_map color
+   nb.marker('all', 'reset')        # every set back to its marker_map marker
+   nb.color('Pressure', 'reset')    # drop the Pressure color override
+   nb.var_format('CHT', color='reset')  # same, per attribute
+   nb.line('all', 'reset')          # remove reference lines ('clear' also works)
+   nb.highlight('rpm', 'reset')     # remove highlights on one column
+   nb.scale('all', 'reset')         # clear every fixed axis range
+   ```
+
+2. **`reset_format()` is the single bulk-reset hub**, with optional scopes
+   `'sets'`, `'vars'`, `'lines'`, `'highlights'`, `'scales'`, `'fonts'`,
+   `'plot_size'`, `'defaults'`, `'all'`:
+
+   ```python
+   nb.reset_format()                     # all applied formatting
+   nb.reset_format('lines', 'scales')    # just those
+   nb.reset_format([0, 1])               # just datasets 0 and 1
+   nb.reset_format(vars='CHT')           # just one variable's overrides
+   nb.reset_format('all')                # everything, incl. set_default_format state
+   ```
+
+   `set_font_sizes(reset=True)`, `set_plot_size(reset=True)`,
+   `set_default_format(reset=True)`, and `clear_var_format()` still work and
+   are equivalent to the matching `reset_format` scope.
+
 ---
 
 ## Analysis & stats
