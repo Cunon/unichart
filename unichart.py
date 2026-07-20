@@ -336,6 +336,55 @@ def _resolve_var_format(dataset, variable, variable_formats=None):
     }
 
 
+_STYLE_BY_LINESTYLES = ['-', '--', '-.', ':']
+
+_STYLE_BY_ALIASES = {
+    'color': 'color', 'colors': 'color',
+    'marker': 'marker', 'markers': 'marker',
+    'linestyle': 'linestyle', 'linestyles': 'linestyle',
+    'line': 'linestyle', 'ls': 'linestyle',
+}
+
+
+def _style_by_formats(y_list, style_by, variable_formats=None):
+    """
+    Expand ``style_by`` into per-variable formats, auto-cycling the requested
+    attribute(s) by the variable's position in ``y_list``.
+
+    ``style_by`` is one or more of 'color' / 'marker' / 'linestyle', given as
+    a string ('marker', 'color+linestyle', 'color, marker') or a list. Any
+    attribute already present in ``variable_formats`` for a variable wins over
+    the auto-cycled value, so explicit ``var_format`` calls behave as usual.
+    """
+    variable_formats = variable_formats or {}
+    if not style_by:
+        return variable_formats
+    tokens = (style_by.replace('+', ' ').replace(',', ' ').split()
+              if isinstance(style_by, str) else list(style_by))
+    attrs = []
+    for t in tokens:
+        key = _STYLE_BY_ALIASES.get(str(t).lower())
+        if key is None:
+            raise ValueError(
+                f"style_by accepts 'color', 'marker', 'linestyle', or a "
+                f"combination like 'color+marker'; got {t!r}")
+        if key not in attrs:
+            attrs.append(key)
+    color_cycle = px.colors.qualitative.Plotly
+    merged = dict(variable_formats)
+    for idx, var in enumerate(y_list):
+        auto = {}
+        if 'color' in attrs:
+            auto['color'] = color_cycle[idx % len(color_cycle)]
+        if 'marker' in attrs:
+            auto['marker'] = marker_map(idx)
+        if 'linestyle' in attrs:
+            auto['linestyle'] = _STYLE_BY_LINESTYLES[idx % len(_STYLE_BY_LINESTYLES)]
+        auto.update(variable_formats.get(var, {}))
+        merged[var] = auto
+    return merged
+
+
 def _overlay_marker_kw(style, symbol, color, size, alpha, edge_color,
                        values=None, bar_values=None,
                        stem_dash='solid', stem_width=2):
@@ -2523,7 +2572,8 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
                         suptitle=None, xlabel=None,
                         darkmode=False, figsize=(12, 8),
                         x_lim=None, axis_limits=None,
-                        legend='right', legend_group_by='sets', return_axes=False):
+                        legend='right', legend_group_by='sets', style_by=None,
+                        return_axes=False):
     """
     Single-plot, multi-Y-axis scatter/line chart.
 
@@ -2555,6 +2605,11 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
     axis_limits : dict[str, tuple] | None
         Per-column (min, max) limits. Applies to x and to any y axis.
     legend : 'right' | 'above' | 'off'
+    style_by : str | list[str] | None
+        Auto-differentiate the y variables by cycling one or more attributes:
+        'color', 'marker', 'linestyle', or a combination ('color+marker',
+        ['marker', 'linestyle'], ...). Attributes set in ``variable_formats``
+        still win per-variable; auto colors also tint that variable's axis.
     """
     variable_formats = variable_formats or {}
     axis_limits = axis_limits or {}
@@ -2567,6 +2622,8 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
     y_list = y if isinstance(y, list) else [y]
     if not y_list:
         raise ValueError("At least one y variable is required.")
+
+    variable_formats = _style_by_formats(y_list, style_by, variable_formats)
 
     # Domain math: extra y-axes (3+) live to the right of the plot.
     extras = max(0, len(y_list) - 2)
@@ -5115,7 +5172,8 @@ class UnichartNotebook:
         if by == 'ymult':
             return self.plot_ymult(x=x, y=y, suptitle=suptitle,
                                      figsize=figsize, legend=legend,
-                                     suppress_legends=suppress_legends)
+                                     suppress_legends=suppress_legends,
+                                     style_by=kwargs.pop('style_by', None))
 
         self._clear_last_fig()
 
@@ -5221,13 +5279,21 @@ class UnichartNotebook:
     # Multi-Y plot wrapper
     # ------------------------------------------------------------------
     def plot_ymult(self, x=None, y=None, suptitle=None, footer=None, figsize=None,
-                     legend=None, legend_group_by='sets', suppress_legends=None):
+                     legend=None, legend_group_by='sets', suppress_legends=None,
+                     style_by=None):
         """
         Single plot, multiple Y-axes. All selected datasets overlay on the same x-axis.
         Applies all notebook-level formatting: axis_limits, variable_formats, lines, highlights.
 
         ``legend`` (default 'above') and ``suppress_legends`` (default False) fall
         back to the ``set_default_format`` defaults when not passed.
+
+        ``style_by`` auto-differentiates the y variables by cycling one or more
+        attributes per variable: ``'color'``, ``'marker'``, ``'linestyle'``, or
+        a combination (``'color+marker'``, ``['marker', 'linestyle']``, ...).
+        Any attribute set via :meth:`var_format` still overrides the auto value
+        for that variable, and unstyled attributes fall back to the dataset as
+        usual. With ``'color'``, each variable's y-axis is tinted to match.
         """
         if figsize is None: figsize = self.figsize
         legend = self._apply_default('legend', legend, 'above')
@@ -5252,6 +5318,7 @@ class UnichartNotebook:
             axis_limits=self.axis_limits,
             legend=legend,
             legend_group_by=legend_group_by,
+            style_by=style_by,
             return_axes=True,
         )
         if fig is None:
