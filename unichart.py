@@ -1342,7 +1342,6 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             marker_dict = dict(
                 size=cur_markersize, symbol=get_plotly_marker(cur_marker),
                 line=dict(width=fmt.get('edgewidth', 1), color=fmt.get('edge_color', 'black')),
-                opacity=cur_alpha
             )
             line_dict = dict(width=cur_linewidth, dash=get_plotly_linestyle(cur_linestyle))
 
@@ -1372,6 +1371,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                 name=f"{cur_idx}: {cur_title}",
                 legendgroup=f"group_{cur_idx}",
                 marker=marker_dict, line=line_dict,
+                opacity=cur_alpha,
                 customdata=custom_data, hovertemplate=ht,
                 showlegend=(idx_p == 0)
             ), row=row, col=col)
@@ -3077,6 +3077,29 @@ class UnichartNotebook:
         # (they are keyed to the global index). Recompute them all.
         self._reapply_all_queries()
 
+    @staticmethod
+    def _dedupe_columns(df):
+        """Return df with duplicate column labels renamed reader-style (X, X.1, X.2).
+
+        Duplicate labels poison every later column alignment against the combined
+        frame — pd.concat with another set raises InvalidIndexError ("Reindexing
+        only valid with uniquely valued Index objects"), possibly loads later than
+        the frame that introduced them.
+        """
+        if not df.columns.duplicated().any():
+            return df
+        counts, used, new_cols = {}, set(), []
+        for col in df.columns:
+            new = col
+            while new in used:
+                counts[col] = counts.get(col, 0) + 1
+                new = f"{col}.{counts[col]}"
+            used.add(new)
+            new_cols.append(new)
+        renamed = sorted(str(c) for c in counts)
+        print(f"Renamed duplicate column(s) to be unique: {renamed}")
+        return df.set_axis(new_cols, axis=1)
+
     def load_df(self, df, title=None, set_name_column=None, set_idx_column=None, load_cols_as_vars=False, combined=False):
         """Split a DataFrame into one Dataset per unique set_idx_column value, or load it as one.
 
@@ -3085,14 +3108,15 @@ class UnichartNotebook:
         """
         if isinstance(df, (list, tuple)):
             if combined:
-                df = pd.concat(df, ignore_index=True)
+                df = pd.concat([self._dedupe_columns(d) for d in df],
+                               ignore_index=True)
             else:
                 for single_df in df:
                     self.load_df(single_df, title=title, set_name_column=set_name_column,
                                  set_idx_column=set_idx_column, load_cols_as_vars=load_cols_as_vars)
                 return
 
-        df = df.copy()
+        df = self._dedupe_columns(df).copy()
 
         if not title:
             if set_name_column and set_name_column in df.columns:
@@ -3189,7 +3213,7 @@ class UnichartNotebook:
         """Coerce a single source into a (DataFrame, default_title) pair. default_title is the
         filename stem for file inputs, otherwise None."""
         if isinstance(source, pd.DataFrame):
-            return source.copy(), None
+            return self._dedupe_columns(source).copy(), None
         if isinstance(source, (str, Path)):
             path = Path(source)
             if not path.is_file():
