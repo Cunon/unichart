@@ -275,6 +275,132 @@ def _subplot_refs(row, col, ncols):
     return xref, yref
 
 # -----------------------------------------------------------------------------
+# Reference-line labels (see UnichartNotebook.line)
+# -----------------------------------------------------------------------------
+# Labels are Plotly annotations tagged with _LINE_LABEL_NAME so _apply_fonts can
+# tell them apart from subplot titles (which it restyles wholesale).
+_LINE_LABEL_NAME = '_uc_line_label'
+_LINE_LABEL_PAD = 4     # px gap between the text and the line / plot edge
+
+# Position tokens, resolved at draw time because a column can be the x-var of one
+# plot (vertical line) and the y-var of another (horizontal line). "Along" tokens
+# slide the label along the line; "side" tokens pick which side of it the text
+# sits on. The names mirror Plotly's own ``annotation_position`` vocabulary.
+_LINE_LABEL_ALONG = {
+    'vertical':   {'bottom': 0.0, 'middle': 0.5, 'center': 0.5, 'top': 1.0},
+    'horizontal': {'left': 0.0, 'middle': 0.5, 'center': 0.5, 'right': 1.0},
+}
+_LINE_LABEL_SIDES = {
+    'vertical':   {'left': 'left', 'right': 'right'},
+    'horizontal': {'top': 'top', 'above': 'top', 'bottom': 'bottom', 'below': 'bottom'},
+}
+_LINE_LABEL_DEFAULT_SIDE = {'vertical': 'right', 'horizontal': 'top'}
+
+
+def _parse_line_label_position(position, orientation):
+    """Resolve a ``label_position`` spec into ``(along_fraction, side)``.
+
+    ``position`` is either a number (0-1 along the line) or a string of
+    space-separated tokens, which may mix an along-token or bare number with a
+    side-token — e.g. ``'top'``, ``'bottom left'``, ``0.25``, ``'0.25 left'``.
+    ``orientation`` is 'vertical' or 'horizontal' and decides how each token
+    reads: 'top' slides a vertical line's label but flips a horizontal one's to
+    the upper side of the line.
+    """
+    along_map = _LINE_LABEL_ALONG[orientation]
+    side_map = _LINE_LABEL_SIDES[orientation]
+    along = side = None
+
+    if position is None:
+        tokens = []
+    elif isinstance(position, bool):
+        raise TypeError("label_position must be a number (0-1) or a position string, got bool")
+    elif isinstance(position, (int, float)):
+        along, tokens = float(position), []
+    elif isinstance(position, str):
+        tokens = position.replace(',', ' ').lower().split()
+    elif isinstance(position, (list, tuple)):
+        tokens = [str(t).lower() for t in position]
+    else:
+        raise TypeError("label_position must be a number (0-1) or a position string, "
+                        f"got {type(position).__name__}")
+
+    for tok in tokens:
+        try:
+            along = float(tok)
+            continue
+        except ValueError:
+            pass
+        if tok in along_map:
+            along = along_map[tok]
+        elif tok in side_map:
+            side = side_map[tok]
+        else:
+            valid = ', '.join(sorted(set(along_map) | set(side_map)))
+            raise ValueError(f"label_position: unknown token '{tok}' for a {orientation} "
+                             f"reference line. Valid tokens: {valid} (or a 0-1 number).")
+
+    if along is None:
+        along = 1.0                                   # default: far end of the line
+    if not 0.0 <= along <= 1.0:
+        raise ValueError(f"label_position fraction must be between 0 and 1, got {along}")
+    return along, side or _LINE_LABEL_DEFAULT_SIDE[orientation]
+
+
+def _line_label_annotation(line_spec, orientation, default_size=None):
+    """Build the annotation kwargs for a reference line's label, or None.
+
+    Coordinates come back in the system Plotly uses for axis-spanning shapes:
+    the along-line coordinate is a 0-1 axis-*domain* fraction and the
+    across-line coordinate is the line's data ``level``. Callers pair that with
+    the matching refs ('x' + 'y domain' for a vertical line, 'x domain' + 'y'
+    for a horizontal one).
+    """
+    text = line_spec.get('label')
+    if not text:
+        return None
+
+    along, side = _parse_line_label_position(line_spec.get('label_position'), orientation)
+    level = line_spec['level']
+    size = line_spec.get('label_size') or default_size
+    color = line_spec.get('label_color') or line_spec.get('color')
+
+    if orientation == 'vertical':
+        # Slide along y (domain); the side picks which flank of the line the text
+        # sits on. At the ends, anchor inward so the text stays in the plot area.
+        anchor_along = 'top' if along > 0.9 else 'bottom' if along < 0.1 else 'middle'
+        shift_along = -_LINE_LABEL_PAD if along > 0.9 else _LINE_LABEL_PAD if along < 0.1 else 0
+        anns = dict(x=level, y=along,
+                    xanchor='left' if side == 'right' else 'right',
+                    yanchor=anchor_along,
+                    xshift=_LINE_LABEL_PAD if side == 'right' else -_LINE_LABEL_PAD,
+                    yshift=shift_along)
+    else:
+        anchor_along = 'right' if along > 0.9 else 'left' if along < 0.1 else 'center'
+        shift_along = -_LINE_LABEL_PAD if along > 0.9 else _LINE_LABEL_PAD if along < 0.1 else 0
+        anns = dict(x=along, y=level,
+                    xanchor=anchor_along,
+                    yanchor='bottom' if side == 'top' else 'top',
+                    xshift=shift_along,
+                    yshift=_LINE_LABEL_PAD if side == 'top' else -_LINE_LABEL_PAD)
+
+    font = {k: v for k, v in (('size', size), ('color', color)) if v is not None}
+    anns.update(text=str(text), showarrow=False, name=_LINE_LABEL_NAME, font=font)
+    return anns
+
+
+def _prefix_annotation(annotation):
+    """Turn ``_line_label_annotation`` output into ``annotation_*`` kwargs for
+    ``add_vline``/``add_hline``. Empty dict when there is no label.
+
+    Plotly derives an annotation's placement from the shape unless a property is
+    already set, so every key here survives verbatim; the shape's own refs give
+    us 'x' + 'y domain' (vline) / 'x domain' + 'y' (hline), which is the
+    coordinate system ``_line_label_annotation`` returns.
+    """
+    return {f'annotation_{k}': v for k, v in (annotation or {}).items()}
+
+# -----------------------------------------------------------------------------
 # Variable Format Resolver (used by multi-y plot)
 # -----------------------------------------------------------------------------
 _VAR_FORMAT_KEYS = ('color', 'marker', 'linestyle', 'markersize', 'linewidth', 'alpha', 'style')
@@ -4764,7 +4890,8 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Axes Based Decorations (Lines/Highlights/Scale)
     # ------------------------------------------------------------------
-    def line(self, column, level, color='red', linestyle=None, dash=None):
+    def line(self, column, level, color='red', linestyle=None, dash=None,
+             label=None, label_size=None, label_position=None, label_color=None):
         """Add a vertical or horizontal line to the next plot.
 
         Args:
@@ -4779,6 +4906,31 @@ class UnichartNotebook:
                 'dashdot', 'dot'). Defaults to 'dash'.
             dash (str, optional): Deprecated alias for ``linestyle``, kept for
                 backwards compatibility. Ignored if ``linestyle`` is given.
+            label (str, optional): Text drawn on the line, inside the plot area.
+            label_size (float or str, optional): Label font size — a number or a
+                size name ('small', 'lg', ...). Defaults to the ``axes_tick``
+                size from :meth:`set_font_sizes` when one is set, else Plotly's
+                default.
+            label_position (float or str, optional): Where the label sits **on**
+                the line. Either a 0-1 fraction along it (0 = bottom/left,
+                1 = top/right) or a string of position tokens; the two can be
+                combined, e.g. ``'bottom left'`` or ``'0.25 left'``.
+                For a vertical line: 'top'/'middle'/'bottom' slide the label,
+                'left'/'right' pick the side of the line the text sits on.
+                For a horizontal line: 'left'/'center'/'right' slide it,
+                'top'/'above' or 'bottom'/'below' pick the side.
+                Defaults to the far end of the line ('top right' for a vertical
+                line, 'right' and above the line for a horizontal one).
+            label_color (str, optional): Label text color. Defaults to ``color``.
+
+        On a subplot grid the label is repeated on every subplot the line is
+        drawn on, matching how the line itself repeats.
+
+        Examples:
+            nb.line('rpm', 5000, label='redline')
+            nb.line('cht', 400, color='orange', label='limit',
+                    label_size='lg', label_position='left')
+            nb.line('time', 12.5, label='event', label_position=0.25)
         """
         if level in ('clear', 'reset'):
             if column == 'all':
@@ -4791,9 +4943,37 @@ class UnichartNotebook:
         # neither is supplied, preserve the original default of 'dash'.
         style = linestyle if linestyle is not None else (dash if dash is not None else 'dash')
 
+        if label_size is not None:
+            if isinstance(label_size, str):
+                resolved = FONT_SIZE_MAP.get(label_size.lower())
+                if resolved is None:
+                    raise ValueError(f"label_size: unknown size name '{label_size}'. "
+                                     f"Valid names: {', '.join(sorted(FONT_SIZE_MAP))}")
+                label_size = resolved
+            if isinstance(label_size, bool) or not isinstance(label_size, (int, float)):
+                raise TypeError("label_size must be numeric or a size name, "
+                                f"got {type(label_size).__name__}")
+            if label_size <= 0:
+                raise ValueError(f"label_size must be positive, got {label_size}")
+            label_size = float(label_size)
+
+        # Position tokens can only be checked against an orientation, which is
+        # known at draw time; the type and a bare fraction are checked here.
+        if label_position is not None:
+            if isinstance(label_position, bool) or not isinstance(
+                    label_position, (int, float, str, list, tuple)):
+                raise TypeError("label_position must be a number (0-1) or a position string, "
+                                f"got {type(label_position).__name__}")
+            if isinstance(label_position, (int, float)) and not 0.0 <= float(label_position) <= 1.0:
+                raise ValueError("label_position fraction must be between 0 and 1, "
+                                 f"got {label_position}")
+
         if column not in self.lines: self.lines[column] = []
         plotly_dash = LINESTYLE_MAP_MPL_TO_PLOTLY.get(style, style)
-        self.lines[column].append({'level': level, 'color': color, 'dash': plotly_dash})
+        self.lines[column].append({'level': level, 'color': color, 'dash': plotly_dash,
+                                   'label': label, 'label_size': label_size,
+                                   'label_position': label_position,
+                                   'label_color': label_color})
 
     def highlight(self, column, range_tuple, color='yellow', alpha=0.2, opacity=None):
         """Add a highlighted region to the next plot.
@@ -5056,6 +5236,10 @@ class UnichartNotebook:
         sp_size = getattr(self, 'subplot_title_size', None)
         if sp_size is not None and fig.layout.annotations:
             for ann in fig.layout.annotations:
+                # Reference-line labels carry their own size; skip them so the
+                # subplot-title sweep doesn't overwrite it.
+                if (getattr(ann, 'name', None) or '').startswith(_LINE_LABEL_NAME):
+                    continue
                 ann.font = dict(size=sp_size)
 
         x_updates, y_updates = {}, {}
@@ -5358,7 +5542,8 @@ class UnichartNotebook:
                 for l in lines:
                     fig.add_vline(x=l['level'],
                                   line_dash=l['dash'] or 'solid',
-                                  line_color=l['color'])
+                                  line_color=l['color'],
+                                  **_prefix_annotation(self._line_label(l, 'vertical')))
             elif col in yref_for:
                 yref = yref_for[col]
                 for l in lines:
@@ -5366,6 +5551,12 @@ class UnichartNotebook:
                                   y0=l['level'], y1=l['level'],
                                   xref='paper', yref=yref,
                                   line=dict(color=l['color'], dash=l['dash'] or 'solid'))
+                    # The shape spans paper so it reaches across the stacked
+                    # y-axes; the label is placed against the x-axis domain
+                    # instead, so it lands inside the plot area, not a margin.
+                    ann = self._line_label(l, 'horizontal')
+                    if ann:
+                        fig.add_annotation(xref='x domain', yref=yref, **ann)
 
         for col, hls in self.highlights.items():
             if col == x:
@@ -6552,6 +6743,12 @@ class UnichartNotebook:
             self.last_fig.layout = {}
             self.last_fig = None
 
+    def _line_label(self, line_spec, orientation):
+        """Annotation kwargs for a reference line's label, or None if unlabeled.
+        Falls back to the axes-tick font size so labels track the plot's scale."""
+        return _line_label_annotation(line_spec, orientation,
+                                      getattr(self, 'axes_tick_size', None))
+
     def _apply_decorations(self, fig, x_vars, y_vars, mode, calc_ncols, plot_items=None,
                            highlight_layer='below'):
         """
@@ -6579,9 +6776,13 @@ class UnichartNotebook:
                                     xref=xref, yref=f'{yref} domain',
                                     line=dict(color=l['color'], dash=l['dash'] or 'solid')
                                 )
+                                ann = self._line_label(l, 'vertical')
+                                if ann:
+                                    fig.add_annotation(xref=xref, yref=f'{yref} domain', **ann)
                 else:
                     for l in col_lines:
-                        fig.add_vline(x=l['level'], line_dash=l['dash'] or 'solid', line_color=l['color'])
+                        fig.add_vline(x=l['level'], line_dash=l['dash'] or 'solid', line_color=l['color'],
+                                      **_prefix_annotation(self._line_label(l, 'vertical')))
 
             if col_name in y_list:
                 if mode == 'vars' and plot_items:
@@ -6595,9 +6796,13 @@ class UnichartNotebook:
                                     xref=f'{xref} domain', yref=yref,
                                     line=dict(color=l['color'], dash=l['dash'] or 'solid')
                                 )
+                                ann = self._line_label(l, 'horizontal')
+                                if ann:
+                                    fig.add_annotation(xref=f'{xref} domain', yref=yref, **ann)
                 else:
                     for l in col_lines:
-                        fig.add_hline(y=l['level'], line_dash=l['dash'] or 'solid', line_color=l['color'])
+                        fig.add_hline(y=l['level'], line_dash=l['dash'] or 'solid', line_color=l['color'],
+                                      **_prefix_annotation(self._line_label(l, 'horizontal')))
 
         for col_name, hls in self.highlights.items():
             if col_name in x_list:

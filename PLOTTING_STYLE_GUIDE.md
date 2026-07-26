@@ -143,6 +143,8 @@ State passthrough rules:
 | `_scatter_cls(n_points)` | `:217` | SVG vs WebGL scatter class |
 | `_get_uset_slice(selector)` | `:2788` | resolve a selector to a dataset list |
 | `_apply_decorations` | `:5243` | draw stored `lines` / `highlights` |
+| `self._line_label(line_spec, orientation)` | `:6746` | annotation kwargs for a reference line's label (`None` if unlabeled) |
+| `_prefix_annotation(annotation)` | `:392` | same, as `annotation_*` kwargs for `add_vline` / `add_hline` |
 | `_apply_fonts(fig)` | `:4012` | apply font-size settings |
 | `_finalize(fig, suppress_legends)` | `:4058` | shared tail: fonts + suppress + cache `last_fig` |
 | `_clear_last_fig()` | `:5236` | reset cached figure at method start |

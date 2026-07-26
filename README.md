@@ -197,6 +197,25 @@ nb.scale('pressure', (0, 100))                            # fix an axis range
 nb.suptitle = 'Overview'; nb.footer = 'source: rig A'      # figure text
 ```
 
+Reference lines can carry a **label**, drawn on the line inside the plot area:
+
+```python
+nb.line('rpm', 5000, label='redline')                     # default: far end of the line
+nb.line('cht', 400, color='orange', label='limit',
+        label_size='lg', label_position='left')           # named size + position
+nb.line('time', 12.5, label='event', label_position=0.25) # 0-1 fraction along the line
+nb.line('cht', 350, label='target', label_position='center below', label_color='gray')
+```
+
+- `label_size` — a number or a size name (`'small'`, `'lg'`, …, same vocabulary
+  as `set_font_sizes`). Defaults to the `axes_tick` size when one is set.
+- `label_position` — a `0`–`1` fraction along the line, or position tokens
+  (which may be combined with a fraction, e.g. `'0.25 left'`). A vertical line
+  slides with `'top'`/`'middle'`/`'bottom'` and picks its side with
+  `'left'`/`'right'`; a horizontal line slides with `'left'`/`'center'`/`'right'`
+  and picks its side with `'above'`/`'below'` (`'top'`/`'bottom'`).
+- `label_color` — defaults to the line's `color`.
+
 ### Resetting formatting
 
 Two consistent rules cover every reset:

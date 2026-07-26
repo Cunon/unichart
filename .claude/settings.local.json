@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git log *)",
+      "Bash(python3 -)",
+      "Bash(python3 -m py_compile unichart.py)",
+      "Bash(python3 -c \"import unichart, io, contextlib; nb=unichart.UnichartNotebook\\(\\); nb.help\\(\\)\")",
+      "Bash(git -C /home/tom/Documents/GitHub/unichart ls-files)",
+      "Bash(awk -F: '$1 > 2516 {print}')",
+      "Bash(python3 -c ' *)",
+      "Bash(git -C /home/tom/Documents/GitHub/unichart log --oneline -5)",
+      "Bash(python *)",
+      "Bash(python3 *)",
+      "Bash(awk -F'def ' '{print $2}')",
+      "Bash(jupyter nbconvert *)",
+      "Bash(echo \"---exit $?\")",
+      "Bash(PYTHONPATH=/home/tom/Documents/GitHub/unichart jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=180 demo_notebooks/resetting_formatting_demo.ipynb)",
+      "Bash(awk -F: '$1 < 1230')",
+      "Bash(git --no-pager diff --stat)"
+    ]
+  }
+}
