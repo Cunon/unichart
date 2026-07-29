@@ -611,6 +611,17 @@ def _data_col_indexer(cdf):
     return np.flatnonzero(cdf.columns.to_numpy() != _SET_ID_COL)
 
 
+def _compact_indices(indices):
+    """Render set indices compactly, collapsing runs: [0, 1, 2, 5] -> '0-2, 5'."""
+    runs = []
+    for i in sorted(indices):
+        if runs and i == runs[-1][1] + 1:
+            runs[-1][1] = i
+        else:
+            runs.append([i, i])
+    return ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in runs)
+
+
 class _DatasetFrameView:
     """Mutable per-set view onto a UnichartNotebook's combined DataFrame.
 
@@ -650,6 +661,12 @@ class _DatasetFrameView:
         return not isinstance(value, numbers.Number)
 
     def __setitem__(self, key, value):
+        self._assign(key, value)
+
+    def _assign(self, key, value, reapply=True):
+        """Body of ``__setitem__``. ``reapply=False`` skips the notebook-wide
+        query refresh so a caller writing several sets in one logical operation
+        can refresh once at the end instead of once per set."""
         notebook = self._dataset._notebook
         cdf = notebook._combined_df
         mask = (cdf[_SET_ID_COL] == self._dataset._set_id)
@@ -688,7 +705,8 @@ class _DatasetFrameView:
         # Writing through the view claims the column for this set — including
         # the case of filling NaNs into a column another set introduced.
         self._dataset._own_cols.add(key)
-        notebook._reapply_all_queries()
+        if reapply:
+            notebook._reapply_all_queries()
 
     @property
     def columns(self):
@@ -3410,25 +3428,57 @@ class UnichartNotebook:
     def set_column(self, uset_slice, col, value):
         """Write `value` into `col` for the selected sets only.
 
-        Adds the column (NaN-filled elsewhere) if it doesn't exist. `value` may
-        be a scalar or an array-like aligned to the total number of selected rows.
+        Adds the column (NaN-filled elsewhere) if it doesn't exist. `value` may be:
+
+        - a **scalar**, broadcast to every row of every selected set;
+        - an **array-like** sized to the *total* rows of the selected sets, laid
+          out in set order (a Series is consumed positionally, by length — it is
+          not aligned by label);
+        - a **callable** taking each target `Dataset` in turn and returning a
+          scalar or a per-set array-like — the per-set-formula form::
+
+              nb.set_column([0, 2], 'THRUST', lambda d: k[d.index] * d['N1'] ** 2)
+
+          Each set is written exactly as ``d[col] = fn(d)`` would write it, so a
+          returned Series aligns by label and a set carrying an active query
+          leaves its filtered-out rows NaN.
         """
         targets = self._get_uset_slice(uset_slice)
         if not targets:
             return
+        if callable(value):
+            # Delegate per set to the dataset write path, which already owns
+            # label alignment, length checks, dtype selection and ownership.
+            # Queries are refreshed once at the end, not once per set, so this
+            # stays a single logical write like the value path below.
+            for ds in targets:
+                ds._df_full._assign(col, value(ds), reapply=False)
+            self._reapply_all_queries()
+            return
         target_ids = {ds._set_id for ds in targets}
         cdf = self._combined_df
         mask = cdf[_SET_ID_COL].isin(target_ids)
-        if col not in cdf.columns:
-            cdf[col] = pd.NA
         if hasattr(value, '__len__') and not isinstance(value, str):
             n = int(mask.sum())
             if len(value) != n:
                 raise ValueError(
                     f"Length mismatch assigning '{col}': {len(value)} values for {n} rows.")
-            cdf.loc[mask, col] = list(value)
+            assign_val = np.asarray(value)
         else:
-            cdf.loc[mask, col] = value
+            assign_val = value
+        # Same dtype rule as ``ds[col] = ...``: numeric writes land in a float
+        # column, and only genuinely non-numeric data creates (or widens an
+        # existing numeric column to) object dtype.
+        incoming_object = _DatasetFrameView._is_object_like(assign_val)
+        if col not in cdf.columns:
+            cdf[col] = pd.Series(
+                None if incoming_object else np.nan,
+                index=cdf.index,
+                dtype=object if incoming_object else float,
+            )
+        elif incoming_object and cdf[col].dtype != object:
+            cdf[col] = cdf[col].astype(object)
+        cdf.loc[mask, col] = assign_val
         # The targeted sets claim the column — including the case of filling
         # NaNs into a column some other set introduced.
         for ds in targets:
@@ -6440,24 +6490,33 @@ class UnichartNotebook:
     def list_parms(self, set_number=None, search_string=None, use_regex=False):
         """
         List the parameters (columns) available in the loaded datasets.
+
+        With more than one dataset in scope, each parameter is annotated with
+        the sets that actually own it ('in all sets' when every set in scope
+        does), so a parameter calculated in only some sets is visible at a
+        glance. Returns the parameter names, as before.
         """
         import fnmatch
-        
+
         if set_number is None:
             target_sets = self.selected()
             if not target_sets:
                 target_sets = self.sets
         else:
             target_sets = self._get_uset_slice(set_number)
-            
+
         if not target_sets:
             print("No datasets available to list parameters from.")
             return []
-            
-        all_cols = set()
+
+        # ds.columns is the cheap ownership-aware view: no rows materialized,
+        # and all-NaN phantom columns introduced by other sets are excluded.
+        owners = {}
         for ds in target_sets:
-            all_cols.update(ds.df.columns)
-            
+            for col in ds.columns:
+                owners.setdefault(col, []).append(ds.index)
+        all_cols = set(owners)
+
         if search_string:
             try:
                 if not use_regex:
@@ -6477,7 +6536,7 @@ class UnichartNotebook:
             filtered_cols = list(all_cols)
             
         filtered_cols.sort(key=lambda x: str(x).lower())
-        
+
         print(f"Found {len(filtered_cols)} parameters", end="")
         if search_string:
             print(f" matching '{search_string}'", end="")
@@ -6485,11 +6544,25 @@ class UnichartNotebook:
             print(f" in set(s) {set_number}:")
         else:
             print(" in active datasets:")
-            
+
+        name_w = max([len(str(c)) for c in filtered_cols] + [25])
+        # The ownership column only earns its space when sets can differ.
+        tags = {}
+        if len(target_sets) > 1:
+            n_scope = len(target_sets)
+            tags = {c: ("in all sets" if len(owners[c]) == n_scope
+                        else f"in set{'' if len(owners[c]) == 1 else 's'} "
+                             f"{_compact_indices(owners[c])}")
+                    for c in filtered_cols}
+        tag_w = max([len(t) for t in tags.values()], default=0)
+
         for col in filtered_cols:
             desc = self.parm_description_dict.get(col, "No description available.")
-            print(f"  - {str(col).ljust(25)} : {desc}")
-            
+            if tags:
+                print(f"  - {str(col).ljust(name_w)} : {tags[col].ljust(tag_w)} : {desc}")
+            else:
+                print(f"  - {str(col).ljust(name_w)} : {desc}")
+
         return filtered_cols
 
     def summary(self, cols=None, print_table=False):
