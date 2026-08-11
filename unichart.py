@@ -1,8 +1,10 @@
+import copy
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.colors as pcolors
 import plotly.express as px
+import plotly.io as pio
 from plotly.subplots import make_subplots
 from scipy.interpolate import interp1d
 import warnings
@@ -78,6 +80,142 @@ def validate_linestyle(value):
 def marker_map(index):
     markers = list(MARKER_MAP_MPL_TO_PLOTLY.keys())
     return markers[index % len(markers)]
+
+
+# -----------------------------------------------------------------------------
+# Plot styles (Plotly look vs. Matplotlib look)
+# -----------------------------------------------------------------------------
+# unichart draws through Plotly, whose house style is recognizable: no axis
+# spines, a drawn zero line, its own color cycle and font. Figures are styled to
+# approximate Matplotlib's rcParams defaults instead, so they sit next to
+# Matplotlib output without reading as foreign. ``nb.set_plot_style('plotly')``
+# opts back into Plotly's native look.
+#
+# It takes two halves, because a Plotly template can only carry *layout*
+# defaults:
+#   * layout    — the templates below (backgrounds, spines, ticks, grid, fonts),
+#                 applied to the finished figure in UnichartNotebook._finalize.
+#   * per-trace — color and markersize live on each Dataset and are written
+#                 explicitly into every trace, so no template can reach them;
+#                 set_plot_style swaps color_map / default_format instead.
+
+PLOT_STYLES = ('matplotlib', 'plotly')
+
+# What a fresh UnichartNotebook starts with, and what reset_format('defaults')
+# returns to.
+DEFAULT_PLOT_STYLE = 'matplotlib'
+
+_PLOT_STYLE_ALIASES = {
+    'matplotlib': 'matplotlib', 'mpl': 'matplotlib',
+    'pyplot': 'matplotlib', 'plt': 'matplotlib',
+    'plotly': 'plotly',
+    # 'default'/'reset' track DEFAULT_PLOT_STYLE, so they keep meaning "however
+    # unichart ships" rather than naming one particular look.
+    'default': DEFAULT_PLOT_STYLE, 'reset': DEFAULT_PLOT_STYLE,
+}
+
+# Matplotlib's default property cycle (rcParams['axes.prop_cycle'] — "tab10").
+# Spelled out rather than pulled from px.colors.qualitative so the values are
+# readable here and don't ride on Plotly's palette naming.
+MPL_COLOR_CYCLE = [
+    '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+    '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+]
+
+# rcParams['font.family'] resolves to DejaVu Sans; the rest are fallbacks for
+# machines without it (browsers render these figures, not Matplotlib).
+MPL_FONT_FAMILY = 'DejaVu Sans, Verdana, Geneva, sans-serif'
+
+# Matplotlib font sizes are points at the figure DPI; Plotly's are pixels.
+# unichart maps one figsize inch to 100 px (see _base_layout), which is
+# Matplotlib's own default DPI, so points convert as px = pt * 100 / 72.
+_MPL_PT_TO_PX = 100.0 / 72.0
+
+
+def _mpl_px(points):
+    """Matplotlib points -> unichart pixels (at the 100 px/inch figure scale)."""
+    return round(points * _MPL_PT_TO_PX, 1)
+
+
+# rcParams sizes mapped onto unichart's font slots (see set_font_sizes):
+# figure.titlesize and axes.titlesize are 'large' (12 pt), the rest 'medium'
+# (10 pt) against font.size = 10. These are *style defaults* — an explicit
+# set_font_sizes value always wins (resolved in _font_size).
+MPL_FONT_SIZES = {
+    'suptitle_size':      _mpl_px(12),
+    'subplot_title_size': _mpl_px(12),
+    'axes_title_size':    _mpl_px(10),
+    'axes_tick_size':     _mpl_px(10),
+    'legend_size':        _mpl_px(10),
+    'footer_size':        _mpl_px(10),
+    'colorbar_size':      _mpl_px(10),
+    'hover_size':         _mpl_px(10),
+}
+
+# Per-dataset defaults the Matplotlib style overrides: rcParams['lines.markersize']
+# is 6 pt (~8.3 px) against unichart's 10, and rcParams['image.cmap'] is viridis
+# against unichart's Jet (contours and hue-colored scatters write the colorscale
+# explicitly per trace, so no template can reach it). lines.linewidth (1.5 pt
+# ~= 2.1 px) already rounds to unichart's default of 2, so linewidth is
+# deliberately left alone rather than clobbered for nothing.
+MPL_DATASET_FORMAT = {'markersize': _mpl_px(6), 'hue_palette': 'Viridis'}
+
+_MPL_TEMPLATE = 'unichart_matplotlib'
+_MPL_TEMPLATE_DARK = 'unichart_matplotlib_dark'
+
+
+def _build_mpl_template(darkmode):
+    """A Plotly template approximating Matplotlib's default rcParams (light) or
+    its ``dark_background`` style (dark), layered over Plotly's own
+    plotly_white / plotly_dark so unset attributes keep sane values.
+
+    Faithful to Matplotlib: white/black figure and axes face colors, black/white
+    spines on all four sides (axes.spines.* default True, axes.linewidth 0.8),
+    outward ticks (xtick.direction 'out', major.size 3.5, width 0.8), *no* zero
+    lines, the tab10 color cycle, viridis as the default colormap, DejaVu Sans,
+    and a light-gray legend frame (legend.edgecolor '0.8').
+
+    Deliberate departures:
+      * Grid *visibility* is left to unichart's own ``grid=`` argument (default
+        on) rather than Matplotlib's axes.grid=False, so the style can't fight
+        an explicit per-plot choice; only its color/width is styled to match
+        (grid.color '#b0b0b0', linewidth 0.8, solid).
+      * Dark mode keeps the tab10 cycle and dims the grid to #555555, instead of
+        dark_background's white grid and pastel cycle.
+    """
+    tpl = copy.deepcopy(pio.templates['plotly_dark' if darkmode else 'plotly_white'])
+    ink = 'white' if darkmode else 'black'          # axes.edgecolor / text.color
+    face = 'black' if darkmode else 'white'         # figure/axes.facecolor
+    grid = '#555555' if darkmode else '#b0b0b0'     # grid.color
+    viridis = list(pcolors.sequential.Viridis)      # rcParams['image.cmap']
+
+    axis = dict(
+        showline=True, linecolor=ink, linewidth=0.8, mirror=True,
+        ticks='outside', tickcolor=ink, ticklen=3.5, tickwidth=0.8,
+        zeroline=False,
+        showgrid=True, gridcolor=grid, gridwidth=0.8, griddash='solid',
+    )
+    tpl.layout.update(
+        font=dict(family=MPL_FONT_FAMILY, color=ink),
+        paper_bgcolor=face,
+        plot_bgcolor=face,
+        colorway=MPL_COLOR_CYCLE,
+        colorscale=dict(sequential=viridis, sequentialminus=viridis[::-1]),
+        xaxis=axis,
+        yaxis=axis,
+        legend=dict(bgcolor=face, bordercolor='#cccccc', borderwidth=0.8),
+    )
+    return tpl
+
+
+def _register_plot_style_templates():
+    """Register the Matplotlib-flavored templates with Plotly (idempotent), so
+    they can be referred to by name anywhere a template name is accepted."""
+    pio.templates[_MPL_TEMPLATE] = _build_mpl_template(False)
+    pio.templates[_MPL_TEMPLATE_DARK] = _build_mpl_template(True)
+
+
+_register_plot_style_templates()
 
 
 class CyclicList(list):
@@ -437,6 +575,9 @@ _DATASET_FORMAT_DEFAULTS = {
     'edge_color': 'black',
     'alpha':      1,
     'fill':       True,
+    # Colorscale for contours and hue-colored scatters. Lives here (rather than
+    # only on Dataset) so a plot style can swap it — see MPL_DATASET_FORMAT.
+    'hue_palette': 'Jet',
 }
 
 def _resolve_var_format(dataset, variable, variable_formats=None):
@@ -472,7 +613,8 @@ _STYLE_BY_ALIASES = {
 }
 
 
-def _style_by_formats(y_list, style_by, variable_formats=None):
+def _style_by_formats(y_list, style_by, variable_formats=None,
+                      color_cycle=None, marker_cycle=None):
     """
     Expand ``style_by`` into per-variable formats, auto-cycling the requested
     attribute(s) by the variable's position in ``y_list``.
@@ -481,6 +623,11 @@ def _style_by_formats(y_list, style_by, variable_formats=None):
     a string ('marker', 'color+linestyle', 'color, marker') or a list. Any
     attribute already present in ``variable_formats`` for a variable wins over
     the auto-cycled value, so explicit ``var_format`` calls behave as usual.
+
+    ``color_cycle`` / ``marker_cycle`` are the sequences to cycle — callers pass
+    the notebook's ``color_map`` / ``marker_map`` so the auto-styling follows the
+    active palette (and therefore the active plot style). Omitting them falls
+    back to the built-in defaults, which is what those maps hold anyway.
     """
     variable_formats = variable_formats or {}
     if not style_by:
@@ -496,14 +643,16 @@ def _style_by_formats(y_list, style_by, variable_formats=None):
                 f"combination like 'color+marker'; got {t!r}")
         if key not in attrs:
             attrs.append(key)
-    color_cycle = px.colors.qualitative.Plotly
+    color_cycle = list(color_cycle) if color_cycle else px.colors.qualitative.Plotly
+    marker_cycle = (list(marker_cycle) if marker_cycle
+                    else list(MARKER_MAP_MPL_TO_PLOTLY.keys()))
     merged = dict(variable_formats)
     for idx, var in enumerate(y_list):
         auto = {}
         if 'color' in attrs:
             auto['color'] = color_cycle[idx % len(color_cycle)]
         if 'marker' in attrs:
-            auto['marker'] = marker_map(idx)
+            auto['marker'] = marker_cycle[idx % len(marker_cycle)]
         if 'linestyle' in attrs:
             auto['linestyle'] = _STYLE_BY_LINESTYLES[idx % len(_STYLE_BY_LINESTYLES)]
         auto.update(variable_formats.get(var, {}))
@@ -787,7 +936,7 @@ class Dataset:
         self.markersize = fmt.get('markersize', 10)
         self.alpha = fmt.get('alpha', 1)
         self.hue = ""
-        self.hue_palette = "Jet"
+        self.hue_palette = fmt.get('hue_palette', 'Jet')
         self.hue_order = None
         self.reg_order = None
         self.style = None
@@ -2717,6 +2866,7 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
                         darkmode=False, figsize=(12, 8),
                         x_lim=None, axis_limits=None,
                         legend='right', legend_group_by='sets', style_by=None,
+                        color_cycle=None, marker_cycle=None,
                         return_axes=False):
     """
     Single-plot, multi-Y-axis scatter/line chart.
@@ -2767,7 +2917,9 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
     if not y_list:
         raise ValueError("At least one y variable is required.")
 
-    variable_formats = _style_by_formats(y_list, style_by, variable_formats)
+    variable_formats = _style_by_formats(y_list, style_by, variable_formats,
+                                         color_cycle=color_cycle,
+                                         marker_cycle=marker_cycle)
 
     # Domain math: extra y-axes (3+) live to the right of the plot.
     extras = max(0, len(y_list) - 2)
@@ -2940,7 +3092,7 @@ class UnichartNotebook:
         self.last_y = None
         self.last_format = 'stack'
         self.last_ymult_format = 'color'
-        self.darkmode = False 
+        self.darkmode = False
         self.last_ncols = None
         self.last_nrows = None
         self.last_fig = None
@@ -3013,6 +3165,13 @@ class UnichartNotebook:
         # stays controlled by color_map. Marker defaults to per-index (marker_map)
         # but set_default_format can pin it to a symbol or disable it (None).
         self.default_format = dict(_DATASET_FORMAT_DEFAULTS)
+
+        # Overall look of the figures: 'matplotlib' (default) or 'plotly'.
+        # Orthogonal to darkmode — each style has a light and a dark variant.
+        # Installs plot_style, the style's color_map / default_format entries and
+        # its font-size fallbacks (_style_font_defaults), so it must run *after*
+        # color_map and default_format exist. Change via set_plot_style.
+        self._apply_style_defaults(DEFAULT_PLOT_STYLE)
 
         # Optional fixed inner plot-area size (px, w/h, either may be None) so
         # plots stay the same size regardless of suptitle/legend/margins. Set
@@ -3984,7 +4143,7 @@ class UnichartNotebook:
             'edge_color':  lambda: fmt.get('edge_color', 'black'),
             'fill':        lambda: fmt.get('fill', True),
             'hue':         lambda: "",
-            'hue_palette': lambda: "Jet",
+            'hue_palette': lambda: fmt.get('hue_palette', 'Jet'),
             'hue_order':   lambda: None,
             'reg_order':   lambda: None,
             'plot_type':   lambda: 'scatter',
@@ -4011,6 +4170,11 @@ class UnichartNotebook:
         self.default_format = dict(_DATASET_FORMAT_DEFAULTS)
         self.figsize = (12, 8)
         self.plot_defaults = {k: None for k in self.plot_defaults}
+        # The plot style is a default too (it drives color_map, default_format
+        # and the font-size fallbacks), so a defaults reset returns to the
+        # shipped style. Loaded datasets are left alone; reset_format('sets')
+        # restyles those.
+        self._apply_style_defaults(DEFAULT_PLOT_STYLE)
 
     def reset_format(self, *what, uset_slice=None, sets=None, vars=None,
                      lines=None, highlights=None, scale=None, fonts=None):
@@ -4021,8 +4185,9 @@ class UnichartNotebook:
         (dataset styles, variable overrides, lines, highlights, axis limits,
         font sizes, pinned plot size). Pass scope names to reset only those.
         The *defaults themselves* (``set_default_format`` state, figsize,
-        per-call plot defaults) are only reset when you ask for ``'defaults'``
-        explicitly, or reset everything with ``'all'``.
+        per-call plot defaults, the ``set_plot_style`` look) are only reset when
+        you ask for ``'defaults'`` explicitly, or reset everything with
+        ``'all'``.
 
         Parameters
         ----------
@@ -4163,14 +4328,15 @@ class UnichartNotebook:
 
     def set_default_format(self, markersize=None, linestyle=None, linewidth=None,
                            edgewidth=None, edge_color=None, alpha=None, fill=None,
-                           marker=_UNSET, figsize=None, legend=None,
+                           marker=_UNSET, hue_palette=None, figsize=None, legend=None,
                            suppress_legends=None, ncols=None, nrows=None,
                            barmode=None, agg=None, histfunc=None, histnorm=None,
                            boxmode=None, points=None, reset=False):
         """Set notebook-wide defaults for styling and for the plot methods.
 
         Two kinds of default live here. **Per-dataset styles** (markersize,
-        linestyle, linewidth, edgewidth, edge_color, alpha, fill, marker) are the
+        linestyle, linewidth, edgewidth, edge_color, alpha, fill, marker,
+        hue_palette — the colorscale for contours and hue-colored scatters) are the
         markersize/linewidth analogue of ``color_map``/``marker_map``, applied to
         *future* loaded datasets; already-loaded sets keep their styling until
         ``reset_format()`` re-applies the new defaults. **Figure / per-call
@@ -4274,6 +4440,11 @@ class UnichartNotebook:
             if not validate_color(edge_color):
                 raise ValueError(f"edge_color must be a color string, got {edge_color!r}")
             updates['edge_color'] = edge_color
+        if hue_palette is not None:
+            if not isinstance(hue_palette, str):
+                raise TypeError("hue_palette must be a Plotly colorscale name "
+                                f"(e.g. 'Viridis'), got {type(hue_palette).__name__}")
+            updates['hue_palette'] = hue_palette
         if fill is not None:
             s = str(fill).lower()
             if s in ('true', '1', 't', 'on'):
@@ -4485,7 +4656,93 @@ class UnichartNotebook:
             
         mode = "Dark" if self.darkmode else "Light"
         print(f"Plot theme set to: {mode} Mode")
-    
+
+    def _template_name(self):
+        """Plotly template for the active (plot_style, darkmode) pair."""
+        if self.plot_style == 'matplotlib':
+            return _MPL_TEMPLATE_DARK if self.darkmode else _MPL_TEMPLATE
+        return "plotly_dark" if self.darkmode else "plotly_white"
+
+    def _apply_style_defaults(self, style):
+        """Install a plot style's *defaults*: color_map, the per-dataset format
+        entries the style owns, and its preferred font sizes.
+
+        Deliberately does not touch already-loaded datasets (that is
+        ``set_plot_style``'s ``sets`` argument) or the figure layout (that is
+        ``_template_name``, applied in ``_finalize``). Reverting to 'plotly'
+        restores only the keys a style owns, so unrelated
+        ``set_default_format`` choices survive a style switch.
+        """
+        self.plot_style = style
+        if style == 'matplotlib':
+            self.color_map = list(MPL_COLOR_CYCLE)
+            self.default_format.update(MPL_DATASET_FORMAT)
+            self._style_font_defaults = dict(MPL_FONT_SIZES)
+        else:
+            self.color_map = px.colors.qualitative.Plotly
+            for key in MPL_DATASET_FORMAT:
+                self.default_format[key] = _DATASET_FORMAT_DEFAULTS[key]
+            self._style_font_defaults = {}
+
+    def set_plot_style(self, style=DEFAULT_PLOT_STYLE, sets=True):
+        """Switch the overall look of the figures between Matplotlib's and
+        Plotly's.
+
+        ``'matplotlib'`` is what a notebook starts with: plots approximate
+        Matplotlib's defaults — white (or black, in dark mode) plot area framed
+        by spines on all four sides, outward ticks, no zero lines, a gray grid,
+        DejaVu Sans at Matplotlib's point sizes, the tab10 color cycle, and
+        viridis for contours. ``'plotly'`` opts into Plotly's own house style
+        instead, which is how unichart drew before plot styles existed.
+
+        The style is orthogonal to :meth:`toggle_darkmode` — both styles have a
+        light and a dark variant — and to the rest of the formatting API: any
+        explicit ``color``/``markersize``/``set_font_sizes``/``var_format``
+        value you set afterwards still wins.
+
+        Parameters
+        ----------
+        style : str
+            ``'matplotlib'`` (the default; also ``'mpl'``, ``'plt'``,
+            ``'pyplot'``) or ``'plotly'``. ``'default'`` and ``'reset'`` name
+            whichever style unichart ships with, currently ``'matplotlib'``.
+        sets : bool
+            Re-derive the **already loaded** datasets' color, markersize and
+            hue palette from the new style, so a switch takes effect on data you
+            loaded earlier. This clears manual ``nb.color(...)`` /
+            ``nb.markersize(...)`` / ``nb.hue_palette(...)`` overrides on those
+            sets — pass ``sets=False`` to keep them (only future loads and the
+            layout then follow the new style).
+
+        Notes
+        -----
+        Two things stay outside the style. Matplotlib draws line plots without
+        markers while unichart assigns one per dataset — turn them off with
+        ``nb.set_default_format(marker=None)`` if you want that too. And
+        ``dashboard`` panels override the figure font with the board's UI font
+        so charts and chrome read as one surface, so the DejaVu font (only) is
+        not carried into dashboards.
+
+        Examples
+        --------
+        nb.set_plot_style('plotly')                  # Plotly's native look
+        nb.set_plot_style('plotly', sets=False)      # ...keeping hand-set colors
+        nb.set_plot_style('matplotlib')              # back to the default look
+        """
+        key = style.strip().lower() if isinstance(style, str) else style
+        resolved = _PLOT_STYLE_ALIASES.get(key)
+        if resolved is None:
+            valid = ', '.join(sorted(set(_PLOT_STYLE_ALIASES)))
+            raise ValueError(f"Unknown plot style {style!r}. Valid names: {valid}")
+
+        self._apply_style_defaults(resolved)
+        if sets:
+            for ds in self.sets:
+                self._reset_set_attrs(ds, ('color', 'markersize', 'hue_palette'))
+        print(f"Plot style set to: {resolved}"
+              f"{' (existing datasets restyled)' if sets and self.sets else ''}")
+
+
     # ------------------------------------------------------------------
     # Analysis
     # ------------------------------------------------------------------
@@ -5216,6 +5473,37 @@ class UnichartNotebook:
             fig.update_layout(height=ph + mv(m.t, 100) + mv(m.b, 80))
         return fig
 
+    def _font_size(self, name):
+        """Resolved size for one font slot (e.g. ``'axes_tick_size'``): an
+        explicit :meth:`set_font_sizes` value wins, else the active plot
+        style's preference, else None (leave Plotly's own default).
+
+        Keeping style sizes in ``_style_font_defaults`` rather than writing them
+        into the ``*_size`` attributes means ``get_font_sizes`` keeps reporting
+        what the *user* set, and ``set_font_sizes(reset=True)`` clears only that.
+        """
+        value = getattr(self, name, None)
+        if value is not None:
+            return value
+        return self._style_font_defaults.get(name)
+
+    def _apply_style(self, fig):
+        """Re-theme a finished figure for the active plot style.
+
+        Layout only: swapping the template restyles backgrounds, spines, ticks,
+        grid and fonts, but cannot reach per-trace colors and markers (those are
+        written explicitly from each Dataset) — :meth:`set_plot_style` owns that
+        half.
+
+        Skipped for the 'plotly' style: ``_base_layout`` already set
+        plotly_white / plotly_dark on the way in, so there is nothing to swap
+        and the figure comes out exactly as it did before plot styles existed.
+        """
+        if fig is None or self.plot_style == 'plotly':
+            return fig
+        fig.update_layout(template=self._template_name())
+        return fig
+
     def _apply_footer(self, fig, footer):
         """Add a bottom text box (footer/caption) and reserve room for it below
         the x-axis labels. No-op when ``footer`` is falsy, so the default
@@ -5227,9 +5515,10 @@ class UnichartNotebook:
         right after this in ``_finalize``."""
         if fig is None or not footer:
             return fig
+        footer_size = self._font_size('footer_size')
         text = footer.replace('\n', '<br>')
         m = fig.layout.margin
-        band = _bottom_space(text, self.footer_size)
+        band = _bottom_space(text, footer_size)
         base_b = m.b if m.b is not None else 80
         new_b = base_b + band
         fig.update_layout(margin=dict(b=new_b))
@@ -5248,42 +5537,47 @@ class UnichartNotebook:
         ann = dict(text=text, showarrow=False, align='center',
                    x=0.5, xref='paper', xanchor='center',
                    y=y, yref='paper', yanchor='bottom')
-        if self.footer_size is not None:
-            ann['font'] = dict(size=self.footer_size)
+        if footer_size is not None:
+            ann['font'] = dict(size=footer_size)
         fig.add_annotation(**ann)
         return fig
 
     def _apply_fonts(self, fig):
-        """Apply stored font sizes to a Plotly figure."""
+        """Apply the resolved font sizes (user settings over plot-style
+        defaults — see :meth:`_font_size`) to a Plotly figure."""
         if fig is None:
             return fig
 
+        suptitle_size = self._font_size('suptitle_size')
+        legend_size = self._font_size('legend_size')
+        hover_size = self._font_size('hover_size')
+
         layout_updates = {}
-        if self.suptitle_size is not None:
-            layout_updates['title_font'] = dict(size=self.suptitle_size)
-        if self.legend_size is not None:
-            layout_updates['legend'] = dict(font=dict(size=self.legend_size))
-        if getattr(self, 'hover_size', None) is not None:
-            layout_updates['hoverlabel'] = dict(font=dict(size=self.hover_size))
+        if suptitle_size is not None:
+            layout_updates['title_font'] = dict(size=suptitle_size)
+        if legend_size is not None:
+            layout_updates['legend'] = dict(font=dict(size=legend_size))
+        if hover_size is not None:
+            layout_updates['hoverlabel'] = dict(font=dict(size=hover_size))
         if layout_updates:
             fig.update_layout(**layout_updates)
 
         # With the (possibly larger) custom title font now applied, re-reserve
         # the top space so a bigger suptitle can't collide with an above-legend.
         # _base_layout sized it for the default font; redo it for the real size.
-        if self.suptitle_size is not None and fig.layout.title.text:
+        if suptitle_size is not None and fig.layout.title.text:
             height = fig.layout.height or 800
             leg = fig.layout.legend
             has_above = (leg.orientation == 'h' and leg.yref == 'container')
             top_margin, title_pos, legend_pos = _top_space(
                 fig.layout.title.text, (None, height / 100), has_above,
-                title_font_size=self.suptitle_size)
+                title_font_size=suptitle_size)
             geo = {'margin': dict(t=top_margin), 'title': dict(y=title_pos['y'])}
             if legend_pos is not None:
                 geo['legend'] = dict(y=legend_pos['y'])
             fig.update_layout(**geo)
 
-        sp_size = getattr(self, 'subplot_title_size', None)
+        sp_size = self._font_size('subplot_title_size')
         if sp_size is not None and fig.layout.annotations:
             for ann in fig.layout.annotations:
                 # Reference-line labels carry their own size; skip them so the
@@ -5292,19 +5586,21 @@ class UnichartNotebook:
                     continue
                 ann.font = dict(size=sp_size)
 
+        axes_title_size = self._font_size('axes_title_size')
+        axes_tick_size = self._font_size('axes_tick_size')
         x_updates, y_updates = {}, {}
-        if self.axes_title_size is not None:
-            x_updates['title_font'] = dict(size=self.axes_title_size)
-            y_updates['title_font'] = dict(size=self.axes_title_size)
-        if self.axes_tick_size is not None:
-            x_updates['tickfont'] = dict(size=self.axes_tick_size)
-            y_updates['tickfont'] = dict(size=self.axes_tick_size)
+        if axes_title_size is not None:
+            x_updates['title_font'] = dict(size=axes_title_size)
+            y_updates['title_font'] = dict(size=axes_title_size)
+        if axes_tick_size is not None:
+            x_updates['tickfont'] = dict(size=axes_tick_size)
+            y_updates['tickfont'] = dict(size=axes_tick_size)
         if x_updates:
             fig.update_xaxes(**x_updates)
         if y_updates:
             fig.update_yaxes(**y_updates)
 
-        cb_size = getattr(self, 'colorbar_size', None)
+        cb_size = self._font_size('colorbar_size')
         if cb_size is not None:
             for trace in fig.data:
                 cb = getattr(trace, 'colorbar', None)
@@ -5319,9 +5615,9 @@ class UnichartNotebook:
         return fig
 
     def _finalize(self, fig, suppress_legends, footer=None):
-        """Shared tail for every plotting method: apply font sizes, add the
-        optional footer, optionally collapse traces to legend-only, and cache the
-        figure as ``last_fig``.
+        """Shared tail for every plotting method: apply the plot style and font
+        sizes, add the optional footer, optionally collapse traces to
+        legend-only, and cache the figure as ``last_fig``.
 
         This is the one step a new plotting method must not forget — keeping the
         ``self.last_fig`` cache contract in a single place. Grid sizing, decorations,
@@ -5331,6 +5627,7 @@ class UnichartNotebook:
         doesn't resize it) and before ``_enforce_plot_size`` (so the reserved
         bottom margin is included when pinning the plot area).
         """
+        fig = self._apply_style(fig)
         fig = self._apply_fonts(fig)
         fig = self._apply_footer(fig, footer)
         fig = self._enforce_plot_size(fig)
@@ -5549,6 +5846,8 @@ class UnichartNotebook:
         ``style_by`` auto-differentiates the y variables by cycling one or more
         attributes per variable: ``'color'``, ``'marker'``, ``'linestyle'``, or
         a combination (``'color+marker'``, ``['marker', 'linestyle']``, ...).
+        Colors and markers cycle ``color_map`` / ``marker_map``, so they follow
+        the active palette and :meth:`set_plot_style`.
         Any attribute set via :meth:`var_format` still overrides the auto value
         for that variable, and unstyled attributes fall back to the dataset as
         usual. With ``'color'``, each variable's y-axis is tinted to match.
@@ -5577,6 +5876,8 @@ class UnichartNotebook:
             legend=legend,
             legend_group_by=legend_group_by,
             style_by=style_by,
+            color_cycle=self.color_map,
+            marker_cycle=self.marker_map,
             return_axes=True,
         )
         if fig is None:
@@ -6360,7 +6661,7 @@ class UnichartNotebook:
 
         layout_args = {
             'title': {'text': title or "Data Table", 'x': 0.5},
-            'template': "plotly_dark" if self.darkmode else "plotly_white",
+            'template': self._template_name(),
             'margin': dict(l=20, r=20, t=50, b=20),
         }
         fig.update_layout(**layout_args)
@@ -6671,8 +6972,8 @@ class UnichartNotebook:
                               'var_format', 'clear_var_format', 'list_var_formats',
                               'set_display_parms', 'set_title', 'set_default_format',
                               'reset_format', 'set_font_sizes', 'get_font_sizes',
-                              'toggle_darkmode', 'scale', 'set_plot_size',
-                              'set_static_images']),
+                              'toggle_darkmode', 'set_plot_style', 'scale',
+                              'set_plot_size', 'set_static_images']),
         ("Analysis & stats", ['delta', 'table', 'table_read', 'summary', 'reg_info',
                               'min', 'max', 'mean', 'median']),
         ("Info",             ['list_sets', 'list_parms', 'refresh_own_columns',

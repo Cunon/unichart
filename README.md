@@ -56,7 +56,7 @@ typical loop is:
 | **1. Load** | `load_df` · `load` · `load_clipboard` |
 | **2. Select** | `select` · `omit` · `query` · `restore` |
 | **3. Plot** | `plot` · `plot_ymult` · `bar` · `box` · `histogram` · `contour` · `table` |
-| **4. Style** | `color` · `marker` · `var_format` · `set_default_format` · `toggle_darkmode` |
+| **4. Style** | `color` · `marker` · `var_format` · `set_default_format` · `toggle_darkmode` · `set_plot_style` |
 | **5. Analyse** | `delta` · `table` · `summary` · `reg_info` · `combine_sets` |
 
 Two conveniences run through the whole API:
@@ -178,6 +178,7 @@ nb.var_format('Pressure', color='reset')              # drop just the color over
 - `set_color_palette` / `color_map` / `marker_map` — the ordered lists assigned
   to datasets by index (integer lookups cycle).
 - `toggle_darkmode(True/False)` — dark theme.
+- `set_plot_style('matplotlib')` — Matplotlib-look figures (see below).
 - `set_font_sizes` / `get_font_sizes` — named sizes (`'sm'`, `'lg'`, `'xl'`, …)
   for title, legend, axes, ticks, table cells, hover, etc.
 - `set_plot_size` — pin the inner plot area so plots stay the same size
@@ -187,6 +188,34 @@ nb.var_format('Pressure', color='reset')              # drop just the color over
 
 Marker and line-style strings are **Matplotlib-compatible** (`'o'`, `'s'`,
 `'^'`, `'--'`, `'-.'`, `':'`) and translated to Plotly automatically.
+
+### Matplotlib look
+
+Plots are drawn with Plotly and look like it. If your figures need to sit next
+to Matplotlib output — a paper, a report, a deck already full of `pyplot` —
+switch the whole environment over:
+
+```python
+nb.set_plot_style('matplotlib')   # or 'mpl' / 'plt'
+nb.set_plot_style('plotly')       # back to the default look
+```
+
+That restyles plots to approximate Matplotlib's defaults: a white (or black, in
+dark mode) plot area framed by spines on all four sides, outward ticks, no zero
+lines, a gray grid, DejaVu Sans at Matplotlib's point sizes, the **tab10** color
+cycle, and **viridis** for contours and hue-colored scatters.
+
+- It is **orthogonal to `toggle_darkmode`** — each style has a light and a dark
+  variant — and to the rest of the formatting API: `color`, `markersize`,
+  `var_format`, `set_font_sizes` and friends still win wherever you set them.
+- Existing datasets are restyled too. That clears manual `color()` /
+  `markersize()` / `hue_palette()` overrides on them; pass `sets=False` to keep
+  those and apply the style only to the layout and to future loads.
+- Two Matplotlib habits stay opt-in: it draws lines *without* markers
+  (`nb.set_default_format(marker=None)` if you want that), and dashboards keep
+  the board's UI font so charts and chrome read as one surface.
+- `reset_format('all')` (or `'defaults'`) returns to the `'plotly'` style along
+  with the other stored defaults.
 
 ### Decorations
 
@@ -352,6 +381,7 @@ Dash is imported lazily, so the core toolkit never requires it.
   - `delta_demo.ipynb`, `interpolation_table_tests.ipynb` — analysis.
   - `variable_color_formatting_demo.ipynb`, `marker_map_tests.ipynb`,
     `color_map_tests.ipynb`, `environment_presets_demo.ipynb` — styling.
+  - `plot_style_demo.ipynb` — the Matplotlib look (`set_plot_style`).
   - `contour_overlay_demo.ipynb`, `static_images_demo.ipynb`,
     `large_data_showcase.ipynb` — specialized plotting.
 

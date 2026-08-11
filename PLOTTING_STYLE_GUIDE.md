@@ -146,11 +146,40 @@ State passthrough rules:
 | `self._line_label(line_spec, orientation)` | `:6746` | annotation kwargs for a reference line's label (`None` if unlabeled) |
 | `_prefix_annotation(annotation)` | `:392` | same, as `annotation_*` kwargs for `add_vline` / `add_hline` |
 | `_apply_fonts(fig)` | `:4012` | apply font-size settings |
-| `_finalize(fig, suppress_legends)` | `:4058` | shared tail: fonts + suppress + cache `last_fig` |
+| `_font_size(slot)` | — | resolve one font slot: user setting → plot style → Plotly default |
+| `_template_name()` | — | Plotly template for the active `(plot_style, darkmode)` pair |
+| `_apply_style(fig)` | — | re-theme a finished figure for the active plot style |
+| `_finalize(fig, suppress_legends)` | `:4058` | shared tail: style + fonts + suppress + cache `last_fig` |
 | `_clear_last_fig()` | `:5236` | reset cached figure at method start |
 
 If you need grid math or layout scaffolding and one of these fits, call it — do not
 inline a second copy.
+
+### Plot styles
+
+`set_plot_style('matplotlib' | 'plotly')` changes the overall look. It is
+orthogonal to `darkmode` — each style has a light and a dark variant — and it is
+applied in **two** places, because a Plotly template can only carry layout
+defaults:
+
+- **Layout** — `_finalize` calls `_apply_style`, which swaps the figure's
+  template. Nothing else is needed, *provided your method ends in `_finalize`*.
+- **Per-trace** — colors, markersize and the hue colorscale are written
+  explicitly into each trace from the `Dataset`, so no template can reach them.
+  `set_plot_style` swaps `color_map` and the `default_format` entries instead
+  (`MPL_COLOR_CYCLE`, `MPL_DATASET_FORMAT`).
+
+Rules for new code:
+
+- **Never write `"plotly_dark" if self.darkmode else "plotly_white"`.** Call
+  `self._template_name()` — the ternary ignores the plot style. (Render
+  functions in Layer A still take `darkmode` and hand it to `_base_layout`; the
+  style is layered on afterwards, in `_finalize`.)
+- **Read font sizes through `_font_size('axes_tick_size')`**, not
+  `self.axes_tick_size`, so a style default applies when the user hasn't set one.
+- A per-dataset attribute a style should be able to change belongs in
+  `_DATASET_FORMAT_DEFAULTS` (read via `notebook.default_format`), not
+  hardcoded in `Dataset.__init__`.
 
 ---
 

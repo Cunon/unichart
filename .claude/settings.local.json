@@ -16,7 +16,12 @@
       "Bash(echo \"---exit $?\")",
       "Bash(PYTHONPATH=/home/tom/Documents/GitHub/unichart jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=180 demo_notebooks/resetting_formatting_demo.ipynb)",
       "Bash(awk -F: '$1 < 1230')",
-      "Bash(git --no-pager diff --stat)"
+      "Bash(git --no-pager diff --stat)",
+      "Bash(git --no-pager diff)",
+      "Read(//usr/bin/**)",
+      "Bash(command -v git.exe)",
+      "Read(//usr/lib/git-core/**)",
+      "Bash(PYTHONPATH=/home/tom/Documents/GitHub/unichart python3 -m nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=180 demo_notebooks/adding_parameters_demo.ipynb)"
     ]
   }
 }
