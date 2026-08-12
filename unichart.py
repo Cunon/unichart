@@ -5374,16 +5374,19 @@ class UnichartNotebook:
         Parameters
         ----------
         suptitle, footer, legend, axes_title, axes_tick, subplot_title, colorbar, hover : float or str
-            Font sizes for plot elements.
+            Font sizes for plot elements. ``'reset'`` clears that one size back
+            to its default.
         table_header : float or str
             Font size for table header row.
         table_cell : float or str
             Font size for table cell content.
         all : float or str
             Set all font sizes at once (overridden by individual parameters).
+            ``all='reset'`` clears every size back to the defaults, with
+            individual parameters still applied on top.
         reset : bool
             Reset all font sizes to defaults (equivalent to
-            ``reset_format('fonts')``).
+            ``reset_format('fonts')`` or ``all='reset'``).
         """
         keys = ('suptitle_size', 'footer_size', 'legend_size', 'axes_title_size', 'axes_tick_size',
                 'subplot_title_size', 'colorbar_size', 'hover_size', 'table_header_size', 'table_cell_size')
@@ -5397,6 +5400,8 @@ class UnichartNotebook:
             if value is None:
                 return None
             if isinstance(value, str):
+                if value.lower() == 'reset':
+                    return 'reset'
                 resolved = FONT_SIZE_MAP.get(value.lower())
                 if resolved is None:
                     valid = ', '.join(sorted(FONT_SIZE_MAP))
@@ -5424,7 +5429,9 @@ class UnichartNotebook:
             'table_cell_size':    _validate('table_cell', table_cell)       if table_cell    is not None else base,
         }
         for k, v in resolved.items():
-            if v is not None:
+            if v == 'reset':
+                setattr(self, k, None)
+            elif v is not None:
                 setattr(self, k, v)
 
 
