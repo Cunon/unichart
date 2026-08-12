@@ -183,6 +183,9 @@ nb.var_format('Pressure', color='reset')              # drop just the color over
   for title, legend, axes, ticks, table cells, hover, etc.
 - `set_plot_size` — pin the inner plot area so plots stay the same size
   regardless of titles/legends.
+- `grid(...)` — gridline formatting: visibility, color, width, dash pattern,
+  per axis (`axis='x'/'y'/'both'`) and major/minor (`which=`), e.g.
+  `nb.grid(color='lightgray', dash=':')` or `nb.grid(which='minor', visible=True)`.
 - `set_static_images(True)` / `save_png(...)` — render flat PNGs inline (keeps
   notebook file size down) or export a high-resolution PNG (needs `kaleido`).
 

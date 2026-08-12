@@ -34,6 +34,10 @@ LINESTYLE_MAP_MPL_TO_PLOTLY = {
     'None': None, ' ': None, '': None
 }
 
+# Dash patterns Plotly accepts for gridlines (axis.griddash). Matplotlib-style
+# aliases ('-', '--', ...) are also accepted via LINESTYLE_MAP_MPL_TO_PLOTLY.
+GRID_DASH_OPTIONS = ('solid', 'dot', 'dash', 'longdash', 'dashdot', 'longdashdot')
+
 FONT_SIZE_MAP = {
     'xs':     8,
     'xsmall': 8,
@@ -179,14 +183,18 @@ def _build_mpl_template(darkmode):
       * Grid *visibility* is left to unichart's own ``grid=`` argument (default
         on) rather than Matplotlib's axes.grid=False, so the style can't fight
         an explicit per-plot choice; only its color/width is styled to match
-        (grid.color '#b0b0b0', linewidth 0.8, solid).
-      * Dark mode keeps the tab10 cycle and dims the grid to #555555, instead of
-        dark_background's white grid and pastel cycle.
+        (linewidth 0.8, solid), at half the opacity of Matplotlib's grid.color
+        '0.8' so the grid sits further behind the data. Override via nb.grid().
+      * Dark mode keeps the tab10 cycle and dims the grid (a translucent gray
+        rather than dark_background's white grid), with the pastel cycle also
+        dropped.
     """
     tpl = copy.deepcopy(pio.templates['plotly_dark' if darkmode else 'plotly_white'])
     ink = 'white' if darkmode else 'black'          # axes.edgecolor / text.color
     face = 'black' if darkmode else 'white'         # figure/axes.facecolor
-    grid = '#555555' if darkmode else '#b0b0b0'     # grid.color
+    # ~#b0b0b0 / #555555 at 50% alpha; translucency keeps the grid visually
+    # behind dense data instead of competing with it.
+    grid = 'rgba(85,85,85,0.5)' if darkmode else 'rgba(176,176,176,0.5)'
     viridis = list(pcolors.sequential.Viridis)      # rcParams['image.cmap']
 
     axis = dict(
@@ -3178,6 +3186,13 @@ class UnichartNotebook:
         # via set_plot_size; applied in _finalize. None = size driven by figsize.
         self.plot_size = None
 
+        # Sticky gridline formatting set via nb.grid(). Shape:
+        # {'x'|'y': {'major'|'minor': {'visible'|'color'|'width'|'dash': value}}}.
+        # Empty inner dicts = leave the plot style's grid alone. Applied to every
+        # figure in _finalize (see _apply_grid); cleared by nb.grid(reset=True)
+        # or reset_format('grid').
+        self.grid_format = self._empty_grid_format()
+
         self.suptitle_size = None
         self.footer_size = None
         self.legend_size = None
@@ -4106,19 +4121,21 @@ class UnichartNotebook:
 
     # Scope names reset_format understands, plus forgiving aliases.
     _RESET_SCOPES = ('sets', 'vars', 'lines', 'highlights', 'scales',
-                     'fonts', 'plot_size', 'defaults')
+                     'fonts', 'plot_size', 'grid', 'defaults')
     _RESET_ALIASES = {'set': 'sets', 'var': 'vars', 'variable': 'vars',
                       'variables': 'vars', 'line': 'lines',
                       'highlight': 'highlights', 'scale': 'scales',
                       'limits': 'scales', 'axis_limits': 'scales',
                       'font': 'fonts', 'font_sizes': 'fonts',
-                      'plotsize': 'plot_size', 'default': 'defaults'}
+                      'plotsize': 'plot_size', 'default': 'defaults',
+                      'grids': 'grid', 'gridlines': 'grid',
+                      'grid_format': 'grid'}
     # What a plain reset_format() sweeps. 'defaults' (the values behind
     # set_default_format) is deliberately excluded — resetting applied
     # formatting shouldn't silently discard the user's chosen defaults;
     # ask for it by name or with 'all'.
     _RESET_DEFAULT_SWEEP = ('sets', 'vars', 'lines', 'highlights', 'scales',
-                            'fonts', 'plot_size')
+                            'fonts', 'plot_size', 'grid')
 
     def _reset_set_attrs(self, ds, attrs=None):
         """Restore per-dataset formatting attribute(s) to the current defaults:
@@ -4183,7 +4200,8 @@ class UnichartNotebook:
 
         Call with no arguments to reset every piece of *applied* formatting
         (dataset styles, variable overrides, lines, highlights, axis limits,
-        font sizes, pinned plot size). Pass scope names to reset only those.
+        font sizes, pinned plot size, gridline formatting). Pass scope names
+        to reset only those.
         The *defaults themselves* (``set_default_format`` state, figsize,
         per-call plot defaults, the ``set_plot_style`` look) are only reset when
         you ask for ``'defaults'`` explicitly, or reset everything with
@@ -4193,8 +4211,9 @@ class UnichartNotebook:
         ----------
         *what : scope name(s) and/or dataset selector(s)
             Scope names: 'sets', 'vars', 'lines', 'highlights', 'scales',
-            'fonts', 'plot_size', 'defaults', or 'all' (everything, defaults
-            included). Common aliases work too ('scale', 'variables', ...).
+            'fonts', 'plot_size', 'grid', 'defaults', or 'all' (everything,
+            defaults included). Common aliases work too ('scale', 'variables',
+            'gridlines', ...).
             A non-string positional (int, list, Dataset) is a dataset
             selector, same as ``uset_slice``.
         uset_slice : int | list | Dataset | 'all' | None
@@ -4304,6 +4323,9 @@ class UnichartNotebook:
         if 'plot_size' in active:
             self.plot_size = None
             done.append("plot size")
+        if 'grid' in active:
+            self.grid_format = self._empty_grid_format()
+            done.append("grid format")
         print(f"Reset: {', '.join(done) if done else 'nothing'}.")
 
     def _apply_default(self, key, value, builtin):
@@ -5473,6 +5495,142 @@ class UnichartNotebook:
             fig.update_layout(height=ph + mv(m.t, 100) + mv(m.b, 80))
         return fig
 
+    # ------------------------------------------------------------------
+    # Gridline formatting
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _empty_grid_format():
+        return {'x': {'major': {}, 'minor': {}},
+                'y': {'major': {}, 'minor': {}}}
+
+    def grid(self, visible=None, color=None, width=None, dash=None,
+             axis='both', which='major', reset=False):
+        """Configure gridline formatting. Settings persist across plots and sit
+        on top of the active plot style (they survive ``set_plot_style`` and
+        ``toggle_darkmode``).
+
+        Only the options you pass are stored; repeated calls merge, so
+        ``nb.grid(color='gray')`` then ``nb.grid(width=2)`` keeps both. Called
+        with no arguments, returns the current settings without changing them.
+
+        ``visible=True`` never re-enables grids that a plot deliberately hides
+        (a per-call ``grid=False``, or the secondary axes of ``plot_ymult`` /
+        secondary-y plots, whose grid is suppressed to avoid double gridlines);
+        ``visible=False`` hides gridlines everywhere it targets.
+
+        Parameters
+        ----------
+        visible : bool, optional
+            Show or hide the targeted gridlines. Also accepts ``'reset'``,
+            equivalent to ``reset=True``.
+        color : str, optional
+            Gridline color (named color, hex, or rgb/rgba string).
+        width : float, optional
+            Gridline width in px.
+        dash : str, optional
+            Dash pattern: one of GRID_DASH_OPTIONS ('solid', 'dot', 'dash',
+            'longdash', 'dashdot', 'longdashdot') or a Matplotlib alias
+            ('-', '--', '-.', ':').
+        axis : {'both', 'x', 'y'}
+            Which axes this call's options apply to (default 'both').
+        which : {'major', 'minor', 'both'}
+            Major gridlines (default), minor gridlines (off by default in
+            Plotly — enable with ``nb.grid(which='minor', visible=True)``), or
+            both.
+        reset : bool
+            Drop all stored gridline settings (equivalent to
+            ``reset_format('grid')``). Note this resets *gridline* formatting;
+            the subplot-grid defaults (ncols/nrows) live in
+            ``set_default_format``.
+
+        Examples
+        --------
+        nb.grid(False)                            # no gridlines
+        nb.grid(color='lightgray', width=0.5, dash='dot')
+        nb.grid(axis='x', visible=False)          # vertical gridlines off
+        nb.grid(which='minor', visible=True)      # minor gridlines on
+        nb.grid(reset=True)                       # back to the style's grid
+        """
+        if reset or visible == 'reset':
+            self.grid_format = self._empty_grid_format()
+            return
+
+        if axis not in ('both', 'x', 'y'):
+            raise ValueError(f"axis must be 'both', 'x' or 'y', got {axis!r}")
+        if which not in ('major', 'minor', 'both'):
+            raise ValueError(
+                f"which must be 'major', 'minor' or 'both', got {which!r}")
+
+        opts = {}
+        if visible is not None:
+            if not isinstance(visible, bool):
+                raise TypeError(
+                    f"visible must be True or False, got {visible!r}")
+            opts['visible'] = visible
+        if color is not None:
+            if not validate_color(color):
+                raise TypeError(
+                    f"color must be a color string, got {type(color).__name__}")
+            opts['color'] = color
+        if width is not None:
+            if isinstance(width, bool) or not isinstance(width, (int, float)):
+                raise TypeError(
+                    f"width must be numeric (px), got {type(width).__name__}")
+            if width <= 0:
+                raise ValueError(f"width must be positive, got {width}")
+            opts['width'] = width
+        if dash is not None:
+            resolved = LINESTYLE_MAP_MPL_TO_PLOTLY.get(dash, dash)
+            if resolved not in GRID_DASH_OPTIONS:
+                valid = ', '.join(GRID_DASH_OPTIONS)
+                raise ValueError(
+                    f"dash must be one of {valid} (or a Matplotlib alias "
+                    f"'-', '--', '-.', ':'), got {dash!r}")
+            opts['dash'] = resolved
+
+        if not opts:
+            # Pure query: report what's set (deep copy so callers can't mutate).
+            return {dim: {w: dict(o) for w, o in stored.items()}
+                    for dim, stored in self.grid_format.items()}
+
+        for dim in ('x', 'y') if axis == 'both' else (axis,):
+            for w in ('major', 'minor') if which == 'both' else (which,):
+                self.grid_format[dim][w].update(opts)
+
+    def _apply_grid(self, fig):
+        """Apply the sticky :meth:`grid` settings to a finished figure. Runs
+        right after ``_apply_style`` so the explicit per-axis values land on
+        top of the plot-style template.
+
+        ``visible=True`` skips axes that carry an explicit ``showgrid=False``
+        or overlay another axis — those grids were hidden deliberately (per-call
+        ``grid=False``, secondary y axes) and re-enabling them would draw
+        misaligned double grids."""
+        if fig is None:
+            return fig
+        for dim in ('x', 'y'):
+            stored = self.grid_format[dim]
+            if not (stored['major'] or stored['minor']):
+                continue
+            axes = list(fig.select_xaxes() if dim == 'x' else fig.select_yaxes())
+            for which, opts in stored.items():
+                if not opts:
+                    continue
+                kw = {}
+                if 'color' in opts: kw['gridcolor'] = opts['color']
+                if 'width' in opts: kw['gridwidth'] = opts['width']
+                if 'dash' in opts: kw['griddash'] = opts['dash']
+                vis = opts.get('visible')
+                for ax in axes:
+                    ax_kw = dict(kw)
+                    if vis is not None and not (
+                            vis and (ax.overlaying or ax.showgrid is False)):
+                        ax_kw['showgrid'] = vis
+                    if ax_kw:
+                        ax.update(**({'minor': ax_kw} if which == 'minor'
+                                     else ax_kw))
+        return fig
+
     def _font_size(self, name):
         """Resolved size for one font slot (e.g. ``'axes_tick_size'``): an
         explicit :meth:`set_font_sizes` value wins, else the active plot
@@ -5628,6 +5786,7 @@ class UnichartNotebook:
         bottom margin is included when pinning the plot area).
         """
         fig = self._apply_style(fig)
+        fig = self._apply_grid(fig)
         fig = self._apply_fonts(fig)
         fig = self._apply_footer(fig, footer)
         fig = self._enforce_plot_size(fig)

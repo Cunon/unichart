@@ -21,7 +21,13 @@
       "Read(//usr/bin/**)",
       "Bash(command -v git.exe)",
       "Read(//usr/lib/git-core/**)",
-      "Bash(PYTHONPATH=/home/tom/Documents/GitHub/unichart python3 -m nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=180 demo_notebooks/adding_parameters_demo.ipynb)"
+      "Bash(PYTHONPATH=/home/tom/Documents/GitHub/unichart python3 -m nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=180 demo_notebooks/adding_parameters_demo.ipynb)",
+      "Bash(/home/tom/Documents/misc_projects/python_notebooks/.venv/bin/python -c \"import plotly; print\\('venv plotly', plotly.__version__\\)\")",
+      "Bash(/home/tom/Documents/misc_projects/python_notebooks/.venv/bin/python3 -c \"import plotly, kaleido; print\\('venv plotly', plotly.__version__\\)\")",
+      "Bash(cp /home/tom/Documents/GitHub/toms_utils/unichart.py /tmp/claude-1000/-home-tom-Documents-GitHub-unichart/ceeb96fe-c461-481f-9043-2fa120492443/scratchpad/toms_utils_unichart.py.bak)",
+      "Bash(cp /home/tom/Documents/GitHub/toms_utils/unichart_dashboard.py /tmp/claude-1000/-home-tom-Documents-GitHub-unichart/ceeb96fe-c461-481f-9043-2fa120492443/scratchpad/toms_utils_unichart_dashboard.py.bak)",
+      "Bash(cp /home/tom/Documents/GitHub/unichart/unichart.py /home/tom/Documents/GitHub/toms_utils/unichart.py)",
+      "Bash(cp /home/tom/Documents/GitHub/unichart/unichart_dashboard.py /home/tom/Documents/GitHub/toms_utils/unichart_dashboard.py)"
     ]
   }
 }
