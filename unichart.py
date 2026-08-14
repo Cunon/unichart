@@ -6570,7 +6570,9 @@ class UnichartNotebook:
               text can also be selected and copied directly. Clicking the
               small ``⌕`` icon in a column header opens a filter box under
               that column, hiding non-matching rows as you type: plain text
-              is a case-insensitive substring match, and numeric columns
+              is a case-insensitive substring match, ``*``/``?`` wildcards
+              match the whole cell (``alt*`` starts-with, ``*ft``
+              ends-with, ``?`` any one character), and numeric columns
               also accept ``>10``, ``>=10``, ``<10``, ``<=10``, ``=10``, or
               ``5..20`` (inclusive range). Terms can be combined with ``&``
               (AND) and ``|`` or ``,`` (OR), e.g. ``>=5 & <20`` or
@@ -7008,8 +7010,10 @@ class UnichartNotebook:
             //   in ['idle', 'cruise']   not <term>
             // A redundant leading column name (as in `power > 5` typed in
             // the power column's box) is stripped when followed by an
-            // operator, `in`, or `not`. Anything else is a case-insensitive
-            // substring match.
+            // operator, `in`, or `not`. Unquoted terms containing `*`/`?`
+            // are fnmatch-style wildcards matched against the whole cell
+            // (`alt*` = starts with, `*ft` = ends with). Anything else is
+            // a case-insensitive substring match.
             function matchesTerm(term, text, label) {
                 term = term.trim();
                 if (!term) return true;
@@ -7047,6 +7051,12 @@ class UnichartNotebook:
                 }
                 var uq = unquote(term);
                 if (uq.quoted) return eqMatch(uq.text, text);
+                if (term.indexOf("*") !== -1 || term.indexOf("?") !== -1) {
+                    var wild = new RegExp(
+                        "^" + reEsc(term).replace(/\\\\\\*/g, ".*")
+                                         .replace(/\\\\\\?/g, ".") + "$", "i");
+                    return wild.test(text);
+                }
                 return text.toLowerCase().indexOf(term.toLowerCase()) !== -1;
             }
 
@@ -7158,7 +7168,7 @@ class UnichartNotebook:
                 var inp = document.createElement("input");
                 inp.type = "text";
                 inp.placeholder = "filter";
-                inp.title = "Text matches as substring; numeric: >10, >=10, <10, <=10, =10, 5..20. Combine: & (and), | or , (or). df.query style works too: power > 5 and power < 20, == \\"idle\\", != 3, in ['a', 'b'], not x";
+                inp.title = "Text matches as substring; wildcards: alt* (starts with), *ft (ends with), ? = any char; numeric: >10, >=10, <10, <=10, =10, 5..20. Combine: & (and), | or , (or). df.query style works too: power > 5 and power < 20, == \\"idle\\", != 3, in ['a', 'b'], not x";
                 inp.style.display = "none";
                 inp.addEventListener("input", applyFilters);
                 inp.addEventListener("blur", function() {
@@ -7428,11 +7438,18 @@ class UnichartNotebook:
         except Exception as e:
             print(f"Error saving image: {e}")
 
-    def list_sets(self):
+    def list_sets(self, search=None):
         """
         Display a table of all loaded datasets (styled HTML: sortable,
         filterable, copyable — same look as :meth:`table`).
+
+        With a ``search`` substring, instead lists the parameters matching
+        it across *all* loaded sets, with a column showing which sets own
+        each parameter (delegates to :meth:`list_parms`).
         """
+        if search is not None:
+            return self.list_parms(set_number='all', search_string=search)
+
         if not self.sets:
             print("No datasets loaded.")
             return
@@ -7459,8 +7476,16 @@ class UnichartNotebook:
         copyable — same look as :meth:`table`); the filter boxes are handy
         for narrowing long parameter lists. Returns the parameter names, as
         before.
+
+        A bare string as the first argument is taken as the search
+        substring (set selectors are ints/'all'/Datasets, never names), so
+        ``list_parms('egt')`` searches all sets in scope for 'egt'.
         """
         import fnmatch
+
+        if (isinstance(set_number, str) and set_number != 'all'
+                and search_string is None):
+            set_number, search_string = None, set_number
 
         if set_number is None:
             target_sets = self.selected()
@@ -7504,7 +7529,9 @@ class UnichartNotebook:
         title = f"Found {len(filtered_cols)} parameters"
         if search_string:
             title += f" matching '{search_string}'"
-        if set_number is not None:
+        if set_number == 'all':
+            title += " across all sets"
+        elif set_number is not None:
             title += f" in set(s) {set_number}"
         else:
             title += " in active datasets"
