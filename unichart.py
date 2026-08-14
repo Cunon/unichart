@@ -6580,10 +6580,11 @@ class UnichartNotebook:
               ``in ['idle', 'cruise']`` lists, and a redundant leading
               column name — so ``power > 5 and power < 20`` typed in the
               ``power`` box behaves like the equivalent ``df.query``.
-              Clicking ``⌕`` again (or Esc)
-              clears and closes the box; the icon stays highlighted while
-              its filter is active. The Copy button copies only the rows
-              currently shown.
+              Clicking ``⌕`` again collapses the box but keeps its filter
+              applied; a filtered column stays marked with an accent-colored
+              ``⌕`` and header underline, and hovering ``⌕`` shows the
+              active filter. Esc clears and closes a filter. The Copy button
+              copies only the rows currently shown.
             - ``'df'``: return the assembled :class:`pandas.DataFrame`.
             - ``'md'``: return a GitHub-flavored Markdown string.
             - ``'fig'``: return the styled Plotly ``go.Figure`` (a ``go.Table``),
@@ -7085,8 +7086,12 @@ class UnichartNotebook:
                     tr.style.display = show ? "" : "none";
                 });
                 filterInputs.forEach(function(inp, i) {
-                    filterBtns[i].classList.toggle("uc-filter-active",
-                                                   inp.value.trim() !== "");
+                    var active = inp.value.trim() !== "";
+                    filterBtns[i].classList.toggle("uc-filter-active", active);
+                    headers[i].classList.toggle("uc-filtered", active);
+                    filterBtns[i].title = active
+                        ? "Filtered: " + inp.value.trim() + " (click to edit, Esc to clear)"
+                        : "Filter this column";
                 });
                 restripe();
             }
@@ -7129,9 +7134,10 @@ class UnichartNotebook:
             // static `headers` NodeList) so these cells never get sort
             // handlers. The row starts hidden; a small ⌕ toggle in each
             // header opens the filter box for just that column. Toggling a
-            // box closed clears its filter, so a hidden filter can never be
-            // silently active — and the toggle stays highlighted while its
-            // filter has text.
+            // box closed collapses it but KEEPS its filter applied — the
+            // column stays clearly marked (accent ⌕ + accent underline on
+            // the header, filter text in the ⌕ tooltip) so a collapsed
+            // filter is never silently active. Esc clears and closes.
             var filterRow = document.createElement("tr");
             filterRow.className = "uc-filter-row";
             filterRow.style.display = "none";
@@ -7172,7 +7178,9 @@ class UnichartNotebook:
 
                 var fbtn = document.createElement("span");
                 fbtn.className = "uc-filter-btn";
-                fbtn.textContent = "\\u2315";
+                // Glyph comes from CSS ::before so the active state can swap
+                // it (⌕ -> filled ●) without touching the DOM or the
+                // header's copyable text.
                 fbtn.title = "Filter this column";
                 fbtn.addEventListener("click", function(e) {
                     e.stopPropagation();   // don't trigger the sort
@@ -7181,8 +7189,8 @@ class UnichartNotebook:
                         inp.style.display = "";
                         inp.focus();
                     } else {
-                        inp.value = "";
-                        applyFilters();
+                        // Collapse only — the filter (if any) stays applied
+                        // and the header stays marked.
                         closeFilter(colIdx);
                     }
                 });
@@ -7339,16 +7347,28 @@ class UnichartNotebook:
         #{table_uid} tbody tr:last-child td {{ border-bottom: none; }}
         #{table_uid} th .uc-filter-btn {{
             display: inline-block;
-            margin-left: 6px;
+            width: 1.5em;
+            text-align: center;
+            margin-left: 4px;
             font-size: 0.75em;
+            line-height: 1;
             opacity: 0.35;
             cursor: pointer;
             user-select: none;
         }}
+        #{table_uid} th .uc-filter-btn::before {{ content: "⌕"; }}
         #{table_uid} th .uc-filter-btn:hover {{ opacity: 0.85; }}
         #{table_uid} th .uc-filter-btn.uc-filter-active {{
             color: {pal['accent']};
             opacity: 1;
+        }}
+        #{table_uid} th .uc-filter-btn.uc-filter-active::before {{
+            content: "●";
+            font-size: 1.6em;
+            vertical-align: middle;
+        }}
+        #{table_uid} th.uc-filtered {{
+            border-bottom: 2px solid {pal['accent']};
         }}
         #{table_uid} tr.uc-filter-row th {{
             padding: 3px 6px;
