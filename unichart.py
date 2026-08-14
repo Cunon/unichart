@@ -6561,6 +6561,29 @@ class UnichartNotebook:
             What to return:
 
             - ``None`` (default): render and display the styled HTML table.
+              Column headers are clickable to sort the table by that column
+              (click again to reverse the order); numeric columns sort
+              numerically, with missing values (``'-'``) always last. A
+              ``Copy`` button above the table copies it (in the current sort
+              order) to the clipboard as tab-separated text plus an HTML
+              table, so it pastes into Excel/Sheets one value per cell. Cell
+              text can also be selected and copied directly. Clicking the
+              small ``⌕`` icon in a column header opens a filter box under
+              that column, hiding non-matching rows as you type: plain text
+              is a case-insensitive substring match, and numeric columns
+              also accept ``>10``, ``>=10``, ``<10``, ``<=10``, ``=10``, or
+              ``5..20`` (inclusive range). Terms can be combined with ``&``
+              (AND) and ``|`` or ``,`` (OR), e.g. ``>=5 & <20`` or
+              ``idle, cruise``. :meth:`pandas.DataFrame.query`-style syntax
+              also works: ``and``/``or``/``not`` keywords, ``==`` / ``!=``,
+              quoted strings for exact (rather than substring) matches,
+              ``in ['idle', 'cruise']`` lists, and a redundant leading
+              column name — so ``power > 5 and power < 20`` typed in the
+              ``power`` box behaves like the equivalent ``df.query``.
+              Clicking ``⌕`` again (or Esc)
+              clears and closes the box; the icon stays highlighted while
+              its filter is active. The Copy button copies only the rows
+              currently shown.
             - ``'df'``: return the assembled :class:`pandas.DataFrame`.
             - ``'md'``: return a GitHub-flavored Markdown string.
             - ``'fig'``: return the styled Plotly ``go.Figure`` (a ``go.Table``),
@@ -6843,53 +6866,524 @@ class UnichartNotebook:
             if display_df[col].dtype in ['float64', 'float32']:
                 display_df[col] = display_df[col].apply(lambda x: f"{x:.5g}" if isinstance(x, (int, float)) and x != '-' else x)
 
+        self._display_html_table(display_df, title=title)
+
+    def _display_html_table(self, display_df, title=None):
+        """
+        Render ``display_df`` (values already formatted for display) as the
+        shared styled HTML table: click-to-sort headers, per-column ``⌕``
+        filter boxes, a Copy-to-clipboard button (TSV + HTML, visible rows
+        only), and a light/dark palette following ``self.darkmode``. Used by
+        :meth:`table`, :meth:`summary`, :meth:`list_sets` and
+        :meth:`list_parms`.
+        """
         header_size = self.table_header_size or 22
         cell_size = self.table_cell_size or 20
         title_size = self.suptitle_size or header_size + 4
 
-        html_table = display_df.to_html(index=False, escape=False)
+        import uuid
+        table_uid = f"unichart-table-{uuid.uuid4().hex}"
+
+        # Palette for the styled HTML table, following self.darkmode like the
+        # Plotly outputs do.
+        if self.darkmode:
+            pal = dict(
+                text='#e8e8e8', wrap_border='#464646',
+                th_bg='#2b2b2b', th_hover='#383838', th_sorted='#31405a',
+                th_border='#4a4a4a', cell_border='#343434',
+                row_odd='#1f1f1f', row_even='#262626', row_hover='#2b3648',
+                shadow='0 1px 4px rgba(0,0,0,0.5)', copied='#7bc67e',
+                accent='#6b93c9',
+            )
+        else:
+            pal = dict(
+                text='#000', wrap_border='#cfcfcf',
+                th_bg='#ececec', th_hover='#e0e0e0', th_sorted='#dbe6f5',
+                th_border='#c9c9c9', cell_border='#e3e3e3',
+                row_odd='#ffffff', row_even='#f6f6f6', row_hover='#edf3fb',
+                shadow='0 1px 4px rgba(0,0,0,0.10)', copied='#2e7d32',
+                accent='#4a80c4',
+            )
+
+        # escape=True so cell text like a dataset query "speed < 20" can't
+        # break the markup or inject HTML.
+        html_table = display_df.to_html(index=False, escape=True)
         if title:
             caption_html = (
                 f'<caption style="caption-side:top;text-align:center;'
-                f'font-weight:600;color:#000;font-size:{title_size}px;'
-                f'padding:6px 8px;background-color:#e8e8e8;'
-                f'border:1px solid #ccc;border-bottom:none;'
+                f'font-weight:600;color:{pal["text"]};font-size:{title_size}px;'
+                f'padding:6px 10px;background-color:{pal["th_bg"]};'
+                f'border-bottom:1px solid {pal["th_border"]};'
                 f'font-family:-apple-system, BlinkMacSystemFont, \'Segoe UI\', Arial, sans-serif;">'
                 f'{title}</caption>'
             )
             html_table = html_table.replace('<table', '<table', 1)
             html_table = html_table.replace('>', f'>{caption_html}', 1)
 
+        # Click-to-sort behavior for the displayed table. The script is scoped
+        # to this render's unique container id so several tables in one
+        # notebook sort independently. Numeric columns sort numerically (the
+        # '-' fill value always sinks to the bottom); everything else sorts as
+        # text. Clicking a header toggles ascending/descending. The sort state
+        # is shown purely via CSS classes (a fixed-width ::after arrow slot on
+        # every header), so sorting never changes the header text or column
+        # widths and the layout stays put.
+        sort_script = """
+        <script>
+        (function() {
+            var container = document.getElementById("__UID__");
+            if (!container) return;
+            var table = container.querySelector("table");
+            if (!table) return;
+            var tbody = table.querySelector("tbody");
+            var headers = table.querySelectorAll("thead th");
+
+            // Zebra striping is applied as classes over the *visible* rows so
+            // it stays alternating after any combination of sort and filter
+            // (CSS nth-child would keep counting hidden rows).
+            function restripe() {
+                var vis = 0;
+                Array.prototype.forEach.call(tbody.querySelectorAll("tr"), function(tr) {
+                    tr.classList.remove("uc-odd", "uc-even");
+                    if (tr.style.display === "none") return;
+                    tr.classList.add((vis % 2 === 0) ? "uc-odd" : "uc-even");
+                    vis++;
+                });
+            }
+
+            function reEsc(s) {
+                return s.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&");
+            }
+
+            // Split on top-level separator chars only — separators inside
+            // quotes or brackets don't count, so `in ['a', 'b']` lists and
+            // quoted strings survive the OR-split on commas.
+            function splitTop(s, seps) {
+                var parts = [], cur = "", depth = 0, quote = null;
+                for (var i = 0; i < s.length; i++) {
+                    var ch = s.charAt(i);
+                    if (quote) {
+                        cur += ch;
+                        if (ch === quote) quote = null;
+                    } else if (ch === '"' || ch === "'") {
+                        quote = ch; cur += ch;
+                    } else if (ch === "[" || ch === "(") {
+                        depth++; cur += ch;
+                    } else if (ch === "]" || ch === ")") {
+                        depth = Math.max(0, depth - 1); cur += ch;
+                    } else if (depth === 0 && seps.indexOf(ch) !== -1) {
+                        parts.push(cur); cur = "";
+                    } else {
+                        cur += ch;
+                    }
+                }
+                parts.push(cur);
+                return parts;
+            }
+
+            function unquote(s) {
+                s = s.trim();
+                if (s.length >= 2 && (s.charAt(0) === '"' || s.charAt(0) === "'") &&
+                        s.charAt(s.length - 1) === s.charAt(0)) {
+                    return { text: s.slice(1, -1), quoted: true };
+                }
+                return { text: s, quoted: false };
+            }
+
+            // Equality that compares numerically when both sides are
+            // numbers, else as case-insensitive exact text.
+            function eqMatch(value, text) {
+                var nv = parseFloat(value), nt = parseFloat(text);
+                if (!isNaN(nv) && !isNaN(nt) && /^-?[0-9.]+$/.test(value)) {
+                    return nt === nv;
+                }
+                return text.toLowerCase() === value.toLowerCase();
+            }
+
+            // A single filter term. Accepts both the shorthand and
+            // DataFrame.query-style forms:
+            //   >10  >=10  <10  <=10  =10  ==10  !=10  5..20
+            //   == "idle"   != 'idle'   "idle" (quoted = exact match)
+            //   in ['idle', 'cruise']   not <term>
+            // A redundant leading column name (as in `power > 5` typed in
+            // the power column's box) is stripped when followed by an
+            // operator, `in`, or `not`. Anything else is a case-insensitive
+            // substring match.
+            function matchesTerm(term, text, label) {
+                term = term.trim();
+                if (!term) return true;
+                if (label) {
+                    term = term.replace(new RegExp(
+                        "^" + reEsc(label) + "\\\\s*(?=[<>=!]|in\\\\b|not\\\\b)", "i"), "").trim();
+                    if (!term) return true;
+                }
+                var m = term.match(/^not\\s+(.+)$/i);
+                if (m) return !matchesTerm(m[1], text, null);
+                m = term.match(/^in\\s*[\\[(]([^\\])]*)[\\])]$/i);
+                if (m) {
+                    return splitTop(m[1], ",").some(function(item) {
+                        return eqMatch(unquote(item).text, text);
+                    });
+                }
+                m = term.match(/^(==|!=|>=|<=|>|<|=)\\s*(.+)$/);
+                if (m) {
+                    var op = m[1];
+                    var val = unquote(m[2]).text;
+                    if (op === "=" || op === "==") return eqMatch(val, text);
+                    if (op === "!=") return !eqMatch(val, text);
+                    var num = parseFloat(text), v = parseFloat(val);
+                    if (isNaN(num) || isNaN(v)) return false;
+                    if (op === ">") return num > v;
+                    if (op === ">=") return num >= v;
+                    if (op === "<") return num < v;
+                    return num <= v;
+                }
+                m = term.match(/^(-?[0-9.]+)\\s*\\.\\.\\s*(-?[0-9.]+)$/);
+                if (m) {
+                    var n = parseFloat(text);
+                    if (isNaN(n)) return false;
+                    return n >= parseFloat(m[1]) && n <= parseFloat(m[2]);
+                }
+                var uq = unquote(term);
+                if (uq.quoted) return eqMatch(uq.text, text);
+                return text.toLowerCase().indexOf(term.toLowerCase()) !== -1;
+            }
+
+            // A column's filter box can combine terms: "|" or "," separate
+            // OR alternatives, and "&" joins AND terms within an
+            // alternative, e.g. ">=5 & <20" or "idle, cruise". The
+            // DataFrame.query keywords `and`/`or` (surrounded by spaces)
+            // work as synonyms. Empty alternatives (a trailing comma while
+            // typing) are ignored, so an all-empty filter matches
+            // everything.
+            function matches(filter, text, label) {
+                if (!filter.trim()) return true;
+                filter = filter.replace(/\\s+and\\s+/gi, " & ")
+                               .replace(/\\s+or\\s+/gi, " | ");
+                var anyGroup = false, matched = false;
+                splitTop(filter, "|,").forEach(function(group) {
+                    var terms = splitTop(group, "&").map(function(t) {
+                        return t.trim();
+                    }).filter(Boolean);
+                    if (!terms.length) return;
+                    anyGroup = true;
+                    if (terms.every(function(t) { return matchesTerm(t, text, label); })) {
+                        matched = true;
+                    }
+                });
+                return anyGroup ? matched : true;
+            }
+
+            var filterInputs = [];
+            var filterBtns = [];
+            function applyFilters() {
+                Array.prototype.forEach.call(tbody.querySelectorAll("tr"), function(tr) {
+                    var show = filterInputs.every(function(inp, i) {
+                        return matches(inp.value, tr.cells[i].textContent.trim(),
+                                       headers[i].getAttribute("data-uc-label"));
+                    });
+                    tr.style.display = show ? "" : "none";
+                });
+                filterInputs.forEach(function(inp, i) {
+                    filterBtns[i].classList.toggle("uc-filter-active",
+                                                   inp.value.trim() !== "");
+                });
+                restripe();
+            }
+
+            headers.forEach(function(th, colIdx) {
+                th.addEventListener("click", function() {
+                    // Header text is selectable: when the click ends a text
+                    // selection inside this header, the user was copying the
+                    // column name, not asking for a sort.
+                    var sel = window.getSelection();
+                    if (sel && !sel.isCollapsed && th.contains(sel.anchorNode)) return;
+                    var asc = !th.classList.contains("uc-sort-asc");
+                    headers.forEach(function(h) {
+                        h.classList.remove("uc-sort-asc", "uc-sort-desc");
+                    });
+                    th.classList.add(asc ? "uc-sort-asc" : "uc-sort-desc");
+                    var rows = Array.prototype.slice.call(tbody.querySelectorAll("tr"));
+                    rows.sort(function(a, b) {
+                        var av = a.cells[colIdx].textContent.trim();
+                        var bv = b.cells[colIdx].textContent.trim();
+                        if (av === "-" && bv === "-") return 0;
+                        if (av === "-") return 1;
+                        if (bv === "-") return -1;
+                        var an = parseFloat(av), bn = parseFloat(bv);
+                        var cmp;
+                        if (!isNaN(an) && !isNaN(bn)) {
+                            cmp = an - bn;
+                        } else {
+                            cmp = av.localeCompare(bv, undefined, {numeric: true});
+                        }
+                        return asc ? cmp : -cmp;
+                    });
+                    rows.forEach(function(r) { tbody.appendChild(r); });
+                    restripe();
+                });
+            });
+
+            // Filter row: one text input per column, inserted below the
+            // headers. Built here (after the sort listeners are bound to the
+            // static `headers` NodeList) so these cells never get sort
+            // handlers. The row starts hidden; a small ⌕ toggle in each
+            // header opens the filter box for just that column. Toggling a
+            // box closed clears its filter, so a hidden filter can never be
+            // silently active — and the toggle stays highlighted while its
+            // filter has text.
+            var filterRow = document.createElement("tr");
+            filterRow.className = "uc-filter-row";
+            filterRow.style.display = "none";
+            function closeFilter(i) {
+                filterInputs[i].style.display = "none";
+                if (filterInputs.every(function(inp) {
+                    return inp.style.display === "none";
+                })) {
+                    filterRow.style.display = "none";
+                }
+            }
+            headers.forEach(function(th, colIdx) {
+                // Keep the pristine column label for the Copy payload, since
+                // the toggle glyph below becomes part of th.textContent.
+                th.setAttribute("data-uc-label", th.textContent.trim());
+
+                var cell = document.createElement("th");
+                var inp = document.createElement("input");
+                inp.type = "text";
+                inp.placeholder = "filter";
+                inp.title = "Text matches as substring; numeric: >10, >=10, <10, <=10, =10, 5..20. Combine: & (and), | or , (or). df.query style works too: power > 5 and power < 20, == \\"idle\\", != 3, in ['a', 'b'], not x";
+                inp.style.display = "none";
+                inp.addEventListener("input", applyFilters);
+                inp.addEventListener("blur", function() {
+                    if (inp.value.trim() === "") closeFilter(colIdx);
+                });
+                inp.addEventListener("keydown", function(e) {
+                    if (e.key === "Escape") {
+                        inp.value = "";
+                        applyFilters();
+                        closeFilter(colIdx);
+                        inp.blur();
+                    }
+                });
+                cell.appendChild(inp);
+                filterRow.appendChild(cell);
+                filterInputs.push(inp);
+
+                var fbtn = document.createElement("span");
+                fbtn.className = "uc-filter-btn";
+                fbtn.textContent = "\\u2315";
+                fbtn.title = "Filter this column";
+                fbtn.addEventListener("click", function(e) {
+                    e.stopPropagation();   // don't trigger the sort
+                    if (inp.style.display === "none") {
+                        filterRow.style.display = "";
+                        inp.style.display = "";
+                        inp.focus();
+                    } else {
+                        inp.value = "";
+                        applyFilters();
+                        closeFilter(colIdx);
+                    }
+                });
+                th.appendChild(fbtn);
+                filterBtns.push(fbtn);
+            });
+            table.querySelector("thead").appendChild(filterRow);
+            restripe();
+
+            // Copy button: puts the table on the clipboard as displayed —
+            // current sort order, filtered-out rows skipped — as both TSV
+            // (text/plain) and a clean HTML table
+            // (text/html), so pasting into Excel/Sheets lands one value per
+            // cell with the header row intact. Header text comes from
+            // textContent, so the CSS-drawn sort arrows are never included.
+            var btn = container.querySelector(".uc-copy-btn");
+            if (btn) {
+                btn.addEventListener("click", function() {
+                    var data = [];
+                    data.push(Array.prototype.map.call(headers, function(h) {
+                        return h.getAttribute("data-uc-label") || h.textContent.trim();
+                    }));
+                    Array.prototype.forEach.call(tbody.querySelectorAll("tr"), function(tr) {
+                        if (tr.style.display === "none") return;
+                        data.push(Array.prototype.map.call(tr.cells, function(c) {
+                            return c.textContent.trim();
+                        }));
+                    });
+                    var tsv = data.map(function(r) { return r.join("\\t"); }).join("\\n");
+                    var esc = function(s) {
+                        return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                    };
+                    var htmlTable = "<table>" + data.map(function(r, i) {
+                        var tag = i === 0 ? "th" : "td";
+                        return "<tr>" + r.map(function(c) {
+                            return "<" + tag + ">" + esc(c) + "</" + tag + ">";
+                        }).join("") + "</tr>";
+                    }).join("") + "</table>";
+                    var done = function() {
+                        btn.textContent = "Copied \\u2713";
+                        btn.classList.add("uc-copied");
+                        setTimeout(function() {
+                            btn.textContent = "Copy";
+                            btn.classList.remove("uc-copied");
+                        }, 1500);
+                    };
+                    if (navigator.clipboard && window.ClipboardItem) {
+                        navigator.clipboard.write([new ClipboardItem({
+                            "text/plain": new Blob([tsv], {type: "text/plain"}),
+                            "text/html": new Blob([htmlTable], {type: "text/html"})
+                        })]).then(done, function() {
+                            navigator.clipboard.writeText(tsv).then(done);
+                        });
+                    } else if (navigator.clipboard) {
+                        navigator.clipboard.writeText(tsv).then(done);
+                    }
+                });
+            }
+        })();
+        </script>
+        """.replace("__UID__", table_uid)
+
+        # All CSS is scoped under this render's #id so it can't restyle other
+        # tables in the notebook (or be restyled by a later chart.table()
+        # call). Zebra striping keys off tbody position, so it stays
+        # alternating after any sort.
         styled_html = f"""
-        <div style="margin-top:8px; margin-bottom:8px; overflow-x:auto;">
-            {html_table}
+        <div id="{table_uid}" style="margin-top:8px; margin-bottom:8px; overflow-x:auto;">
+            <div class="uc-table-holder">
+                <div class="uc-table-toolbar">
+                    <button class="uc-copy-btn" type="button"
+                            title="Copy table to clipboard (paste into Excel)">Copy</button>
+                </div>
+                <div class="uc-table-wrap">
+                    {html_table}
+                </div>
+            </div>
         </div>
         <style>
-        table {{
-            border-collapse: collapse;
-            width: auto;
+        #{table_uid} .uc-table-holder {{
+            display: inline-block;
+        }}
+        #{table_uid} .uc-table-toolbar {{
+            text-align: left;
+            margin-bottom: 4px;
+        }}
+        #{table_uid} .uc-copy-btn {{
+            background-color: {pal['th_bg']};
+            color: {pal['text']};
+            border: 1px solid {pal['wrap_border']};
+            border-radius: 6px;
+            padding: 2px 10px;
+            font-size: 12px;
+            min-width: 80px;
+            cursor: pointer;
+            user-select: none;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
         }}
-        th {{
-            background-color: #e8e8e8;
-            color: #000;
+        #{table_uid} .uc-copy-btn:hover {{ background-color: {pal['th_hover']}; }}
+        #{table_uid} .uc-copy-btn.uc-copied {{
+            color: {pal['copied']};
+            border-color: {pal['copied']};
+        }}
+        #{table_uid} .uc-table-wrap {{
+            display: inline-block;
+            border: 1px solid {pal['wrap_border']};
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: {pal['shadow']};
+        }}
+        #{table_uid} table {{
+            border-collapse: collapse;
+            width: auto;
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+        }}
+        #{table_uid} th {{
+            background-color: {pal['th_bg']};
+            color: {pal['text']};
             font-weight: 600;
             font-size: {header_size}px;
-            padding: 3px 8px;
+            padding: 4px 10px;
             text-align: center;
-            border: 1px solid #ccc;
+            border: none;
+            border-bottom: 2px solid {pal['th_border']};
+            border-right: 1px solid {pal['cell_border']};
+            cursor: pointer;
+            white-space: nowrap;
         }}
-        td {{
-            color: #000;
+        #{table_uid} th:last-child {{ border-right: none; }}
+        #{table_uid} th::after {{
+            content: "⇅";
+            display: inline-block;
+            width: 1em;
+            margin-left: 6px;
+            font-size: 0.7em;
+            opacity: 0.35;
+        }}
+        #{table_uid} th.uc-sort-asc::after {{ content: "▲"; opacity: 0.9; }}
+        #{table_uid} th.uc-sort-desc::after {{ content: "▼"; opacity: 0.9; }}
+        #{table_uid} th:hover {{ background-color: {pal['th_hover']}; }}
+        #{table_uid} th.uc-sort-asc,
+        #{table_uid} th.uc-sort-desc {{ background-color: {pal['th_sorted']}; }}
+        #{table_uid} td {{
+            color: {pal['text']};
             font-size: {cell_size}px;
-            padding: 2px 8px;
+            padding: 3px 10px;
             text-align: center;
-            border: 1px solid #ddd;
+            border: none;
+            border-bottom: 1px solid {pal['cell_border']};
+            border-right: 1px solid {pal['cell_border']};
         }}
-        tr:nth-child(odd) td {{ background-color: #ffffff; }}
-        tr:nth-child(even) td {{ background-color: #f3f3f3; }}
-        tr:hover td {{ background-color: #ececec; }}
+        #{table_uid} td:last-child {{ border-right: none; }}
+        #{table_uid} tbody tr:last-child td {{ border-bottom: none; }}
+        #{table_uid} th .uc-filter-btn {{
+            display: inline-block;
+            margin-left: 6px;
+            font-size: 0.75em;
+            opacity: 0.35;
+            cursor: pointer;
+            user-select: none;
+        }}
+        #{table_uid} th .uc-filter-btn:hover {{ opacity: 0.85; }}
+        #{table_uid} th .uc-filter-btn.uc-filter-active {{
+            color: {pal['accent']};
+            opacity: 1;
+        }}
+        #{table_uid} tr.uc-filter-row th {{
+            padding: 3px 6px;
+            cursor: default;
+            background-color: {pal['row_even']};
+        }}
+        #{table_uid} tr.uc-filter-row th::after {{ content: none; }}
+        #{table_uid} tr.uc-filter-row input {{
+            width: 100%;
+            min-width: 4em;
+            box-sizing: border-box;
+            font-size: 12px;
+            font-weight: 400;
+            padding: 2px 6px;
+            border: 1px solid {pal['wrap_border']};
+            border-radius: 4px;
+            background-color: {pal['row_odd']};
+            color: {pal['text']};
+            font-family: inherit;
+        }}
+        #{table_uid} tr.uc-filter-row input::placeholder {{ opacity: 0.45; }}
+        #{table_uid} tr.uc-filter-row input:focus {{
+            outline: none;
+            border-color: {pal['accent']};
+        }}
+        /* nth-child striping is the no-JS fallback; once the script runs,
+           the uc-odd/uc-even classes (set over visible rows only) take over
+           via these later, equal-specificity rules. */
+        #{table_uid} tbody tr:nth-child(odd) td {{ background-color: {pal['row_odd']}; }}
+        #{table_uid} tbody tr:nth-child(even) td {{ background-color: {pal['row_even']}; }}
+        #{table_uid} tbody tr.uc-odd td {{ background-color: {pal['row_odd']}; }}
+        #{table_uid} tbody tr.uc-even td {{ background-color: {pal['row_even']}; }}
+        #{table_uid} tbody tr:hover td {{ background-color: {pal['row_hover']}; }}
         </style>
+        {sort_script}
         """
 
         display(HTML(styled_html))
@@ -6916,7 +7410,8 @@ class UnichartNotebook:
 
     def list_sets(self):
         """
-        Print a formatted table of all loaded datasets.
+        Display a table of all loaded datasets (styled HTML: sortable,
+        filterable, copyable — same look as :meth:`table`).
         """
         if not self.sets:
             print("No datasets loaded.")
@@ -6924,35 +7419,14 @@ class UnichartNotebook:
 
         rows = []
         for ds in self.sets:
-            selected = "✓" if ds.select else "X"
+            selected = "✓" if ds.select else "✗"
             # Shape from cached row positions and own-column count — no
             # full-width materialization.
             shape = f"{len(ds._masked_positions())} x {len(ds._own_col_positions())}"
-            query_info = str(ds.query)
-            rows.append([
-                f"Set {ds.index}",
-                ds.title,
-                selected,
-                shape,
-                query_info
-            ])
+            rows.append([ds.index, ds.title, selected, shape, str(ds.query)])
 
-        headers = ["Set", "Title", "Selected", "Shape", "Query?" ]
-        col_widths = [
-            max(len(row[i]) for row in [headers] + rows) + 2
-            for i in range(len(headers))
-        ]
-
-        header_str = "".join(h.ljust(col_widths[i]) for i, h in enumerate(headers))
-        sep = "-" * sum(col_widths)
-
-        output_lines = [header_str, sep]
-        for row in rows:
-            line = "".join(str(val).ljust(col_widths[i]) for i, val in enumerate(row))
-            output_lines.append(line)
-
-        print("\nLoaded Datasets:")
-        print("\n".join(output_lines))
+        df = pd.DataFrame(rows, columns=["Set", "Title", "Selected", "Shape", "Query"])
+        self._display_html_table(df, title="Loaded Datasets")
 
     def list_parms(self, set_number=None, search_string=None, use_regex=False):
         """
@@ -6961,7 +7435,10 @@ class UnichartNotebook:
         With more than one dataset in scope, each parameter is annotated with
         the sets that actually own it ('in all sets' when every set in scope
         does), so a parameter calculated in only some sets is visible at a
-        glance. Returns the parameter names, as before.
+        glance. Displays as the styled HTML table (sortable, filterable,
+        copyable — same look as :meth:`table`); the filter boxes are handy
+        for narrowing long parameter lists. Returns the parameter names, as
+        before.
         """
         import fnmatch
 
@@ -7004,15 +7481,14 @@ class UnichartNotebook:
             
         filtered_cols.sort(key=lambda x: str(x).lower())
 
-        print(f"Found {len(filtered_cols)} parameters", end="")
+        title = f"Found {len(filtered_cols)} parameters"
         if search_string:
-            print(f" matching '{search_string}'", end="")
+            title += f" matching '{search_string}'"
         if set_number is not None:
-            print(f" in set(s) {set_number}:")
+            title += f" in set(s) {set_number}"
         else:
-            print(" in active datasets:")
+            title += " in active datasets"
 
-        name_w = max([len(str(c)) for c in filtered_cols] + [25])
         # The ownership column only earns its space when sets can differ.
         tags = {}
         if len(target_sets) > 1:
@@ -7021,20 +7497,26 @@ class UnichartNotebook:
                         else f"in set{'' if len(owners[c]) == 1 else 's'} "
                              f"{_compact_indices(owners[c])}")
                     for c in filtered_cols}
-        tag_w = max([len(t) for t in tags.values()], default=0)
 
+        rows = []
         for col in filtered_cols:
             desc = self.parm_description_dict.get(col, "No description available.")
             if tags:
-                print(f"  - {str(col).ljust(name_w)} : {tags[col].ljust(tag_w)} : {desc}")
+                rows.append([str(col), tags[col], desc])
             else:
-                print(f"  - {str(col).ljust(name_w)} : {desc}")
+                rows.append([str(col), desc])
+
+        columns = (["Parameter", "Sets", "Description"] if tags
+                   else ["Parameter", "Description"])
+        self._display_html_table(pd.DataFrame(rows, columns=columns), title=title)
 
         return filtered_cols
 
     def summary(self, cols=None, print_table=False):
         """
-        Build a statistical summary DataFrame. Optionally print a formatted table.
+        Build a statistical summary DataFrame. With ``print_table=True``,
+        also display it as the styled HTML table (sortable, filterable,
+        copyable — same look as :meth:`table`).
         """
         headers = ["Set", "Title", "Query", "Variable", "Count", "Min", "Mean", "Max", "Std"]
 
@@ -7094,29 +7576,21 @@ class UnichartNotebook:
 
             display_rows = []
             for _, r in df.iterrows():
-                q = r["Query"]
-                q_disp = (q[:27] + '...') if isinstance(q, str) and len(q) > 30 else q
                 display_rows.append([
-                    f"Set {r['Set']}",
-                    str(r['Title'])[:20],
-                    q_disp,
-                    str(r['Variable'])[:15],
-                    f"{int(r['Count'])}",
+                    r['Set'],
+                    str(r['Title']),
+                    r['Query'],
+                    str(r['Variable']),
+                    int(r['Count']),
                     f"{r['Min']:.4g}" if pd.notna(r['Min']) else "-",
                     f"{r['Mean']:.4g}" if pd.notna(r['Mean']) else "-",
                     f"{r['Max']:.4g}" if pd.notna(r['Max']) else "-",
                     f"{r['Std']:.4g}" if pd.notna(r['Std']) else "-",
                 ])
 
-            col_widths = [max(len(str(item)) for item in col) + 2 for col in zip(*([headers] + display_rows))]
-            header_str = "".join(str(h).ljust(w) for h, w in zip(headers, col_widths))
-            sep = "-" * sum(col_widths)
-
-            print(f"\nStatistical Summary for: {', '.join(target_cols)}")
-            print(header_str)
-            print(sep)
-            for row in display_rows:
-                print("".join(str(val).ljust(w) for val, w in zip(row, col_widths)))
+            self._display_html_table(
+                pd.DataFrame(display_rows, columns=headers),
+                title=f"Statistical Summary: {', '.join(map(str, target_cols))}")
 
         return df
 
