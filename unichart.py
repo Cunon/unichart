@@ -9,8 +9,26 @@ from plotly.subplots import make_subplots
 from scipy.interpolate import interp1d
 import warnings
 import numbers
-import ipywidgets as widgets
-from IPython.display import display, clear_output, HTML
+# Jupyter is optional: plain scripts and browser (Pyodide) environments import
+# unichart without ipywidgets/IPython installed. `display` degrades to print;
+# a shimmed IPython.display (e.g. the web terminal's) is used when present.
+try:
+    import ipywidgets as widgets
+except ImportError:
+    widgets = None
+try:
+    from IPython.display import display, clear_output, HTML
+except ImportError:
+    def display(*objs, **kwargs):
+        for obj in objs:
+            print(getattr(obj, 'data', obj))
+
+    def clear_output(*args, **kwargs):
+        pass
+
+    class HTML:
+        def __init__(self, data=''):
+            self.data = data
 import re
 import inspect
 from scipy.interpolate import griddata
