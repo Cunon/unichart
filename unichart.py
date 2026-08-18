@@ -6795,21 +6795,9 @@ class UnichartNotebook:
             return final_df
 
         if sig_figs is not None:
-            def _to_sig(v):
-                # Round to sig_figs significant figures, rendered as a plain
-                # decimal string (never scientific notation). Non-floats (e.g.
-                # the '-' fill value or string columns) pass through unchanged.
-                if not isinstance(v, float) or not np.isfinite(v):
-                    return v
-                if v == 0:
-                    return f"{0:.{sig_figs - 1}f}"
-                digits = sig_figs - int(np.floor(np.log10(abs(v)))) - 1
-                if digits <= 0:
-                    return f"{round(v, digits):.0f}"
-                return f"{v:.{digits}f}"
-
             for c in float_cols:
-                final_df[c] = final_df[c].map(_to_sig)
+                final_df[c] = final_df[c].map(
+                    lambda v: self._sig_fig_str(v, sig_figs))
 
         if output == 'md':
             try:
@@ -6819,6 +6807,50 @@ class UnichartNotebook:
                       "(pip install tabulate).")
                 return
 
+        fig = self._build_table_figure(final_df, title=title)
+
+        if output == 'fig':
+            return fig
+
+        self._display_html_table(self._format_table_display(final_df),
+                                 title=title)
+
+    @staticmethod
+    def _sig_fig_str(v, sig_figs):
+        """
+        Round ``v`` to ``sig_figs`` significant figures, rendered as a plain
+        decimal string (never scientific notation). Non-floats (e.g. the ``'-'``
+        fill value or string columns) pass through unchanged.
+        """
+        if not isinstance(v, float) or not np.isfinite(v):
+            return v
+        if v == 0:
+            return f"{0:.{sig_figs - 1}f}"
+        digits = sig_figs - int(np.floor(np.log10(abs(v)))) - 1
+        if digits <= 0:
+            return f"{round(v, digits):.0f}"
+        return f"{v:.{digits}f}"
+
+    @staticmethod
+    def _format_table_display(final_df, fmt='.5g'):
+        """
+        Copy of ``final_df`` with float columns rendered for display. Columns
+        already turned into strings (by ``sig_figs``) are left alone.
+        """
+        display_df = final_df.copy()
+        for col in display_df.columns:
+            if display_df[col].dtype in ['float64', 'float32']:
+                display_df[col] = display_df[col].apply(
+                    lambda x: f"{x:{fmt}}"
+                    if isinstance(x, (int, float)) and x != '-' else x)
+        return display_df
+
+    def _build_table_figure(self, final_df, title=None):
+        """
+        Build the Plotly ``go.Table`` figure for ``final_df``, styled to match
+        ``self.darkmode`` and the current template/fonts. Shared by
+        :meth:`table` and :meth:`summary` (both accept ``output='fig'``).
+        """
         if self.darkmode:
             header_color = 'rgb(30, 30, 30)'
             cell_color = 'rgb(50, 50, 50)'
@@ -6859,17 +6891,7 @@ class UnichartNotebook:
         fig.update_layout(**layout_args)
 
         self.last_fig = fig
-        fig = self._apply_fonts(fig)
-
-        if output == 'fig':
-            return fig
-
-        display_df = final_df.copy()
-        for col in display_df.columns:
-            if display_df[col].dtype in ['float64', 'float32']:
-                display_df[col] = display_df[col].apply(lambda x: f"{x:.5g}" if isinstance(x, (int, float)) and x != '-' else x)
-
-        self._display_html_table(display_df, title=title)
+        return self._apply_fonts(fig)
 
     def _display_html_table(self, display_df, title=None):
         """
@@ -7559,13 +7581,82 @@ class UnichartNotebook:
 
         return filtered_cols
 
-    def summary(self, cols=None, print_table=False):
+    def summary(self, cols=None, title=None, sig_figs=None, output=None,
+                print_table=None):
         """
-        Build a statistical summary DataFrame. With ``print_table=True``,
-        also display it as the styled HTML table (sortable, filterable,
-        copyable — same look as :meth:`table`).
+        Summarize the given columns across the currently selected datasets.
+
+        Reports count / min / mean / max / std per dataset and column. Like
+        :meth:`table`, this displays the styled HTML table by default and offers
+        the same alternative output modes.
+
+        Parameters
+        ----------
+        cols : str or list of str, optional
+            Column(s) to summarize. Defaults to the columns from the last plot
+            (``self.last_x`` + ``self.last_y``).
+        title : str, optional
+            Table title. Defaults to ``"Statistical Summary: <cols>"``.
+        sig_figs : int, optional
+            Round every statistic to this many significant figures for display,
+            keeping ordinary decimal notation (no scientific notation). Affects
+            the rendered HTML table, the Markdown output and the ``'fig'``
+            table only; the ``output='df'`` DataFrame keeps its full-precision
+            numeric values. Without it, statistics display as ``.4g``.
+        output : {None, 'df', 'md', 'fig'}, optional
+            What to return:
+
+            - ``None`` (default): render and display the styled HTML table —
+              sortable, filterable and copyable, exactly as :meth:`table` does
+              (see that method for the full list of interactions). Returns
+              ``None``.
+            - ``'df'``: return the summary :class:`pandas.DataFrame` with full
+              numeric precision.
+            - ``'md'``: return a GitHub-flavored Markdown string.
+            - ``'fig'``: return the styled Plotly ``go.Figure`` (a ``go.Table``),
+              with ``sig_figs`` and dark-mode already applied. Useful for
+              embedding the summary alongside other figures (e.g. in a
+              dashboard panel) without triggering the HTML display side effect.
+        print_table : bool, optional
+            Backwards-compatible switch from the older signature, where
+            ``summary()`` always returned the DataFrame and only displayed the
+            table when asked. When given (and ``output`` is not), the
+            DataFrame is still returned: ``True`` also displays the styled HTML
+            table, ``False`` displays nothing. Prefer ``output=`` in new code.
+
+        Examples
+        --------
+        Display statistics for the columns from the last plot::
+
+            chart.summary()
+
+        Summarize specific columns to 3 significant figures::
+
+            chart.summary(cols=['speed', 'power'], sig_figs=3)
+
+        Get the numbers back instead of displaying them::
+
+            df = chart.summary(cols='power', output='df')
         """
+        if output is not None and output not in ('df', 'md', 'fig'):
+            print(f"Unknown output mode '{output}'. Use None, 'df', 'md', or 'fig'.")
+            return
+        if sig_figs is not None and (not isinstance(sig_figs, int) or
+                                     isinstance(sig_figs, bool) or sig_figs < 1):
+            print("sig_figs must be a positive integer.")
+            return
+
+        # ``output`` drives the new behavior; ``print_table`` keeps the old
+        # "always return the DataFrame" contract alive when it is passed.
+        if output is None:
+            show = True if print_table is None else bool(print_table)
+            return_df = print_table is not None
+        else:
+            show = False
+            return_df = output == 'df'
+
         headers = ["Set", "Title", "Query", "Variable", "Count", "Min", "Mean", "Max", "Std"]
+        empty = pd.DataFrame(columns=headers)
 
         if cols is None:
             y_part = self.last_y if isinstance(self.last_y, list) else [self.last_y] if self.last_y else []
@@ -7575,15 +7666,15 @@ class UnichartNotebook:
             target_cols = cols if isinstance(cols, list) else [cols]
 
         if not target_cols:
-            if print_table:
+            if show:
                 print("No columns specified and no previous plot variables defined.")
-            return pd.DataFrame(columns=headers)
+            return empty if return_df else None
 
         active_ds = self.selected()
         if not active_ds:
-            if print_table:
+            if show:
                 print("No datasets selected. Cannot generate summary.")
-            return pd.DataFrame(columns=headers)
+            return empty if return_df else None
 
         records = []
         for ds in active_ds:
@@ -7616,29 +7707,45 @@ class UnichartNotebook:
 
         df = pd.DataFrame(records, columns=headers)
 
-        if print_table:
-            if df.empty:
+        if df.empty:
+            if show:
                 print(f"None of the selected datasets contain the specified columns: {target_cols}")
-                return df
+            return df if return_df else None
 
-            display_rows = []
-            for _, r in df.iterrows():
-                display_rows.append([
-                    r['Set'],
-                    str(r['Title']),
-                    r['Query'],
-                    str(r['Variable']),
-                    int(r['Count']),
-                    f"{r['Min']:.4g}" if pd.notna(r['Min']) else "-",
-                    f"{r['Mean']:.4g}" if pd.notna(r['Mean']) else "-",
-                    f"{r['Max']:.4g}" if pd.notna(r['Max']) else "-",
-                    f"{r['Std']:.4g}" if pd.notna(r['Std']) else "-",
-                ])
+        if output == 'df':
+            return df
 
-            self._display_html_table(
-                pd.DataFrame(display_rows, columns=headers),
-                title=f"Statistical Summary: {', '.join(map(str, target_cols))}")
+        # Build the rendered frame the same way :meth:`table` does: NaN becomes
+        # '-', then sig_figs (or the default .4g) formats the statistics.
+        stat_cols = ["Min", "Mean", "Max", "Std"]
+        final_df = df.copy()
+        final_df["Count"] = final_df["Count"].astype(int)
+        final_df = final_df.fillna('-')
+        for c in stat_cols:
+            final_df[c] = final_df[c].map(
+                lambda v: self._sig_fig_str(v, sig_figs) if sig_figs is not None
+                else (f"{v:.4g}" if isinstance(v, float) else v))
 
+        if output == 'md':
+            try:
+                return final_df.to_markdown(index=False)
+            except ImportError:
+                print("Markdown output requires the 'tabulate' package "
+                      "(pip install tabulate).")
+                return
+
+        table_title = title or f"Statistical Summary: {', '.join(map(str, target_cols))}"
+
+        if output == 'fig':
+            # Only built on demand: unlike :meth:`table`, the display path must
+            # not overwrite ``self.last_fig`` (which save_png and the dashboard
+            # read back), since a summary is informational rather than a plot.
+            return self._build_table_figure(final_df, title=table_title)
+
+        if show:
+            self._display_html_table(final_df, title=table_title)
+
+        return df if return_df else None
         return df
 
     # Method groupings for help(). A method left out of every list still shows,

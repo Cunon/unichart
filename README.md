@@ -295,7 +295,10 @@ Two consistent rules cover every reset:
   Y column at arbitrary X inputs (`kind='linear'`, extrapolation controllable).
 - **`reg_info(...)`** / `reg_order` — fit and report regressions / trend lines
   (polynomial or LOWESS; LOWESS needs `statsmodels`).
-- **`summary(cols=...)`** — per-dataset descriptive statistics.
+- **`summary(cols=...)`** — per-dataset descriptive statistics (count / min /
+  mean / max / std), displayed as the same sortable, filterable, copyable
+  table as `table(...)`; `output='df' | 'md' | 'fig'` and `sig_figs=` work the
+  same way too.
 - **`min` / `max` / `mean` / `median`** — quick per-column aggregates.
 
 ---
