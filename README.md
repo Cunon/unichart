@@ -169,6 +169,8 @@ nb.linewidth(0, 3); nb.edgewidth(0, 1); nb.hue(0, 'category')
 nb.var_format('Temperature', linestyle='--')          # all Temp lines dashed
 nb.var_format('Pressure', color='blue', marker='s')   # Pressure = blue squares
 nb.var_format('Pressure', color='reset')              # drop just the color override
+nb.var_format(['CHT1', 'CHT2'], marker='x')           # a list gets the same overrides
+nb.var_format(['CHT1', 'CHT2'], reset=True)           # drop all their overrides
 ```
 
 **Notebook-wide defaults & appearance:**

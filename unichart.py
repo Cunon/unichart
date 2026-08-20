@@ -3765,6 +3765,28 @@ class UnichartNotebook:
             return list(target)
         return None
 
+    @staticmethod
+    def _var_names(variable):
+        """Normalize a variable argument to a list of variable names.
+
+        A single name (a string, or any other non-iterable column key)
+        becomes a one-element list; a non-string iterable — list, tuple,
+        set, pandas Index — is taken as a collection of names. Unlike
+        :meth:`_var_targets` this is used where the argument is *known* to
+        name variables, so no dataset-selector autodetection happens.
+        """
+        if isinstance(variable, str) or not hasattr(variable, '__iter__'):
+            names = [variable]
+        else:
+            names = list(variable)
+        for name in names:
+            try:
+                hash(name)
+            except TypeError:
+                raise TypeError("variable names must be hashable, got "
+                                f"{name!r}") from None
+        return names
+
     @property
     def color_map(self):
         """The dataset color sequence — a :class:`CyclicList`, so integer
@@ -4073,15 +4095,24 @@ class UnichartNotebook:
     # Variable-level formatting overrides
     # ------------------------------------------------------------------
     def var_format(self, variable, color=None, marker=None, linestyle=None,
-                   markersize=None, linewidth=None, alpha=None, style=None):
+                   markersize=None, linewidth=None, alpha=None, style=None,
+                   reset=False):
         """
         Set persistent per-variable formatting overrides.
+
+        ``variable`` may be a single variable/parameter name or a list of
+        names, in which case every name gets the same overrides.
 
         Variable formatting takes precedence over Dataset formatting on a
         per-attribute basis — anything you don't set still falls back to
         the Dataset's value at plot time.
 
-        Pass the string 'reset' as the value to clear a single attribute.
+        There are two ways to undo an override:
+
+        - ``var_format('CHT', color='reset')`` clears just that one attribute.
+        - ``var_format('CHT', reset=True)`` clears *every* override on the
+          variable(s), and ignores any other arguments passed in the same
+          call (same convention as ``set_default_format(reset=True)``).
 
         `style` only affects bar-plot overlay columns (the `markers=` argument
         of `nb.bar`): 'marker' (default symbol overlay), 'tick' (horizontal
@@ -4096,31 +4127,52 @@ class UnichartNotebook:
         nb.var_format('Pressure', color='blue', marker='s')  # Pressure forced blue squares
         nb.var_format('Pressure', color='reset')             # remove just the color override
         nb.var_format('EGT_LIMIT', style='whisker', color='red')
+        nb.var_format(['CHT1', 'CHT2'], marker='x')          # same style for both
+        nb.var_format(['CHT1', 'CHT2'], marker='reset')      # clear it on both
+        nb.var_format('Pressure', reset=True)                # drop all Pressure overrides
+        nb.var_format(['CHT1', 'CHT2'], reset=True)          # ...on both
+
+        Returns
+        -------
+        dict
+            The variable's overrides for a single name, or a
+            ``{name: overrides}`` dict when a list of names was passed.
         """
+        if reset:
+            self.clear_var_format(variable)
+            if isinstance(variable, str) or not hasattr(variable, '__iter__'):
+                return {}
+            return {n: {} for n in self._var_names(variable)}
         if style is not None and style != 'reset' and style not in _OVERLAY_STYLES:
             raise ValueError(f"style must be one of {_OVERLAY_STYLES}, got {style!r}")
-        fmt = self.variable_formats.setdefault(variable, {})
+        names = self._var_names(variable)
         pairs = {'color': color, 'marker': marker, 'linestyle': linestyle,
                  'markersize': markersize, 'linewidth': linewidth, 'alpha': alpha,
                  'style': style}
-        for k, v in pairs.items():
-            if v is None:
-                continue
-            if v == 'reset':
-                fmt.pop(k, None)
-            else:
-                fmt[k] = v
-        if not fmt:
-            del self.variable_formats[variable]
-        return self.variable_formats.get(variable, {})
+        for name in names:
+            fmt = self.variable_formats.setdefault(name, {})
+            for k, v in pairs.items():
+                if v is None:
+                    continue
+                if v == 'reset':
+                    fmt.pop(k, None)
+                else:
+                    fmt[k] = v
+            if not fmt:
+                del self.variable_formats[name]
+        if isinstance(variable, str) or not hasattr(variable, '__iter__'):
+            return self.variable_formats.get(variable, {})
+        return {n: self.variable_formats.get(n, {}) for n in names}
 
     def clear_var_format(self, variable=None):
-        """Clear variable formatting. Pass None (or no arg) to clear everything.
+        """Clear variable formatting for one variable or a list of variables.
+        Pass None (or no arg) to clear everything.
         Equivalent to ``reset_format(vars=variable)`` / ``reset_format('vars')``."""
         if variable is None:
             self.variable_formats.clear()
         else:
-            self.variable_formats.pop(variable, None)
+            for name in self._var_names(variable):
+                self.variable_formats.pop(name, None)
 
     def list_var_formats(self):
         """Pretty-print current variable-level formatting."""
