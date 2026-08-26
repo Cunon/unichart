@@ -287,8 +287,9 @@ def univiolin(list_of_datasets, x, y, points='outliers',
                 marker_color=color or ds.color, opacity=ds.alpha, points=points,
             ), row=row, col=col)
 
-    fig.update_xaxes(title_text=xlabel or x)
-    fig.update_yaxes(title_text=ylabel or "Value")
+    # Axis titles without per-panel repetition: x only on each column's
+    # bottom-most panel, ylabel (when given) only on the first column.
+    _label_outer_axes(fig, len(y_list), nrows, ncols, xlabel or x, ylabel)
     if y_lim:
         fig.update_yaxes(range=y_lim)
     return _show_or_return(fig, return_axes)

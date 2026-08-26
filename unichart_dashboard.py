@@ -175,6 +175,7 @@ body {
   border-radius: 10px; padding: 10px 12px 12px;
 }
 .panel-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.panel-head .btn { flex: none; white-space: nowrap; }
 .panel-title-input {
   flex: 1 1 auto; min-width: 60px; font: inherit; font-size: 14px; font-weight: 650;
   color: var(--ink); background: transparent; border: none;
@@ -849,6 +850,50 @@ def build_app(nb, panels, ncols=2, width=600, height=420, title=None,
         Input({'type': 'panel-method', 'index': MATCH}, 'value'),
     )
 
+    # Copy the panel's plot to the clipboard as a PNG. Clientside because both
+    # halves must happen in the browser: Plotly.toImage rasterizes the
+    # already-rendered figure (no kaleido round trip), and the clipboard API
+    # only allows writes from a user gesture. The ClipboardItem wraps the
+    # image *promise* so the write starts inside the click gesture even
+    # though rasterizing takes a moment (required by Safari, fine in Chrome).
+    # Feedback flashes on the button imperatively; the Dash output never
+    # changes (no_update), it just satisfies the callback contract.
+    app.clientside_callback(
+        """
+        function(n) {
+            const nu = window.dash_clientside.no_update;
+            if (!n) { return nu; }
+            const idx = window.dash_clientside.callback_context.triggered_id.index;
+            // Dash writes dict ids into the DOM as JSON with keys sorted
+            // alphabetically, so this stringify matches ('index' < 'type').
+            const btn = document.getElementById(
+                JSON.stringify({index: idx, type: 'panel-copy'}));
+            const flash = function(msg) {
+                if (!btn) { return; }
+                btn.textContent = msg;
+                setTimeout(function() { btn.textContent = '⧉ copy'; }, 1400);
+            };
+            const box = document.getElementById(
+                JSON.stringify({index: idx, type: 'panel-graph'}));
+            const gd = box && box.querySelector('.js-plotly-plot');
+            // Table panels keep their graph hidden — nothing to rasterize.
+            if (!gd || gd.offsetParent === null) { flash('✗ no plot'); return nu; }
+            if (!navigator.clipboard || !window.ClipboardItem) {
+                flash('✗ no clipboard'); return nu;
+            }
+            const png = window.Plotly.toImage(gd, {format: 'png', scale: 2})
+                .then(function(url) { return fetch(url); })
+                .then(function(r) { return r.blob(); });
+            navigator.clipboard.write([new ClipboardItem({'image/png': png})])
+                .then(function() { flash('✓ copied'); },
+                      function() { flash('✗ failed'); });
+            return nu;
+        }
+        """,
+        Output({'type': 'panel-copy', 'index': MATCH}, 'children'),
+        Input({'type': 'panel-copy', 'index': MATCH}, 'n_clicks'),
+    )
+
     # Export the panel's plotted data as CSV. Reads the *currently displayed*
     # figure or table via State (no re-render, no lock): a table panel exports
     # its DataTable records (a go.Table figure has no x/y/z to flatten), any
@@ -1028,6 +1073,11 @@ def _panel_div(html, dcc, dash_table, i, panel, col_options, size,
                         n_clicks=0,
                         className='btn' if controls else 'btn hidden',
                         title="Download this panel's plotted data as CSV"),
+            html.Button('⧉ copy', id={'type': 'panel-copy', 'index': i},
+                        n_clicks=0,
+                        className='btn' if controls else 'btn hidden',
+                        title="Copy this panel's plot as a PNG image "
+                              "to the clipboard"),
         ],
         className='panel-head',
     )
