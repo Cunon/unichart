@@ -4252,7 +4252,60 @@ class UnichartNotebook:
     def reg_order(self, uset_slice, order):
         """
         Set a regression/trendline for the specified dataset(s).
-        Pass 'reset' (or None) to remove it.
+
+        The fit is drawn as its own line trace in the dataset's color and
+        linestyle; the raw series stays point-only while a trendline is
+        active (a set ``linestyle`` no longer connects the raw points).
+
+        Args:
+            uset_slice (int, list, 'all', or ``Dataset``): The dataset(s) to modify.
+            order: The fit spec — an int, a name, a ``(kind, param)`` pair, or
+                'reset'/None to remove the trendline.
+
+        Available specs
+        ---------------
+        ``n`` (int)            Least-squares polynomial of degree n (n <= 0 → no fit).
+        'linear', 'lin'        Straight-line least-squares fit (degree 1).
+        'quadratic'            Degree-2 polynomial.
+        'cubic'                Degree-3 polynomial.
+        'poly'                 Polynomial, degree 1 unless a param is given.
+        'polyN'                Degree N, e.g. 'poly4'.
+        'log', 'logarithmic'   y = a·ln(x) + b; needs points with x > 0.
+        'exp', 'exponential'   y = a·e^(bx); needs points with y > 0.
+        'power', 'pow'         y = a·x^b; needs points with x > 0 and y > 0.
+        'lowess', 'loess'      Locally weighted smoothing, param = frac
+                               (default 0.3). Requires ``statsmodels``.
+        'spline', 'cubic_spline'
+                               Univariate spline, param = degree k (default 3,
+                               clamped to 1-5). Requires ``scipy``.
+        'ma', 'moving_average', 'rolling'
+                               Centered rolling mean, param = window (default
+                               max(3, npoints // 20), clamped to 2-npoints).
+
+        Pass a ``(kind, param)`` tuple/list to override the parameter, e.g.
+        ``('lowess', 0.5)``, ``('ma', 10)``, ``('spline', 5)``, ``('poly', 4)``.
+        Note that a bare ``True`` is ignored — pass a spec, not a flag.
+
+        An unrecognized name or spec raises ``ValueError``. A fit that cannot be
+        computed (too few points, or none surviving the x/y > 0 masks) is
+        skipped silently; LOWESS without ``statsmodels``, and any unexpected
+        failure inside the fit, warn instead.
+
+        Each fit carries a short kind label — 'Linear', 'LS2'/'LS3'… for higher
+        polynomials, 'Log', 'Exp', 'Power', 'LOWESS(0.30)', 'Spline3', 'MA(7)'.
+        On a plot it names the fit trace ("<n>: <title> Fit (Linear)"), which is
+        hidden from the legend; in :meth:`table` and :meth:`delta` it appears as
+        the method label for values read off the curve. Those two methods take
+        the same specs via their ``kind`` argument and fall back to each
+        dataset's own ``reg_order`` when none is given.
+
+        Examples
+        --------
+        nb.reg_order('all', 'linear')         # straight-line fit everywhere
+        nb.reg_order(0, 3)                    # cubic polynomial on set 0
+        nb.reg_order(1, 'exp')                # exponential fit on set 1
+        nb.reg_order([0, 2], ('lowess', 0.5)) # smoother LOWESS on sets 0 and 2
+        nb.reg_order('all', 'reset')          # remove the trendlines
         """
         self._set_or_reset(uset_slice, 'reg_order', order)
 
