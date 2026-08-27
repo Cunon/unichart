@@ -1761,7 +1761,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                         name=f"{cur_idx}: {cur_title} Fit ({fit_label})",
                         legendgroup=f"group_{cur_idx}",
                         line=dict(color=cur_color, width=cur_linewidth, dash=get_plotly_linestyle(cur_linestyle)),
-                        opacity=0.7, hoverinfo='skip', showlegend=False
+                        opacity=cur_alpha, hoverinfo='skip', showlegend=False
                     ), row=row, col=col)
 
     coloraxis_updates = {}
