@@ -6267,11 +6267,24 @@ class UnichartNotebook:
         Rasterizing prefers ``Plotly.toImage`` when the page exposes a global
         ``Plotly`` (classic notebook renderer); otherwise — e.g. JupyterLab's
         mime extension keeps plotly.js module-scoped — it composites the
-        plot's stacked ``svg.main-svg`` layers onto a canvas. The clipboard
-        ``ClipboardItem`` wraps the PNG *promise* so the write starts inside
-        the click gesture (required by Safari). WebGL traces (``scattergl``)
-        aren't in the SVG layers, so they only copy on the ``Plotly.toImage``
-        path."""
+        plot's stacked ``svg.main-svg`` layers *and* WebGL ``.gl-canvas``
+        layers onto a canvas, in DOM (= paint) order. Two traps the fallback
+        handles:
+
+        * WebGL traces (``scattergl``, used past ``WEBGL_POINT_THRESHOLD``)
+          live on ``<canvas>``, not in the SVG layers, and their drawing
+          buffer may already be cleared at click time — so the handler forces
+          a synchronous scene redraw and snapshots the gl canvases in the
+          same task, before any async SVG work.
+        * When the page has a ``<base>`` tag (JupyterLab does), plotly writes
+          ``clip-path``/``fill`` references as absolute page URLs. Those
+          can't resolve inside a serialized standalone SVG — Chrome then
+          skips the clip, Firefox drops the whole clipped group (no markers /
+          no bars) — so the handler rewrites them back to local ``#id``
+          fragments before serializing.
+
+        The clipboard ``ClipboardItem`` wraps the PNG *promise* so the write
+        starts inside the click gesture (required by Safari)."""
         # Only under a live IPython kernel: in plain scripts the `display`
         # shim degrades to print, which would dump this HTML to stdout.
         try:
@@ -6303,22 +6316,82 @@ class UnichartNotebook:
                 setTimeout(function() { btn.textContent = "\\u29C9 copy"; }, 1400);
             };
             // Fallback rasterizer for pages without a window.Plotly global:
-            // composite the plot's stacked SVG layers onto one canvas, in
-            // document order (paper/plot layer first, annotations above).
+            // composite the plot's stacked SVG layers and WebGL canvases onto
+            // one canvas, in document order (= plotly's paint order: plot
+            // layer, gl traces, annotations above). See the Python docstring
+            // for the two traps handled here (gl buffer readback, absolute
+            // url() references under a <base> tag).
             var svgToPng = async function(gd) {
-                var svgs = gd.querySelectorAll("svg.main-svg");
-                if (!svgs.length) { throw new Error("no svg layers"); }
-                var rect = svgs[0].getBoundingClientRect();
+                var layers = gd.querySelectorAll(
+                    "svg.main-svg, canvas.gl-canvas-context, canvas.gl-canvas-focus");
+                var firstSvg = gd.querySelector("svg.main-svg");
+                if (!firstSvg) { throw new Error("no svg layers"); }
+                var rect = firstSvg.getBoundingClientRect();
                 var scale = 2;
                 var canvas = document.createElement("canvas");
                 canvas.width = Math.round(rect.width * scale);
                 canvas.height = Math.round(rect.height * scale);
                 var ctx = canvas.getContext("2d");
                 ctx.scale(scale, scale);
-                for (var i = 0; i < svgs.length; i++) {
-                    var clone = svgs[i].cloneNode(true);
+                // WebGL drawing buffers may already be cleared (plotly doesn't
+                // always preserveDrawingBuffer), so force a synchronous scene
+                // redraw and snapshot the gl canvases NOW, in this same task —
+                // before the async SVG loads below let the browser composite
+                // (and clear) them again.
+                try {
+                    var plots = (gd._fullLayout || {})._plots || {};
+                    for (var k in plots) {
+                        var scene = plots[k]._scene;
+                        if (scene && scene.draw) { scene.draw(); }
+                    }
+                } catch (e) { /* internal API — best effort */ }
+                var snaps = [];
+                for (var i = 0; i < layers.length; i++) {
+                    if (layers[i].tagName !== "CANVAS") { snaps.push(null); continue; }
+                    var s = null;
+                    if (layers[i].width && layers[i].height) {
+                        try {
+                            s = document.createElement("canvas");
+                            s.width = layers[i].width;
+                            s.height = layers[i].height;
+                            s.getContext("2d").drawImage(layers[i], 0, 0);
+                        } catch (e) { s = null; }
+                    }
+                    snaps.push(s);
+                }
+                // Under a <base> tag plotly writes url() refs (clip-path,
+                // gradient fills) as absolute page URLs, which break inside a
+                // standalone serialized SVG; rewrite them to local #fragments.
+                var URL_ATTRS = ["clip-path", "fill", "stroke", "filter", "mask"];
+                var toLocal = function(v) {
+                    return v.replace(/url\((['"]?)[^#)]*#/g, "url($1#");
+                };
+                var fixRefs = function(root) {
+                    var els = root.querySelectorAll("*");
+                    for (var i = 0; i < els.length; i++) {
+                        for (var j = 0; j < URL_ATTRS.length; j++) {
+                            var v = els[i].getAttribute(URL_ATTRS[j]);
+                            if (v && v.indexOf("url(") !== -1 && v.indexOf("#") !== -1) {
+                                els[i].setAttribute(URL_ATTRS[j], toLocal(v));
+                            }
+                        }
+                        var st = els[i].getAttribute("style");
+                        if (st && st.indexOf("url(") !== -1 && st.indexOf("#") !== -1) {
+                            els[i].setAttribute("style", toLocal(st));
+                        }
+                    }
+                };
+                for (var i = 0; i < layers.length; i++) {
+                    var r = layers[i].getBoundingClientRect();
+                    var x = r.left - rect.left, y = r.top - rect.top;
+                    if (layers[i].tagName === "CANVAS") {
+                        if (snaps[i]) { ctx.drawImage(snaps[i], x, y, r.width, r.height); }
+                        continue;
+                    }
+                    var clone = layers[i].cloneNode(true);
                     clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
                     clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
+                    fixRefs(clone);
                     var url = URL.createObjectURL(new Blob(
                         [new XMLSerializer().serializeToString(clone)],
                         {type: "image/svg+xml;charset=utf-8"}));
@@ -6326,7 +6399,7 @@ class UnichartNotebook:
                         await new Promise(function(res, rej) {
                             var img = new Image();
                             img.onload = function() {
-                                ctx.drawImage(img, 0, 0, rect.width, rect.height);
+                                ctx.drawImage(img, x, y, r.width, r.height);
                                 res();
                             };
                             img.onerror = rej;
