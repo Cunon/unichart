@@ -34,6 +34,8 @@ import inspect
 from scipy.interpolate import griddata
 import functools
 import gc
+import os
+import base64
 from pathlib import Path
 
 # -----------------------------------------------------------------------------
@@ -305,6 +307,54 @@ _DEFAULT_TITLE_FONT_PX = 18     # approximates Plotly's default suptitle font
 _TITLE_LINE_FACTOR = 1.45       # title line height = font size * this
 _LEGEND_ROW_PX = 26             # space reserved per legend row
 _LEGEND_GAP    = 12             # gap title→legend and legend→plot
+# Extra top margin reserved only when set_plot_size is pinning the height:
+# Plotly's rendered legend runs taller than _LEGEND_ROW_PX, and without the
+# slack its autoexpand takes the difference out of the plot area.
+_PINNED_TOP_SLACK = 12
+_PINNED_ROW_SLACK = 4           # ...growing with each reserved legend row
+# Legend entry/column widths used only on the pinned path (see
+# UnichartNotebook._legend_row_estimate). _legend_rows leans small on purpose —
+# a little overlap is cheap when Plotly's autoexpand can absorb it — but here
+# under-reserving shrinks the pinned plot area, so these are calibrated against
+# the legend Plotly actually renders. A grouped legend's columns are narrower
+# per character than a flowed entry but carry more fixed padding.
+# Horizontal room (px) one extra right-hand y axis needs for its tick labels and
+# its rotated title. Stacked extra axes were historically spaced by a fixed
+# *fraction* of the plot area, so the room per axis shrank with the plot: at a
+# small figsize — or under a set_plot_size pin — one axis's tick labels land on
+# top of the next axis's title. 51px is exactly what a default-size figure
+# already produces (and reads cleanly at), so the floor is invisible there and
+# only bites where the plot has actually been squeezed.
+_YAXIS_SLOT_PX = 51
+
+
+def _yaxis_slot_fraction(default_fraction, plot_width_px):
+    """Paper fraction to leave between stacked right-hand y axes.
+
+    Widens the historical fraction only where it would fall below
+    ``_YAXIS_SLOT_PX``, so wide figures keep exactly the layout they had and
+    only the cramped ones move."""
+    if not plot_width_px or plot_width_px <= 0:
+        return default_fraction
+    return max(default_fraction, _YAXIS_SLOT_PX / plot_width_px)
+
+
+_PINNED_ENTRY_BASE_PX = 40
+_PINNED_ENTRY_CHAR_PX = 10
+_PINNED_GROUP_BASE_PX = 46
+_PINNED_GROUP_CHAR_PX = 7
+
+
+def _flow_rows(widths, usable):
+    """Greedy wrap: how many rows a run of items of these pixel widths takes
+    at ``usable`` px per row. Shared by both legend-layout estimates."""
+    rows, cur = 1, 0
+    for w in widths:
+        if cur + min(w, usable) > usable:
+            rows, cur = rows + 1, min(w, usable)
+        else:
+            cur += min(w, usable)
+    return rows
 _LEGEND_ENTRY_BASE_PX = 34      # legend glyph + inter-entry padding
 _LEGEND_CHAR_PX = 7             # approx px per character of entry text
 
@@ -503,6 +553,160 @@ _LINE_LABEL_SIDES = {
     'horizontal': {'top': 'top', 'above': 'top', 'bottom': 'bottom', 'below': 'bottom'},
 }
 _LINE_LABEL_DEFAULT_SIDE = {'vertical': 'right', 'horizontal': 'top'}
+
+# -----------------------------------------------------------------------------
+# Watermarks (see UnichartNotebook.watermark)
+# -----------------------------------------------------------------------------
+# A watermark is a single Plotly layout image tagged with _WATERMARK_NAME so
+# _apply_watermark can replace its own previous entry instead of stacking a new
+# copy every time a figure is re-finalized.
+_WATERMARK_NAME = '_uc_watermark'
+
+# Built-in look, used for whatever the user hasn't set via nb.watermark().
+# Deliberately faint and centered: the common case is a logo washed behind the
+# data. 'contain' keeps the image's aspect ratio inside the size box, so the
+# user never has to know the file's pixel dimensions.
+_WATERMARK_DEFAULTS = {
+    'source': None, 'opacity': 0.15, 'position': 'center',
+    'size': 0.3, 'layer': 'below', 'sizing': 'contain',
+}
+
+# Position tokens -> (axis, value). 'c' means "center", which fills whichever
+# axis the other tokens left free ('center' alone = dead center, 'center left'
+# = vertically centered on the left edge). Mirrors the vocabulary of the
+# reference-line labels above, plus the upper/lower aliases Matplotlib users type.
+_WATERMARK_TOKENS = {
+    'left': ('h', 'left'), 'right': ('h', 'right'),
+    'top': ('v', 'top'), 'upper': ('v', 'top'),
+    'bottom': ('v', 'bottom'), 'lower': ('v', 'bottom'),
+    'center': ('c', None), 'centre': ('c', None), 'middle': ('c', None),
+}
+# Paper coordinate + matching anchor for each resolved token, so a corner
+# watermark sits flush inside the plot area rather than half outside it.
+_WATERMARK_H = {'left': (0.0, 'left'), 'center': (0.5, 'center'), 'right': (1.0, 'right')}
+_WATERMARK_V = {'bottom': (0.0, 'bottom'), 'middle': (0.5, 'middle'), 'top': (1.0, 'top')}
+
+_WATERMARK_MIME = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+                   '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
+                   '.svg': 'image/svg+xml'}
+# Leading bytes -> mime, for raw-bytes sources where there's no filename to read.
+_WATERMARK_MAGIC = ((b'\x89PNG\r\n\x1a\n', 'image/png'), (b'\xff\xd8\xff', 'image/jpeg'),
+                    (b'GIF87a', 'image/gif'), (b'GIF89a', 'image/gif'),
+                    (b'BM', 'image/bmp'), (b'<svg', 'image/svg+xml'),
+                    (b'<?xml', 'image/svg+xml'))
+
+
+def _parse_watermark_position(position):
+    """Resolve a watermark ``position`` into ``(x, y, xanchor, yanchor)`` in
+    paper coordinates (0-1 across the plot area).
+
+    ``position`` is either a string of space-separated tokens ('center',
+    'bottom right', 'top', 'center left', ...) or an explicit ``(x, y)`` pair
+    of paper coordinates, which is anchored on the image's own center so the
+    numbers name where the watermark's middle lands.
+    """
+    if isinstance(position, (list, tuple)):
+        if len(position) != 2:
+            raise ValueError("position tuple must be (x, y) in paper coords "
+                             f"(0-1), got {len(position)} values")
+        x, y = position
+        for name, val in (('x', x), ('y', y)):
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                raise TypeError(f"position {name} must be numeric (paper coords), "
+                                f"got {type(val).__name__}")
+        return float(x), float(y), 'center', 'middle'
+
+    if not isinstance(position, str):
+        raise TypeError("position must be a position string or an (x, y) pair, "
+                        f"got {type(position).__name__}")
+
+    horiz = vert = None
+    centers = 0
+    for tok in position.replace(',', ' ').lower().split():
+        entry = _WATERMARK_TOKENS.get(tok)
+        if entry is None:
+            valid = ', '.join(sorted(_WATERMARK_TOKENS))
+            raise ValueError(f"position: unknown token {tok!r}. Valid tokens: "
+                             f"{valid} (or an (x, y) pair in paper coords).")
+        axis, val = entry
+        if axis == 'h':
+            horiz = val
+        elif axis == 'v':
+            vert = val
+        else:
+            centers += 1
+
+    # 'center' fills the axes the explicit tokens left open; on its own (or with
+    # nothing at all) that means dead center.
+    if centers or (horiz is None and vert is None):
+        if horiz is None:
+            horiz = 'center'
+        if vert is None:
+            vert = 'middle'
+    horiz = horiz or 'center'
+    vert = vert or 'middle'
+
+    x, xanchor = _WATERMARK_H[horiz]
+    y, yanchor = _WATERMARK_V[vert]
+    return x, y, xanchor, yanchor
+
+
+def _watermark_data_uri(source):
+    """Normalize a watermark ``source`` into something Plotly can actually draw.
+
+    Plotly only renders ``layout.images`` sources it can fetch: a URL or a data
+    URI. A bare file path fails *silently* — blank in the browser and blank in
+    kaleido, with no exception — so local files are read here and inlined as
+    base64 data URIs. Inlining is also what keeps the watermark in the PNGs
+    produced by ``save_png``, ``set_static_images`` and the '⧉ copy' button,
+    none of which can resolve an external reference.
+
+    Accepts a path (str / Path), an existing ``data:`` URI or ``http(s)`` URL
+    (both passed through untouched), raw image bytes, or a PIL Image.
+    """
+    if source is None:
+        return None
+
+    # PIL Image: re-encode as PNG so transparency survives.
+    if hasattr(source, 'save') and hasattr(source, 'mode'):
+        import io
+        buf = io.BytesIO()
+        source.save(buf, format='PNG')
+        source = buf.getvalue()
+
+    if isinstance(source, (bytes, bytearray)):
+        raw = bytes(source)
+        if raw[:4] == b'RIFF' and raw[8:12] == b'WEBP':
+            mime = 'image/webp'      # bare 'RIFF' also matches WAV/AVI
+        else:
+            mime = next((m for magic, m in _WATERMARK_MAGIC if raw.startswith(magic)),
+                        'image/png')
+        return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+
+    if isinstance(source, os.PathLike):
+        source = os.fspath(source)
+    if not isinstance(source, str):
+        raise TypeError("watermark source must be a file path, URL, data URI, "
+                        f"bytes or a PIL Image, got {type(source).__name__}")
+
+    text = source.strip()
+    if text.startswith('data:') or text.startswith(('http://', 'https://')):
+        return text                     # already fetchable by the browser
+
+    path = os.path.expanduser(text)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"watermark image not found: {source!r}. Pass a readable file path, "
+            "an http(s) URL, a data: URI, image bytes, or a PIL Image.")
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in _WATERMARK_MIME:
+        valid = ', '.join(sorted(_WATERMARK_MIME))
+        raise ValueError(f"unsupported watermark image type {ext or '(none)'!r}. "
+                         f"Supported extensions: {valid}.")
+    with open(path, 'rb') as fh:
+        data = fh.read()
+    return f"data:{_WATERMARK_MIME[ext]};base64,{base64.b64encode(data).decode('ascii')}"
+
 
 
 def _parse_line_label_position(position, orientation):
@@ -1623,7 +1827,10 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                 'lim': axis_limits.get(_cur_hue),
             }
 
-    right_margin = max(80, len(numeric_hue_info) * 90)
+    # Match unicontour's r=100 per colorbar: 90 leaves the colorbar's tick
+    # labels just wide enough to trip Plotly's margin autoexpand, which then
+    # eats into the plot area and breaks a set_plot_size width pin.
+    right_margin = max(80, len(numeric_hue_info) * 100)
 
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles, shared_xaxes=False)
     fig.update_layout(**_base_layout(
@@ -2825,7 +3032,9 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', markers=None, variable
     x_labels = [f"{ds.index}: {ds.title}" for ds in active_ds]
 
     extras_count = max(0, len(y_list) - 2)
-    width_per_axis = 0.08
+    width_per_axis = _yaxis_slot_fraction(
+        0.08, (figsize[0] * 100 if figsize else 1200) - 80
+              - (50 + extras_count * 80))
     required_space = extras_count * width_per_axis
     x_domain_end = max(0.5, 1.0 - required_space) 
 
@@ -2971,7 +3180,9 @@ def unibox_datasets_as_x(list_of_datasets, y, boxmode='group', points='outliers'
     fig = go.Figure()
 
     extras_count = max(0, len(y_list) - 2)
-    width_per_axis = 0.08
+    width_per_axis = _yaxis_slot_fraction(
+        0.08, (figsize[0] * 100 if figsize else 1200) - 80
+              - (50 + extras_count * 80))
     required_space = extras_count * width_per_axis
     x_domain_end = max(0.5, 1.0 - required_space)
 
@@ -3105,9 +3316,13 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
                                          color_cycle=color_cycle,
                                          marker_cycle=marker_cycle)
 
-    # Domain math: extra y-axes (3+) live to the right of the plot.
+    # Domain math: extra y-axes (3+) live to the right of the plot. The slot
+    # each one gets is a fraction of the plot area, floored at _YAXIS_SLOT_PX so
+    # a narrow figure can't crush the axes into each other.
     extras = max(0, len(y_list) - 2)
-    width_per_axis = 0.06
+    ymult_right_margin = max(80, 60 + extras * 70)
+    width_per_axis = _yaxis_slot_fraction(
+        0.06, (figsize[0] * 100 if figsize else 1200) - 80 - ymult_right_margin)
     x_domain_end = max(0.5, 1.0 - extras * width_per_axis)
 
     # Axis label colors: only apply when explicitly set in variable_formats.
@@ -3221,7 +3436,10 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
     layout_extras = dict(
         showlegend=(legend != 'off'),
         xaxis=dict(domain=[0, x_domain_end], title=xlabel or x),
-        margin=dict(r=60 + extras * 70),
+        # 60 is enough for a bare right edge, but the second y variable already
+        # hangs an axis there (its labels need ~78px); under-reserving lets
+        # Plotly's autoexpand take the difference out of the plot area.
+        margin=dict(r=ymult_right_margin),
     )
     if x_lim:
         layout_extras['xaxis']['range'] = x_lim
@@ -3364,10 +3582,14 @@ class UnichartNotebook:
         # color_map and default_format exist. Change via set_plot_style.
         self._apply_style_defaults(DEFAULT_PLOT_STYLE)
 
-        # Optional fixed inner plot-area size (px, w/h, either may be None) so
-        # plots stay the same size regardless of suptitle/legend/margins. Set
-        # via set_plot_size; applied in _finalize. None = size driven by figsize.
+        # Optional fixed plot-area size (px, w/h, either may be None) so plots
+        # stay the same size — and shape — regardless of suptitle/legend/margins
+        # or how many subplots the call produces. Set via set_plot_size; applied
+        # in _finalize. None = size driven by figsize. plot_size_per_subplot
+        # decides whether the pinned size is one panel (default) or the whole
+        # subplot grid.
         self.plot_size = None
+        self.plot_size_per_subplot = True
 
         # Sticky gridline formatting set via nb.grid(). Shape:
         # {'x'|'y': {'major'|'minor': {'visible'|'color'|'width'|'dash': value}}}.
@@ -3375,6 +3597,14 @@ class UnichartNotebook:
         # figure in _finalize (see _apply_grid); cleared by nb.grid(reset=True)
         # or reset_format('grid').
         self.grid_format = self._empty_grid_format()
+
+        # Sticky watermark image set via nb.watermark(). Shape:
+        # {'source': <data URI or URL>, 'source_repr': <as typed>, 'opacity':,
+        # 'position':, 'size': (w, h), 'layer':, 'sizing':}. Empty = no
+        # watermark; any key absent falls back to _WATERMARK_DEFAULTS. Applied
+        # to every figure in _finalize (see _apply_watermark); cleared by
+        # nb.watermark(reset=True) or reset_format('watermark').
+        self.watermark_format = {}
 
         self.suptitle_size = None
         self.footer_size = None
@@ -4447,7 +4677,7 @@ class UnichartNotebook:
 
     # Scope names reset_format understands, plus forgiving aliases.
     _RESET_SCOPES = ('sets', 'vars', 'lines', 'highlights', 'scales',
-                     'fonts', 'plot_size', 'grid', 'defaults')
+                     'fonts', 'plot_size', 'grid', 'watermark', 'defaults')
     _RESET_ALIASES = {'set': 'sets', 'var': 'vars', 'variable': 'vars',
                       'variables': 'vars', 'line': 'lines',
                       'highlight': 'highlights', 'scale': 'scales',
@@ -4455,13 +4685,14 @@ class UnichartNotebook:
                       'font': 'fonts', 'font_sizes': 'fonts',
                       'plotsize': 'plot_size', 'default': 'defaults',
                       'grids': 'grid', 'gridlines': 'grid',
-                      'grid_format': 'grid'}
+                      'grid_format': 'grid', 'watermarks': 'watermark',
+                      'watermark_format': 'watermark'}
     # What a plain reset_format() sweeps. 'defaults' (the values behind
     # set_default_format) is deliberately excluded — resetting applied
     # formatting shouldn't silently discard the user's chosen defaults;
     # ask for it by name or with 'all'.
     _RESET_DEFAULT_SWEEP = ('sets', 'vars', 'lines', 'highlights', 'scales',
-                            'fonts', 'plot_size', 'grid')
+                            'fonts', 'plot_size', 'grid', 'watermark')
 
     def _reset_set_attrs(self, ds, attrs=None):
         """Restore per-dataset formatting attribute(s) to the current defaults:
@@ -4562,7 +4793,8 @@ class UnichartNotebook:
 
         Call with no arguments to reset every piece of *applied* formatting
         (dataset styles, variable overrides, lines, highlights, axis limits,
-        font sizes, pinned plot size, gridline formatting). Pass scope names
+        font sizes, pinned plot size, gridline formatting, watermark). Pass
+        scope names
         to reset only those.
         The *defaults themselves* (``set_default_format`` state, figsize,
         per-call plot defaults, the ``set_plot_style`` look) are only reset when
@@ -4573,8 +4805,8 @@ class UnichartNotebook:
         ----------
         *what : scope name(s) and/or dataset selector(s)
             Scope names: 'sets', 'vars', 'lines', 'highlights', 'scales',
-            'fonts', 'plot_size', 'grid', 'defaults', or 'all' (everything,
-            defaults included). Common aliases work too ('scale', 'variables',
+            'fonts', 'plot_size', 'grid', 'watermark', 'defaults', or 'all'
+            (everything, defaults included). Common aliases work too ('scale', 'variables',
             'gridlines', ...).
             A non-string positional (int, list, Dataset) is a dataset
             selector, same as ``uset_slice``.
@@ -4684,10 +4916,14 @@ class UnichartNotebook:
             done.append("font sizes")
         if 'plot_size' in active:
             self.plot_size = None
+            self.plot_size_per_subplot = True
             done.append("plot size")
         if 'grid' in active:
             self.grid_format = self._empty_grid_format()
             done.append("grid format")
+        if 'watermark' in active:
+            self.watermark_format = {}
+            done.append("watermark")
         print(f"Reset: {', '.join(done) if done else 'nothing'}.")
 
     def _apply_default(self, key, value, builtin):
@@ -5824,25 +6060,74 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Plot-area sizing
     # ------------------------------------------------------------------
-    def set_plot_size(self, width=None, height=None, reset=False):
-        """Pin the inner plot-area size so plots stay the same size regardless of
-        suptitle lines, legend rows, or other margin changes.
+    def set_plot_size(self, width=None, height=None, per_subplot=True, reset=False):
+        """Pin the plot area so plots come out the same size — and therefore the
+        same aspect ratio — regardless of suptitle lines, legend rows, colorbars
+        or any other margin change.
 
-        ``width``/``height`` are in inches (same units as ``figsize``). The figure
-        is grown to ``plot_area + margins``, so the drawing region is held constant
-        while margins absorb the title/legend. Pass only the dimension(s) you want
-        to pin — ``None`` leaves that dimension driven by ``figsize``. Each call
-        replaces the previous setting (calling with only ``height`` drops a prior
-        ``width`` pin). ``reset=True`` (or both ``None``) clears it — equivalent
-        to ``reset_format('plot_size')``.
+        ``width``/``height`` are in inches (same units as ``figsize``). By
+        default they size **one subplot panel**, and the figure grows to fit the
+        whole grid plus its margins — so ``nb.plot(x, y='A')`` and
+        ``nb.plot(x, y=['A', 'B', 'C'])`` draw panels of identical size and
+        shape, instead of splitting one fixed area between however many
+        variables you asked for. Pass ``per_subplot=False`` to pin the *whole*
+        grid instead, letting the panels shrink as it grows.
 
-        Note: the arithmetic is exact when Plotly's margin ``autoexpand`` stays
-        inert, which it does for the suptitle and the (downward-growing) legend.
-        A colorbar (contour/hue) or very long tick labels can still autoexpand the
-        right/left margin and make that dimension come out slightly short.
+        Pass only the dimension(s) you want to pin — ``None`` leaves that
+        dimension driven by ``figsize``. Each call replaces the previous setting
+        (calling with only ``height`` drops a prior ``width`` pin).
+        ``reset=True`` (or both ``None``) clears it — equivalent to
+        ``reset_format('plot_size')``.
+
+        Parameters
+        ----------
+        width, height : float, optional
+            Plot-area size in inches. Either may be ``None`` to leave that
+            dimension to ``figsize``.
+        per_subplot : bool
+            ``True`` (default) sizes each subplot panel; the figure grows with
+            the grid, so a 3-panel plot is roughly three times as wide as a
+            1-panel one. ``False`` pins the combined grid area — the behaviour
+            this method had before per-panel sizing — which keeps the figure
+            size stable but makes each panel shrink as panels are added.
+            Like the sizes, this is per call and not remembered: a later
+            ``set_plot_size(height=3)`` goes back to per-panel mode unless you
+            pass ``per_subplot=False`` again.
+        reset : bool
+            Clear the pin (equivalent to ``reset_format('plot_size')``).
+
+        Examples
+        --------
+        nb.set_plot_size(4, 3)                    # every panel 4x3in, always
+        nb.set_plot_size(height=3)                # pin height only
+        nb.set_plot_size(6, 4, per_subplot=False) # pin the whole grid instead
+        nb.set_plot_size(reset=True)
+
+        Notes
+        -----
+        The figure is sized as ``plot_area + margins``, so the pin only holds
+        while Plotly's margin ``autoexpand`` stays inert — any margin it grows
+        comes straight out of the plot area. unichart therefore re-reserves the
+        top band (suptitle + above-legend) against the figure's final width and
+        height whenever a size is pinned, and keeps the right margin a plotting
+        method reserved for a colorbar or extra y axes. The stacked y axes of
+        ``plot_ymult`` (and ``bar``/``box`` with ``by='dataset_x'``) are re-laid
+        the same way, each keeping a fixed pixel slot for its labels rather than
+        a share of a plot area the pin may have narrowed. Unusually long tick
+        labels can still expand a margin and leave that dimension slightly
+        short; widen ``figsize`` or shorten the labels if you hit it.
+
+        In per-subplot mode the figure grows with the grid, so a wide grid can
+        get large — five panels at 6in each is a ~22in-wide figure. Use a
+        smaller per-panel size, or ``ncols=1``, when that is inconvenient.
+
+        Dashboards are unaffected: each board panel is rendered at the size the
+        board gives it (``width``/``height`` on :meth:`dashboard`), so the pin
+        governs notebook figures, not board tiles.
         """
         if reset or (width is None and height is None):
             self.plot_size = None
+            self.plot_size_per_subplot = True
             return
 
         def _v(name, val):
@@ -5854,24 +6139,256 @@ class UnichartNotebook:
                 raise ValueError(f"{name} must be positive, got {val}")
             return val * 100
 
+        if not isinstance(per_subplot, bool):
+            raise TypeError("per_subplot must be True or False, got "
+                            f"{type(per_subplot).__name__}")
         self.plot_size = (_v('width', width), _v('height', height))
+        self.plot_size_per_subplot = per_subplot
+
+    @staticmethod
+    def _panel_fractions(fig):
+        """Fraction of the figure's inner width/height that a single subplot
+        panel spans, read off the axis domains.
+
+        Overlaying axes are skipped: ``plot_ymult`` and secondary-y plots stack
+        extra axes on the same panel with their own domains, and counting those
+        as panels would corrupt the arithmetic. The largest remaining domain
+        wins, so an uneven grid errs toward the smaller figure rather than an
+        enormous one.
+
+        Also picks up the horizontal room ``plot_ymult`` reserves for its extra
+        y axes — that space is inside the paper area but outside the panel, so
+        the fraction is what turns a paper-width pin into a true panel-width one.
+        """
+        def _spans(axes):
+            out = []
+            for ax in axes:
+                if ax.overlaying:
+                    continue
+                dom = ax.domain
+                if dom is None or len(dom) != 2:
+                    continue
+                span = float(dom[1]) - float(dom[0])
+                if span > 0:
+                    out.append(span)
+            return max(out) if out else 1.0
+
+        return _spans(fig.select_xaxes()), _spans(fig.select_yaxes())
+
+    def _pinned_inner_size(self, fig):
+        """The pinned inner (paper) size of ``fig`` in px, as ``(w, h)`` with
+        ``None`` for an unpinned dimension.
+
+        In per-subplot mode the stored size is one panel, so it is divided by
+        that panel's share of the paper area to get the paper size the figure
+        must provide. Shared by ``_apply_footer`` (which needs the final plot
+        height before the figure is resized) and ``_enforce_plot_size``."""
+        if fig is None or self.plot_size is None:
+            return None, None
+        pw, ph = self.plot_size
+        if not self.plot_size_per_subplot:
+            return pw, ph
+        fx, fy = self._panel_fractions(fig)
+        return (None if pw is None else pw / fx,
+                None if ph is None else ph / fy)
+
+    @staticmethod
+    def _keep_right_margin(fig, default):
+        """Right margin for a legend placement, without dropping a larger
+        reservation a plotting method already made (a hue/contour colorbar, the
+        extra y axes of ``plot_ymult``). Overwriting it would hand the space
+        back to Plotly's margin autoexpand, which then takes it out of the plot
+        area and shrinks a ``set_plot_size`` width pin."""
+        cur = fig.layout.margin.r
+        return default if cur is None else max(default, cur)
+
+    @staticmethod
+    def _legend_row_estimate(fig):
+        """How many rows Plotly will lay the above-legend out in.
+
+        Two layouts, because Plotly treats them differently:
+
+        * A plain horizontal legend flows its entries across the width and
+          wraps.
+        * A *grouped* one (any trace carrying a ``legendgrouptitle``, as
+          ``plot_ymult`` does) becomes a row of **columns**: each group is a
+          column headed by its title with its entries stacked beneath, and the
+          columns themselves flow across the width and wrap into bands. So the
+          row count is ``bands x (1 title + deepest group)``, not the entry
+          count — a 3-set x 2-variable ymult legend is 3 rows, not 9.
+
+        Both widths are estimated with the pinned-path constants, calibrated
+        against rendered legends: over-estimating only costs whitespace, while
+        under-estimating lets Plotly's autoexpand grow the top margin and shrink
+        the pinned plot area.
+        """
+        groups, plain = {}, []
+        for tr in fig.data:
+            if getattr(tr, 'showlegend', None) is False:
+                continue
+            name = getattr(tr, 'name', None)
+            if not name:
+                continue
+            gt = getattr(tr, 'legendgrouptitle', None)
+            gt = getattr(gt, 'text', None) if gt is not None else None
+            if gt:
+                if name not in groups.setdefault(gt, []):
+                    groups[gt].append(name)
+            elif name not in plain:
+                plain.append(name)
+
+        usable = max(200, (fig.layout.width or 1200) - 40)
+        rows = 0
+        if plain:
+            rows += _flow_rows(
+                [_PINNED_ENTRY_BASE_PX + _PINNED_ENTRY_CHAR_PX * len(n)
+                 for n in plain], usable)
+        if groups:
+            depth = 1 + max(len(names) for names in groups.values())
+            widths = [_PINNED_GROUP_BASE_PX + _PINNED_GROUP_CHAR_PX
+                      * max([len(title)] + [len(n) for n in names])
+                      for title, names in groups.items()]
+            rows += _flow_rows(widths, usable) * depth
+        return max(1, rows)
+
+    def _pin_top_space(self, fig):
+        """Re-reserve the top band (suptitle + above-legend) against the
+        figure's *final* width, and return the recomputed top margin.
+
+        ``_base_layout`` sizes that band from ``figsize``: the legend's row
+        count is estimated at the figsize width, and the title/legend anchors
+        are stored as fractions of the figsize height. ``set_plot_size`` then
+        changes both dimensions — by a lot in per-subplot mode, where the
+        figure grows with the grid. The stale estimates let the legend wrap to
+        more rows than were reserved, and slide the title and legend down the
+        taller figure, until Plotly's margin autoexpand pushes the top margin
+        out to keep them clear of the plot — quietly taking that space out of
+        the plot area and shrinking the pin.
+
+        Only called from ``_enforce_plot_size``, so figures without a pinned
+        size keep their previous geometry exactly."""
+        title = fig.layout.title.text
+        leg = fig.layout.legend
+        has_above = (leg.orientation == 'h' and leg.yref == 'container')
+        rows = self._legend_row_estimate(fig) if has_above else 1
+        top_margin, _, _ = _top_space(
+            title, (None, (fig.layout.height or 800) / 100), has_above,
+            title_font_size=self._font_size('suptitle_size'), legend_rows=rows)
+        # Plotly measures the rendered legend, whose rows run taller than the
+        # _LEGEND_ROW_PX estimate (~31px vs 26px) and by a little more with each
+        # row. Without this slack autoexpand fires for the difference and the
+        # height pin lands a few px short.
+        if has_above:
+            top_margin += _PINNED_TOP_SLACK + _PINNED_ROW_SLACK * rows
+        meta = dict(fig.layout.meta or {})
+        meta['uc_legend_rows'] = rows
+        fig.update_layout(margin=dict(t=top_margin), meta=meta)
+        return top_margin
+
+    def _anchor_top(self, fig):
+        """Re-pin the suptitle and above-legend to fixed pixel offsets from the
+        top, now that the figure's final height is known. Their stored ``y``
+        values are container *fractions*, so they only mean the intended offset
+        at the height they were computed for."""
+        rows = (fig.layout.meta or {}).get('uc_legend_rows', 1)
+        leg = fig.layout.legend
+        has_above = (leg.orientation == 'h' and leg.yref == 'container')
+        _, title_pos, legend_pos = _top_space(
+            fig.layout.title.text, (None, (fig.layout.height or 800) / 100),
+            has_above, title_font_size=self._font_size('suptitle_size'),
+            legend_rows=rows)
+        if fig.layout.title.text:
+            fig.update_layout(title=dict(y=title_pos['y']))
+        if legend_pos is not None:
+            fig.update_layout(legend=dict(y=legend_pos['y']))
+        return fig
+
+    @staticmethod
+    def _extra_yaxes(fig):
+        """The free-positioned right-hand y axes of a multi-axis plot
+        (``plot_ymult``, ``bar``/``box`` with ``by='dataset_x'``), ordered
+        left to right.
+
+        The second y variable is anchored to the x axis's domain end and so
+        follows it automatically; only the third and beyond carry an explicit
+        paper ``position`` that has to be re-solved when the width changes.
+
+        Ordered by axis number rather than by current ``position``, so the
+        caller can overwrite positions as it walks the list without the order
+        shifting underneath it."""
+        defined = fig.to_plotly_json().get('layout', {})
+        numbered = []
+        for key in defined:
+            if not key.startswith('yaxis'):
+                continue
+            ax = fig.layout[key]
+            if ax.overlaying and ax.anchor == 'free' and ax.position is not None:
+                numbered.append((int(key[5:] or 1), ax))
+        return [ax for _, ax in sorted(numbered, key=lambda pair: pair[0])]
+
+    def _reflow_extra_yaxes(self, fig, panel_px, inner_px):
+        """Re-lay the extra y axes so each gets ``_YAXIS_SLOT_PX`` of real
+        estate, given a plot area of ``inner_px`` whose data region is
+        ``panel_px`` wide. The last axis lands on paper 1.0 exactly as it does
+        at build time, so ``margin.r`` still covers its labels."""
+        axes = self._extra_yaxes(fig)
+        if not axes:
+            return
+        # Normally the caller sized inner_px to give every axis a full slot, so
+        # this is exactly _YAXIS_SLOT_PX. It only bites in whole-grid mode,
+        # where the axes come out of a fixed plot area and the 50% clamp can
+        # leave less than they want: share what there is evenly rather than
+        # handing the first axes a full slot and stacking the rest on the edge.
+        slot = min(_YAXIS_SLOT_PX, (inner_px - panel_px) / len(axes))
+        fig.update_layout(xaxis=dict(domain=[0, panel_px / inner_px]))
+        for k, ax in enumerate(axes, start=1):
+            ax.position = min(1.0, (panel_px + k * slot) / inner_px)
 
     def _enforce_plot_size(self, fig):
-        """Resize the figure so its inner plot area matches ``self.plot_size``.
-        No-op unless a plot size is pinned. Runs after fonts/margins are final."""
+        """Resize the figure so its plot area matches ``self.plot_size`` — each
+        panel in the default per-subplot mode, the whole grid otherwise.
+        No-op unless a plot size is pinned.
+
+        Runs in three steps, because the pieces depend on each other in one
+        direction only: the width follows from the left/right margins, the top
+        band follows from the width (how many rows the legend wraps to), and
+        the height follows from the top band. The title and legend anchors are
+        fixed up last, once the height they are expressed against is final.
+
+        Extra right-hand y axes are the exception to "read the width off the
+        domain": their slots are sized in px, so the domain that decides the
+        width is itself a function of the width. That one is solved in closed
+        form — ``plot area = data region + one slot per extra axis`` — and the
+        axes are re-laid against the answer."""
         if fig is None or self.plot_size is None:
             return fig
-        pw, ph = self.plot_size
         m = fig.layout.margin
 
         def mv(val, default):
             return default if val is None else val
 
-        if pw is not None:
-            fig.update_layout(width=pw + mv(m.l, 80) + mv(m.r, 80))
-        if ph is not None:
-            fig.update_layout(height=ph + mv(m.t, 100) + mv(m.b, 80))
-        return fig
+        raw_w, raw_h = self.plot_size
+        n_extra = len(self._extra_yaxes(fig))
+        if raw_w is not None:
+            if n_extra:
+                if self.plot_size_per_subplot:
+                    # The pin is the data region; the axes get their slots on top.
+                    panel_px, inner_w = raw_w, raw_w + n_extra * _YAXIS_SLOT_PX
+                else:
+                    # The pin is the whole plot area; the axes take their slots
+                    # out of it, which is what whole-grid mode asks for.
+                    inner_w = raw_w
+                    panel_px = max(inner_w * 0.5,
+                                   inner_w - n_extra * _YAXIS_SLOT_PX)
+                self._reflow_extra_yaxes(fig, panel_px, inner_w)
+            else:
+                inner_w = self._pinned_inner_size(fig)[0]
+            fig.update_layout(width=inner_w + mv(m.l, 80) + mv(m.r, 80))
+        top = self._pin_top_space(fig)
+        if raw_h is not None:
+            inner_h = self._pinned_inner_size(fig)[1]
+            fig.update_layout(height=inner_h + top + mv(fig.layout.margin.b, 80))
+        return self._anchor_top(fig)
 
     # ------------------------------------------------------------------
     # Gridline formatting
@@ -6009,6 +6526,163 @@ class UnichartNotebook:
                                      else ax_kw))
         return fig
 
+    # ------------------------------------------------------------------
+    # Watermarks
+    # ------------------------------------------------------------------
+    def watermark(self, source=None, opacity=None, position=None, size=None,
+                  layer=None, sizing=None, reset=False):
+        """Stamp an image (logo, seal, 'DRAFT' graphic) onto every plot.
+
+        Settings persist across plots and sit on top of the active plot style
+        (they survive ``set_plot_style`` and ``toggle_darkmode``). Only the
+        options you pass are stored; repeated calls merge, so
+        ``nb.watermark('logo.png')`` then ``nb.watermark(opacity=0.3)`` keeps
+        both. Called with no arguments, returns the current settings without
+        changing them.
+
+        Nothing is drawn until a ``source`` has been given. The image is
+        inlined into the figure as base64, so it also shows up in
+        ``save_png``, ``set_static_images`` mode, the '⧉ copy' button and the
+        chart panels of a ``dashboard`` — not just the live notebook plot.
+        (Table panels are rendered as HTML tables, not figures, so they carry
+        no watermark.)
+
+        Parameters
+        ----------
+        source : str | Path | bytes | PIL.Image, optional
+            The watermark image: a local file path (png, jpg, jpeg, gif, webp,
+            bmp, svg), an ``http(s)://`` URL, a ``data:`` URI, raw image bytes,
+            or a PIL Image. Local files are read immediately, so a bad path
+            raises here rather than silently drawing nothing later. A URL is
+            passed through untouched and therefore only renders where the
+            viewer can reach it — prefer a local file if you plan to export or
+            copy the plot. The image is embedded in every figure, so keep it
+            small; a multi-megabyte logo works against ``set_static_images``.
+        opacity : float, optional
+            0 (invisible) to 1 (fully opaque). Default 0.15.
+        position : str | tuple, optional
+            Where the image sits in the plot area: any combination of 'top' /
+            'upper', 'bottom' / 'lower', 'left', 'right' and 'center' /
+            'middle' — e.g. 'center' (default), 'bottom right', 'top',
+            'center left'. Alternatively an explicit ``(x, y)`` pair in paper
+            coordinates (0-1 across the plot area, ``(0, 0)`` = bottom left),
+            which centers the image on that point.
+        size : float | tuple, optional
+            Size of the box the image is fitted into, as a fraction of the plot
+            area. A scalar applies to both dimensions (default 0.3); pass
+            ``(width, height)`` to set them separately. With the default
+            ``sizing='contain'`` the image keeps its aspect ratio inside that
+            box, so it never stretches.
+        layer : {'below', 'above'}, optional
+            Draw the watermark under the data (default 'below') or on top of
+            it. 'above' plus a low opacity is the classic "tint the whole
+            plot" look; 'below' keeps the data fully readable.
+        sizing : {'contain', 'fill', 'stretch'}, optional
+            How the image fills the size box — 'contain' (default) fits it
+            whole, 'fill' crops to cover, 'stretch' distorts to fit exactly.
+        reset : bool
+            Remove the watermark and drop all stored settings (equivalent to
+            ``reset_format('watermark')``). ``source='reset'`` does the same.
+
+        Examples
+        --------
+        nb.watermark('logo.png')                          # faint, centered
+        nb.watermark('logo.png', opacity=0.4, position='bottom right', size=0.15)
+        nb.watermark('draft.png', layer='above', opacity=0.08)
+        nb.watermark(position=(0.5, 0.1))                 # move the current one
+        nb.watermark()                                    # show current settings
+        nb.watermark(reset=True)                          # remove it
+        """
+        if reset or (isinstance(source, str) and source.lower() == 'reset'):
+            self.watermark_format = {}
+            return
+
+        opts = {}
+        if source is not None:
+            # Resolve now so a bad path/type raises at the call site instead of
+            # producing a figure with an image Plotly quietly declines to draw.
+            opts['source'] = _watermark_data_uri(source)
+            # Remember how the user named it, so the query form can echo
+            # 'logo.png' instead of a multi-megabyte data URI.
+            shown = os.fspath(source) if isinstance(source, os.PathLike) else source
+            opts['source_repr'] = (
+                shown if isinstance(shown, str) and not shown.startswith('data:')
+                else f"<{type(source).__name__} image>")
+        if opacity is not None:
+            if isinstance(opacity, bool) or not isinstance(opacity, (int, float)):
+                raise TypeError(
+                    f"opacity must be numeric (0-1), got {type(opacity).__name__}")
+            if not 0.0 <= opacity <= 1.0:
+                raise ValueError(f"opacity must be between 0 and 1, got {opacity}")
+            opts['opacity'] = float(opacity)
+        if position is not None:
+            _parse_watermark_position(position)     # validate now, resolve at draw
+            opts['position'] = position
+        if size is not None:
+            if isinstance(size, (list, tuple)):
+                if len(size) != 2:
+                    raise ValueError("size tuple must be (width, height), got "
+                                     f"{len(size)} values")
+                dims = tuple(size)
+            else:
+                dims = (size, size)
+            for val in dims:
+                if isinstance(val, bool) or not isinstance(val, (int, float)):
+                    raise TypeError("size must be numeric (fraction of the plot "
+                                    f"area), got {type(val).__name__}")
+                if val <= 0:
+                    raise ValueError(f"size must be positive, got {val}")
+            opts['size'] = (float(dims[0]), float(dims[1]))
+        if layer is not None:
+            if layer not in ('below', 'above'):
+                raise ValueError(f"layer must be 'below' or 'above', got {layer!r}")
+            opts['layer'] = layer
+        if sizing is not None:
+            if sizing not in ('contain', 'fill', 'stretch'):
+                raise ValueError("sizing must be 'contain', 'fill' or 'stretch', "
+                                 f"got {sizing!r}")
+            opts['sizing'] = sizing
+
+        if not opts:
+            # Pure query: report the resolved settings, with the source shown as
+            # the user typed it rather than as a multi-megabyte data URI.
+            current = dict(_WATERMARK_DEFAULTS)
+            current['size'] = (current['size'], current['size'])
+            current.update(self.watermark_format)
+            current['source'] = current.pop('source_repr', None) or current['source']
+            return current
+
+        self.watermark_format.update(opts)
+
+    def _apply_watermark(self, fig):
+        """Draw the sticky :meth:`watermark` image on a finished figure.
+
+        No-op until a source has been set. Any watermark already on the figure
+        is removed first, so re-finalizing a figure replaces the image instead
+        of stacking copies (which would compound the opacity)."""
+        if fig is None:
+            return fig
+        keep = tuple(img for img in (fig.layout.images or ())
+                     if getattr(img, 'name', None) != _WATERMARK_NAME)
+        src = self.watermark_format.get('source')
+        if src is None:
+            if len(keep) != len(fig.layout.images or ()):
+                fig.layout.images = keep
+            return fig
+
+        cfg = dict(_WATERMARK_DEFAULTS)
+        cfg['size'] = (cfg['size'], cfg['size'])
+        cfg.update(self.watermark_format)
+        x, y, xanchor, yanchor = _parse_watermark_position(cfg['position'])
+        sizex, sizey = cfg['size']
+        fig.layout.images = keep + (dict(
+            name=_WATERMARK_NAME, source=src,
+            xref='paper', yref='paper', x=x, y=y,
+            xanchor=xanchor, yanchor=yanchor,
+            sizex=sizex, sizey=sizey, sizing=cfg['sizing'],
+            opacity=cfg['opacity'], layer=cfg['layer']),)
+        return fig
+
     def _font_size(self, name):
         """Resolved size for one font slot (e.g. ``'axes_tick_size'``): an
         explicit :meth:`set_font_sizes` value wins, else the active plot
@@ -6060,9 +6734,12 @@ class UnichartNotebook:
         fig.update_layout(margin=dict(b=new_b))
 
         # Plot-area height in px (one paper-y unit). If the height is pinned via
-        # set_plot_size, that is the final inner height; otherwise derive it.
-        if self.plot_size is not None and self.plot_size[1] is not None:
-            plot_h = self.plot_size[1]
+        # set_plot_size, resolve it to the *paper* height the figure will be
+        # given (in per-subplot mode the stored value is one panel); otherwise
+        # derive it from the current figure height.
+        pinned_h = self._pinned_inner_size(fig)[1]
+        if pinned_h is not None:
+            plot_h = pinned_h
         else:
             t = m.t if m.t is not None else 100
             plot_h = max(1.0, (fig.layout.height or 800) - t - new_b)
@@ -6162,12 +6839,15 @@ class UnichartNotebook:
 
         ``footer`` is added after ``_apply_fonts`` (so the subplot-title font loop
         doesn't resize it) and before ``_enforce_plot_size`` (so the reserved
-        bottom margin is included when pinning the plot area).
+        bottom margin is included when pinning the plot area). The watermark
+        follows it: sized in paper coords, it is unaffected by either, and
+        running last keeps it out of the margin arithmetic entirely.
         """
         fig = self._apply_style(fig)
         fig = self._apply_grid(fig)
         fig = self._apply_fonts(fig)
         fig = self._apply_footer(fig, footer)
+        fig = self._apply_watermark(fig)
         fig = self._enforce_plot_size(fig)
         if fig is not None and suppress_legends:
             fig.update_traces(visible='legendonly')
@@ -6571,11 +7251,13 @@ class UnichartNotebook:
                 showlegend=True,
                 legend=dict(orientation='v', xanchor='left', x=1.02,
                             yanchor='top', y=1),
-                margin=dict(r=160, t=_top),
+                margin=dict(r=self._keep_right_margin(fig, 160), t=_top),
             )
         else:  # 'above' (default)
             _legend, _top = _above_legend_layout(suptitle or self.suptitle, figsize)
-            fig.update_layout(legend=_legend, margin=dict(r=80, t=_top))
+            fig.update_layout(legend=_legend,
+                              margin=dict(r=self._keep_right_margin(fig, 80),
+                                          t=_top))
         return self._finalize(fig, suppress_legends, footer=footer or self.footer)
 
     # ------------------------------------------------------------------
@@ -6860,7 +7542,9 @@ class UnichartNotebook:
             if fig:
                 fig = self._apply_decorations(fig, [], y_list, 'global', 1)
                 _legend, _top = _above_legend_layout(suptitle or self.suptitle, figsize)
-                fig.update_layout(legend=_legend, margin=dict(r=80, t=_top))
+                fig.update_layout(legend=_legend,
+                              margin=dict(r=self._keep_right_margin(fig, 80),
+                                          t=_top))
                 fig = self._finalize(fig, suppress_legends, footer=footer or self.footer)
             return fig
 
@@ -6900,7 +7584,9 @@ class UnichartNotebook:
                 fig = self._apply_decorations(fig, [], y_list, 'vars', _nc,
                                               [(x, yi) for yi in y_list])
             _legend, _top = _above_legend_layout(suptitle or self.suptitle, figsize)
-            fig.update_layout(legend=_legend, margin=dict(r=80, t=_top))
+            fig.update_layout(legend=_legend,
+                              margin=dict(r=self._keep_right_margin(fig, 80),
+                                          t=_top))
             fig = self._finalize(fig, suppress_legends, footer=footer or self.footer)
 
         return fig
@@ -8366,8 +9052,8 @@ class UnichartNotebook:
                               'set_display_parms', 'set_title', 'set_default_format',
                               'reset_format', 'set_font_sizes', 'get_font_sizes',
                               'toggle_darkmode', 'set_plot_style', 'scale',
-                              'set_plot_size', 'set_static_images',
-                              'set_copy_buttons']),
+                              'set_plot_size', 'grid', 'watermark',
+                              'set_static_images', 'set_copy_buttons']),
         ("Analysis & stats", ['delta', 'table', 'table_read', 'summary', 'reg_info',
                               'min', 'max', 'mean', 'median']),
         ("Info",             ['list_sets', 'list_parms', 'refresh_own_columns',

@@ -183,11 +183,13 @@ nb.var_format(['CHT1', 'CHT2'], reset=True)           # drop all their overrides
 - `set_plot_style('matplotlib')` — Matplotlib-look figures (see below).
 - `set_font_sizes` / `get_font_sizes` — named sizes (`'sm'`, `'lg'`, `'xl'`, …)
   for title, legend, axes, ticks, table cells, hover, etc.
-- `set_plot_size` — pin the inner plot area so plots stay the same size
-  regardless of titles/legends.
+- `set_plot_size` — pin the plot area so every panel comes out the same size
+  and aspect ratio regardless of titles, legends or subplot count (see below).
 - `grid(...)` — gridline formatting: visibility, color, width, dash pattern,
   per axis (`axis='x'/'y'/'both'`) and major/minor (`which=`), e.g.
   `nb.grid(color='lightgray', dash=':')` or `nb.grid(which='minor', visible=True)`.
+- `watermark(...)` — stamp a logo or seal onto every plot, with control over
+  opacity, position and size (see below).
 - `set_static_images(True)` / `save_png(...)` — render flat PNGs inline (keeps
   notebook file size down) or export a high-resolution PNG (needs `kaleido`).
 
@@ -250,6 +252,77 @@ nb.line('cht', 350, label='target', label_position='center below', label_color='
   and picks its side with `'above'`/`'below'` (`'top'`/`'bottom'`).
 - `label_color` — defaults to the line's `color`.
 
+### Fixed plot size / aspect ratio
+
+`figsize` sets the size of the whole *figure*, so the actual drawing area moves
+around as titles wrap, legends grow or a plot splits into more subplots — and
+two plots in the same notebook end up different shapes. `set_plot_size` pins
+the **plot area** instead:
+
+```python
+nb.set_plot_size(4, 3)          # every panel exactly 4x3in, in every plot
+nb.plot(x='t', y='CHT')                   # 1 panel,  4x3in
+nb.plot(x='t', y=['CHT', 'EGT', 'RPM'])   # 3 panels, 4x3in each
+nb.set_plot_size(height=3)      # pin height only; width follows figsize
+nb.set_plot_size(reset=True)    # back to figsize-driven sizing
+```
+
+The size applies to **one subplot panel** by default, and the figure grows to
+fit the grid plus its margins — so panels keep the same size and aspect ratio no
+matter how many variables you plot or how tall the title and legend get. Pass
+`per_subplot=False` to pin the combined grid area instead (the behaviour this
+method had before per-panel sizing), which holds the figure size steady but
+shrinks each panel as the grid grows.
+
+Multi-axis plots (`plot_ymult`, or `bar`/`box` with `by='dataset_x'`) are
+handled too: each stacked right-hand Y axis keeps a fixed pixel slot for its
+tick labels and title, so a narrow or pinned plot pushes the axes further out
+instead of crushing them into each other.
+
+Each call replaces the previous setting, `per_subplot` included — a later
+`set_plot_size(height=3)` returns to per-panel mode unless you pass
+`per_subplot=False` again.
+
+Note that in per-panel mode a wide grid makes a wide figure — five 6in panels
+side by side is a ~22in figure. Use a smaller per-panel size or `ncols=1` when
+that is inconvenient. Dashboard panels are rendered at the size the board gives
+them, so the pin governs notebook figures, not board tiles.
+
+### Watermarks
+
+Stamp a logo, seal or "DRAFT" graphic onto every plot:
+
+```python
+nb.watermark('logo.png')                                   # faint, centered
+nb.watermark('logo.png', opacity=0.4,
+             position='bottom right', size=0.15)           # corner logo
+nb.watermark('draft.png', opacity=0.08, layer='above')     # tint over the data
+nb.watermark(opacity=0.3)                                  # tweak; other settings kept
+nb.watermark()                                             # show current settings
+nb.watermark(reset=True)                                   # remove it
+```
+
+- **`opacity`** — `0`–`1` (default `0.15`).
+- **`position`** — any combination of `'top'`/`'upper'`, `'bottom'`/`'lower'`,
+  `'left'`, `'right'`, `'center'`/`'middle'` — e.g. `'center'` (default),
+  `'bottom right'`, `'top'`, `'center left'`. Or an explicit `(x, y)` pair in
+  paper coordinates (`0`–`1` across the plot area, `(0, 0)` = bottom left),
+  which centers the image on that point.
+- **`size`** — fraction of the plot area the image is fitted into (default
+  `0.3`); pass `(width, height)` to set the two separately. `sizing='contain'`
+  (default) preserves the image's aspect ratio inside that box; `'fill'` crops
+  to cover, `'stretch'` distorts to fit.
+- **`layer`** — `'below'` (default) draws under the data, `'above'` over it.
+- **`source`** — a file path (png, jpg, gif, webp, bmp, svg), an `http(s)` URL,
+  a `data:` URI, raw bytes, or a PIL image. Local files are read and inlined as
+  base64 at call time, so the watermark also appears in `save_png`,
+  `set_static_images` mode, the ⧉ copy button and a dashboard's chart panels —
+  and a bad path raises immediately instead of silently drawing nothing. A URL
+  is passed through as-is and only renders where the viewer can reach it. The
+  image rides along in every figure, so keep the file small.
+
+Settings persist across plots and merge across calls, like `grid()`.
+
 ### Resetting formatting
 
 Two consistent rules cover every reset:
@@ -270,7 +343,7 @@ Two consistent rules cover every reset:
 
 2. **`reset_format()` is the single bulk-reset hub**, with optional scopes
    `'sets'`, `'vars'`, `'lines'`, `'highlights'`, `'scales'`, `'fonts'`,
-   `'plot_size'`, `'defaults'`, `'all'`:
+   `'plot_size'`, `'grid'`, `'watermark'`, `'defaults'`, `'all'`:
 
    ```python
    nb.reset_format()                     # all applied formatting
