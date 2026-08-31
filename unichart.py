@@ -815,7 +815,94 @@ def _prefix_annotation(annotation):
 # -----------------------------------------------------------------------------
 # Variable Format Resolver (used by multi-y plot)
 # -----------------------------------------------------------------------------
-_VAR_FORMAT_KEYS = ('color', 'marker', 'linestyle', 'markersize', 'linewidth', 'alpha', 'style')
+_VAR_FORMAT_KEYS = ('color', 'marker', 'linestyle', 'markersize', 'linewidth', 'alpha',
+                    'alpha_markers', 'alpha_line', 'style')
+
+# CSS named colors (the set Plotly accepts), for ``_color_with_alpha``. Plotly
+# only validates names; it ships no name -> value table.
+_CSS_NAMED_COLORS = dict(kv.split(':') for kv in (
+    "aliceblue:f0f8ff antiquewhite:faebd7 aqua:00ffff aquamarine:7fffd4 azure:f0ffff "
+    "beige:f5f5dc bisque:ffe4c4 black:000000 blanchedalmond:ffebcd blue:0000ff "
+    "blueviolet:8a2be2 brown:a52a2a burlywood:deb887 cadetblue:5f9ea0 chartreuse:7fff00 "
+    "chocolate:d2691e coral:ff7f50 cornflowerblue:6495ed cornsilk:fff8dc crimson:dc143c "
+    "cyan:00ffff darkblue:00008b darkcyan:008b8b darkgoldenrod:b8860b darkgray:a9a9a9 "
+    "darkgreen:006400 darkgrey:a9a9a9 darkkhaki:bdb76b darkmagenta:8b008b "
+    "darkolivegreen:556b2f darkorange:ff8c00 darkorchid:9932cc darkred:8b0000 "
+    "darksalmon:e9967a darkseagreen:8fbc8f darkslateblue:483d8b darkslategray:2f4f4f "
+    "darkslategrey:2f4f4f darkturquoise:00ced1 darkviolet:9400d3 deeppink:ff1493 "
+    "deepskyblue:00bfff dimgray:696969 dimgrey:696969 dodgerblue:1e90ff firebrick:b22222 "
+    "floralwhite:fffaf0 forestgreen:228b22 fuchsia:ff00ff gainsboro:dcdcdc ghostwhite:f8f8ff "
+    "gold:ffd700 goldenrod:daa520 gray:808080 green:008000 greenyellow:adff2f grey:808080 "
+    "honeydew:f0fff0 hotpink:ff69b4 indianred:cd5c5c indigo:4b0082 ivory:fffff0 khaki:f0e68c "
+    "lavender:e6e6fa lavenderblush:fff0f5 lawngreen:7cfc00 lemonchiffon:fffacd "
+    "lightblue:add8e6 lightcoral:f08080 lightcyan:e0ffff lightgoldenrodyellow:fafad2 "
+    "lightgray:d3d3d3 lightgreen:90ee90 lightgrey:d3d3d3 lightpink:ffb6c1 lightsalmon:ffa07a "
+    "lightseagreen:20b2aa lightskyblue:87cefa lightslategray:778899 lightslategrey:778899 "
+    "lightsteelblue:b0c4de lightyellow:ffffe0 lime:00ff00 limegreen:32cd32 linen:faf0e6 "
+    "magenta:ff00ff maroon:800000 mediumaquamarine:66cdaa mediumblue:0000cd "
+    "mediumorchid:ba55d3 mediumpurple:9370db mediumseagreen:3cb371 mediumslateblue:7b68ee "
+    "mediumspringgreen:00fa9a mediumturquoise:48d1cc mediumvioletred:c71585 "
+    "midnightblue:191970 mintcream:f5fffa mistyrose:ffe4e1 moccasin:ffe4b5 navajowhite:ffdead "
+    "navy:000080 oldlace:fdf5e6 olive:808000 olivedrab:6b8e23 orange:ffa500 orangered:ff4500 "
+    "orchid:da70d6 palegoldenrod:eee8aa palegreen:98fb98 paleturquoise:afeeee "
+    "palevioletred:db7093 papayawhip:ffefd5 peachpuff:ffdab9 peru:cd853f pink:ffc0cb "
+    "plum:dda0dd powderblue:b0e0e6 purple:800080 rebeccapurple:663399 red:ff0000 "
+    "rosybrown:bc8f8f royalblue:4169e1 saddlebrown:8b4513 salmon:fa8072 sandybrown:f4a460 "
+    "seagreen:2e8b57 seashell:fff5ee sienna:a0522d silver:c0c0c0 skyblue:87ceeb "
+    "slateblue:6a5acd slategray:708090 slategrey:708090 snow:fffafa springgreen:00ff7f "
+    "steelblue:4682b4 tan:d2b48c teal:008080 thistle:d8bfd8 tomato:ff6347 turquoise:40e0d0 "
+    "violet:ee82ee wheat:f5deb3 white:ffffff whitesmoke:f5f5f5 yellow:ffff00 "
+    "yellowgreen:9acd32"
+).split())
+
+
+def _color_with_alpha(color, alpha):
+    """Return ``color`` as an ``rgba(...)`` string carrying ``alpha``.
+
+    Plotly has no ``line.opacity``, so a line-only opacity has to ride in the
+    line color itself. Accepts hex (``#rgb``, ``#rrggbb``, ``#rrggbbaa``),
+    ``rgb()``/``rgba()`` strings (an existing alpha is replaced), and CSS
+    named colors. Anything unrecognized is returned unchanged.
+    """
+    if not isinstance(color, str):
+        return color
+    c = color.strip().lower()
+    rgb = None
+    if c in _CSS_NAMED_COLORS:
+        c = '#' + _CSS_NAMED_COLORS[c]
+    if c.startswith('#'):
+        h = c[1:]
+        if len(h) in (3, 4):
+            h = ''.join(ch * 2 for ch in h)
+        if len(h) in (6, 8) and all(ch in '0123456789abcdef' for ch in h):
+            rgb = tuple(str(int(h[i:i + 2], 16)) for i in (0, 2, 4))
+    elif c.startswith(('rgb(', 'rgba(')) and c.endswith(')'):
+        parts = [x.strip() for x in c[c.index('(') + 1:-1].split(',')]
+        if len(parts) >= 3:
+            rgb = tuple(parts[:3])
+    if rgb is None:
+        return color
+    return f'rgba({rgb[0]},{rgb[1]},{rgb[2]},{alpha:g})'
+
+
+def _split_alpha(fmt, color, marker_dict, line_dict):
+    """Resolve ``alpha`` / ``alpha_markers`` / ``alpha_line`` for one trace.
+
+    ``alpha`` is the trace-level opacity and covers everything. When
+    ``alpha_markers`` or ``alpha_line`` is set, the trace opacity drops to 1
+    and each part carries its own value instead — markers through
+    ``marker.opacity``, the line through an rgba color — with the part that
+    has no value of its own keeping ``alpha``. Mutates ``marker_dict`` and
+    ``line_dict`` in place and returns the trace-level opacity to use.
+    """
+    alpha = fmt.get('alpha')
+    alpha = 1 if alpha is None else alpha
+    a_m, a_l = fmt.get('alpha_markers'), fmt.get('alpha_line')
+    if a_m is None and a_l is None:
+        return alpha
+    marker_dict['opacity'] = alpha if a_m is None else a_m
+    line_dict['color'] = _color_with_alpha(color, alpha if a_l is None else a_l)
+    return 1
 
 # Rendering styles for bar-plot overlay columns (the ``markers=`` argument of
 # ``unibar``/``unibar_per_dataset``). 'marker' is the classic symbol overlay;
@@ -848,6 +935,9 @@ _DATASET_FORMAT_DEFAULTS = {
     'edgewidth':  1,
     'edge_color': 'black',
     'alpha':      1,
+    # Marker-only / line-only opacity; None means "same as alpha".
+    'alpha_markers': None,
+    'alpha_line':    None,
     'fill':       True,
     # Colorscale for contours and hue-colored scatters. Lives here (rather than
     # only on Dataset) so a plot style can swap it — see MPL_DATASET_FORMAT.
@@ -863,8 +953,8 @@ _DATASET_FORMAT_DEFAULTS = {
 # reset sweep skips it too).
 _INHERITED_FORMAT_ATTRS = (
     'color', 'marker', 'linestyle', 'markersize', 'linewidth', 'edgewidth',
-    'alpha', 'edge_color', 'fill', 'hue', 'hue_palette', 'hue_order',
-    'style', 'display_parms',
+    'alpha', 'alpha_markers', 'alpha_line', 'edge_color', 'fill', 'hue',
+    'hue_palette', 'hue_order', 'style', 'display_parms',
 )
 
 def _resolve_var_format(dataset, variable, variable_formats=None):
@@ -884,6 +974,8 @@ def _resolve_var_format(dataset, variable, variable_formats=None):
         'markersize': var_fmt.get('markersize', dataset.markersize),
         'linewidth':  var_fmt.get('linewidth',  dataset.linewidth),
         'alpha':      var_fmt.get('alpha',      dataset.alpha),
+        'alpha_markers': var_fmt.get('alpha_markers', getattr(dataset, 'alpha_markers', None)),
+        'alpha_line':    var_fmt.get('alpha_line',    getattr(dataset, 'alpha_line', None)),
         'edge_color': getattr(dataset, 'edge_color', 'black'),
         'edgewidth':  getattr(dataset, 'edgewidth', 1),
         'fill':       getattr(dataset, 'fill', True),
@@ -1223,6 +1315,8 @@ class Dataset:
         self._linestyle = fmt.get('linestyle', None)
         self.markersize = fmt.get('markersize', 10)
         self.alpha = fmt.get('alpha', 1)
+        self.alpha_markers = fmt.get('alpha_markers', None)
+        self.alpha_line = fmt.get('alpha_line', None)
         self.hue = ""
         self.hue_palette = fmt.get('hue_palette', 'Jet')
         self.hue_order = None
@@ -1486,6 +1580,8 @@ class Dataset:
             'linestyle': self.linestyle,
             'markersize': self.markersize,
             'alpha': self.alpha,
+            'alpha_markers': self.alpha_markers,
+            'alpha_line': self.alpha_line,
             'hue': self.hue,
             'hue_palette': self.hue_palette,
             'hue_order': self.hue_order,
@@ -1852,7 +1948,6 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
         cur_linestyle = linestyle or fmt.get('linestyle')
         cur_markersize = fmt.get('markersize', markersize)
         cur_linewidth = fmt.get('linewidth', 2)
-        cur_alpha = fmt.get('alpha', 1)
         cur_reg_order = fmt.get('reg_order')
         cur_idx = fmt.get('index')
         hover_parms = display_parms or fmt.get('display_parms', [])
@@ -1949,13 +2044,14 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                 marker_dict['color'] = 'rgba(0,0,0,0)'
                 marker_dict['line'] = dict(width=fmt.get('edgewidth', 1), color=cur_color)
             line_dict['color'] = cur_color
+            cur_opacity = _split_alpha(fmt, cur_color, marker_dict, line_dict)
 
             fig.add_trace(_scatter_cls(len(df))(
                 x=df[x_col], y=df[yi], mode=mode,
                 name=f"{cur_idx}: {cur_title}",
                 legendgroup=f"group_{cur_idx}",
                 marker=marker_dict, line=line_dict,
-                opacity=cur_alpha,
+                opacity=cur_opacity,
                 customdata=custom_data, hovertemplate=ht,
                 showlegend=(idx_p == 0)
             ), row=row, col=col)
@@ -1967,8 +2063,9 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                         x=rx, y=ry, mode='lines',
                         name=f"{cur_idx}: {cur_title} Fit ({fit_label})",
                         legendgroup=f"group_{cur_idx}",
-                        line=dict(color=cur_color, width=cur_linewidth, dash=get_plotly_linestyle(cur_linestyle)),
-                        opacity=cur_alpha, hoverinfo='skip', showlegend=False
+                        line=dict(color=line_dict['color'], width=cur_linewidth,
+                                  dash=get_plotly_linestyle(cur_linestyle)),
+                        opacity=cur_opacity, hoverinfo='skip', showlegend=False
                     ), row=row, col=col)
 
     coloraxis_updates = {}
@@ -2755,20 +2852,22 @@ def _add_contour_overlays(fig, overlay_datasets, x, y, n_subplots, ncols, darkmo
                       color=ds.color if not ds.fill
                       else (ds.edge_color or edge_default)),
         )
-        prepared.append((ds, df, mode, marker_dict))
+        line_dict = dict(width=ds.linewidth, color=ds.color,
+                         dash=get_plotly_linestyle(ds.linestyle))
+        opacity = _split_alpha(ds.get_format_dict(), ds.color, marker_dict, line_dict)
+        prepared.append((ds, df, mode, marker_dict, line_dict, opacity))
 
     for cell in range(n_subplots):
         row, col = (cell // ncols) + 1, (cell % ncols) + 1
-        for ds, df, mode, marker_dict in prepared:
+        for ds, df, mode, marker_dict, line_dict, opacity in prepared:
             fig.add_trace(go.Scatter(
                 x=df[x], y=df[y],
                 mode=mode,
                 name=f"{ds.index}: {ds.title}",
                 legendgroup=f"overlay_{ds.index}",
                 marker=marker_dict,
-                line=dict(width=ds.linewidth, color=ds.color,
-                          dash=get_plotly_linestyle(ds.linestyle)),
-                opacity=ds.alpha,
+                line=line_dict,
+                opacity=opacity,
                 showlegend=(cell == 0),
                 hovertemplate=(f"<b>{ds.title}</b><br>{x}: %{{x:.3g}}<br>"
                                f"{y}: %{{y:.3g}}<extra></extra>")
@@ -3377,6 +3476,12 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
 
             y_axis_name = "y" if idx_y == 0 else f"y{idx_y + 1}"
 
+            # Markers carry ``alpha`` (or ``alpha_markers``) directly; the
+            # line only goes translucent when ``alpha_line`` asks for it.
+            m_alpha = fmt['alpha'] if fmt.get('alpha_markers') is None else fmt['alpha_markers']
+            l_color = (fmt['color'] if fmt.get('alpha_line') is None
+                       else _color_with_alpha(fmt['color'], fmt['alpha_line']))
+
             if fmt.get('fill', True):
                 marker_kw = dict(
                     color=fmt['color'],
@@ -3399,13 +3504,13 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
                 marker=dict(
                     size=fmt['markersize'],
                     symbol=get_plotly_marker(fmt['marker']),
-                    opacity=fmt['alpha'],
+                    opacity=m_alpha,
                     **marker_kw,
                 ),
                 line=dict(
                     width=fmt['linewidth'],
                     dash=get_plotly_linestyle(fmt['linestyle']) or 'solid',
-                    color=fmt['color'],
+                    color=l_color,
                 ),
                 customdata=customdata,
                 hovertemplate=ht,
@@ -4474,6 +4579,63 @@ class UnichartNotebook:
             return
         self._set_or_reset(uset_slice, 'alpha', alpha_val)
 
+    @staticmethod
+    def _check_alpha(name, value):
+        """Validate a partial-opacity value: None/'reset' pass through,
+        anything else must be a number in [0, 1]."""
+        if value is None or (isinstance(value, str) and value == 'reset'):
+            return value
+        if isinstance(value, bool) or not isinstance(value, numbers.Real):
+            raise TypeError(f"{name} must be a number in [0, 1] (or 'reset'), "
+                            f"got {value!r}")
+        if not 0 <= value <= 1:
+            raise ValueError(f"{name} must be in [0, 1], got {value}")
+        return value
+
+    def alpha_markers(self, uset_slice=None, alpha_val=None):
+        """
+        Set the opacity of just the *markers* for the target dataset(s) or
+        variable(s), leaving the line at its ``alpha``.
+
+        Same target autodetection as :meth:`alpha`. Pass ``'reset'`` (or
+        ``None``) to go back to sharing the dataset's ``alpha``.
+
+        Examples
+        --------
+        nb.alpha_markers(0, 0.3)          # faint points, full-strength line
+        nb.alpha_markers('CHT1', 0.5)     # per-variable override
+        nb.alpha_markers(0, 'reset')
+        """
+        alpha_val = self._check_alpha('alpha_markers', alpha_val)
+        variables = self._var_targets(uset_slice)
+        if variables is not None:
+            for v in variables:
+                self.var_format(v, alpha_markers=alpha_val if alpha_val is not None else 'reset')
+            return
+        self._set_or_reset(uset_slice, 'alpha_markers', alpha_val)
+
+    def alpha_line(self, uset_slice=None, alpha_val=None):
+        """
+        Set the opacity of just the *line* for the target dataset(s) or
+        variable(s), leaving the markers at their ``alpha``.
+
+        Same target autodetection as :meth:`alpha`. Pass ``'reset'`` (or
+        ``None``) to go back to sharing the dataset's ``alpha``.
+
+        Examples
+        --------
+        nb.alpha_line(0, 0.3)             # faint connecting line, solid points
+        nb.alpha_line('CHT1', 0.5)        # per-variable override
+        nb.alpha_line(0, 'reset')
+        """
+        alpha_val = self._check_alpha('alpha_line', alpha_val)
+        variables = self._var_targets(uset_slice)
+        if variables is not None:
+            for v in variables:
+                self.var_format(v, alpha_line=alpha_val if alpha_val is not None else 'reset')
+            return
+        self._set_or_reset(uset_slice, 'alpha_line', alpha_val)
+
     def plot_type(self, uset_slice, type_val):
         """Set the plot type ('scatter', 'contour', 'histogram') for the
         specified dataset(s). Pass 'reset' to restore 'scatter'."""
@@ -4582,7 +4744,7 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     def var_format(self, variable, color=None, marker=None, linestyle=None,
                    markersize=None, linewidth=None, alpha=None, style=None,
-                   reset=False):
+                   alpha_markers=None, alpha_line=None, reset=False):
         """
         Set persistent per-variable formatting overrides.
 
@@ -4599,6 +4761,10 @@ class UnichartNotebook:
         - ``var_format('CHT', reset=True)`` clears *every* override on the
           variable(s), and ignores any other arguments passed in the same
           call (same convention as ``set_default_format(reset=True)``).
+
+        `alpha_markers` / `alpha_line` set the opacity of just the markers or
+        just the line (see :meth:`alpha_markers`, :meth:`alpha_line`); the
+        other part keeps `alpha`.
 
         `style` only affects bar-plot overlay columns (the `markers=` argument
         of `nb.bar`): 'marker' (default symbol overlay), 'tick' (horizontal
@@ -4634,6 +4800,7 @@ class UnichartNotebook:
         names = self._var_names(variable)
         pairs = {'color': color, 'marker': marker, 'linestyle': linestyle,
                  'markersize': markersize, 'linewidth': linewidth, 'alpha': alpha,
+                 'alpha_markers': alpha_markers, 'alpha_line': alpha_line,
                  'style': style}
         for name in names:
             fmt = self.variable_formats.setdefault(name, {})
@@ -4714,6 +4881,8 @@ class UnichartNotebook:
             'linewidth':   lambda: fmt.get('linewidth', 2),
             'edgewidth':   lambda: fmt.get('edgewidth', 1),
             'alpha':       lambda: fmt.get('alpha', 1),
+            'alpha_markers': lambda: fmt.get('alpha_markers', None),
+            'alpha_line':    lambda: fmt.get('alpha_line', None),
             'edge_color':  lambda: fmt.get('edge_color', 'black'),
             'fill':        lambda: fmt.get('fill', True),
             'hue':         lambda: "",
@@ -4948,7 +5117,8 @@ class UnichartNotebook:
 
     def set_default_format(self, markersize=None, linestyle=None, linewidth=None,
                            edgewidth=None, edge_color=None, alpha=None, fill=None,
-                           marker=_UNSET, hue_palette=None, figsize=None, legend=None,
+                           marker=_UNSET, hue_palette=None, alpha_markers=_UNSET,
+                           alpha_line=_UNSET, figsize=None, legend=None,
                            suppress_legends=None, ncols=None, nrows=None,
                            barmode=None, agg=None, histfunc=None, histnorm=None,
                            boxmode=None, points=None, reset=False):
@@ -4976,6 +5146,10 @@ class UnichartNotebook:
         alpha : float in [0, 1]
             Default opacity for per-dataset styles *and* the histogram bar
             opacity default (the latter overridable per-call via ``histogram(alpha=)``).
+        alpha_markers, alpha_line : float in [0, 1], or None
+            Default marker-only / line-only opacity for future datasets
+            (see :meth:`alpha_markers`, :meth:`alpha_line`). ``None`` means
+            "same as alpha".
         linestyle : matplotlib/Plotly dash name (e.g. '--', 'dash') or None
         edge_color : color string (named, hex, or rgb)
         fill : bool (or truthy/falsy string) — filled vs. hollow markers
@@ -5050,6 +5224,9 @@ class UnichartNotebook:
         if linewidth  is not None: updates['linewidth']  = _num('linewidth', linewidth)
         if edgewidth  is not None: updates['edgewidth']  = _num('edgewidth', edgewidth)
         if alpha      is not None: updates['alpha']      = _num('alpha', alpha, 0.0, 1.0)
+        for _name, _val in (('alpha_markers', alpha_markers), ('alpha_line', alpha_line)):
+            if _val is not _UNSET:
+                updates[_name] = None if _val is None else _num(_name, _val, 0.0, 1.0)
         if linestyle  is not None:
             if not (validate_linestyle(linestyle)
                     or linestyle in LINESTYLE_MAP_MPL_TO_PLOTLY.values()):
@@ -9044,7 +9221,8 @@ class UnichartNotebook:
         ("Plotting",         ['plot', 'plot_ymult', 'plot_type', 'bar', 'box',
                               'contour', 'histogram', 'line', 'highlight',
                               'save_png', 'dashboard']),
-        ("Styling & format", ['color', 'marker', 'markersize', 'alpha', 'fill',
+        ("Styling & format", ['color', 'marker', 'markersize', 'alpha',
+                              'alpha_markers', 'alpha_line', 'fill',
                               'linestyle', 'linewidth', 'edgewidth', 'hue',
                               'hue_palette', 'reg_order', 'copy_format',
                               'set_color_palette',

@@ -192,7 +192,10 @@ Rules for new code:
   `_datasets` (e.g. `overlay_sets` → `overlay_datasets`, `:4496`).
 - **Opacity is `alpha`.** New code uses `alpha`. `opacity` survives only as a
   deprecated alias that warns and copies into `alpha` (pattern at `:1496`, `:4424`).
-  Do not add a fresh `opacity` parameter.
+  Do not add a fresh `opacity` parameter. `alpha_markers` / `alpha_line` (default
+  `None` = same as `alpha`) narrow it to one part of a trace; resolve the trio
+  with `_split_alpha` (trace opacity + `marker.opacity` + rgba line color via
+  `_color_with_alpha`, since Plotly has no `line.opacity`).
 - **`return_axes` lives on render functions only.** Render functions expose it;
   notebook methods always call them with `return_axes=True` and themselves return
   the figure (the notebook never calls `fig.show()` — Jupyter's repr displays it).
