@@ -161,7 +161,8 @@ style, which beats **notebook defaults** — each on a per-attribute basis.
 nb.color(0, 'red'); nb.marker([1, 2], 's'); nb.linestyle('all', '--')
 nb.markersize(0, 12); nb.alpha('selected', 0.5); nb.fill(1, True)
 nb.linewidth(0, 3); nb.edgewidth(0, 1); nb.hue(0, 'category')
-nb.alpha_markers(0, 0.3); nb.alpha_line(1, 0.2)   # opacity of just the markers / just the line
+nb.alpha_marker(0, 0.3); nb.alpha_line(1, 0.2)   # opacity of just the markers / just the line
+nb.zorder(2, 1)       # draw set 2 on top of the rest (higher = later = on top)
 ```
 
 **Per-variable** (applies wherever that column is plotted):

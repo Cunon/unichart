@@ -816,7 +816,7 @@ def _prefix_annotation(annotation):
 # Variable Format Resolver (used by multi-y plot)
 # -----------------------------------------------------------------------------
 _VAR_FORMAT_KEYS = ('color', 'marker', 'linestyle', 'markersize', 'linewidth', 'alpha',
-                    'alpha_markers', 'alpha_line', 'style')
+                    'alpha_marker', 'alpha_line', 'style')
 
 # CSS named colors (the set Plotly accepts), for ``_color_with_alpha``. Plotly
 # only validates names; it ships no name -> value table.
@@ -886,10 +886,10 @@ def _color_with_alpha(color, alpha):
 
 
 def _split_alpha(fmt, color, marker_dict, line_dict):
-    """Resolve ``alpha`` / ``alpha_markers`` / ``alpha_line`` for one trace.
+    """Resolve ``alpha`` / ``alpha_marker`` / ``alpha_line`` for one trace.
 
     ``alpha`` is the trace-level opacity and covers everything. When
-    ``alpha_markers`` or ``alpha_line`` is set, the trace opacity drops to 1
+    ``alpha_marker`` or ``alpha_line`` is set, the trace opacity drops to 1
     and each part carries its own value instead — markers through
     ``marker.opacity``, the line through an rgba color — with the part that
     has no value of its own keeping ``alpha``. Mutates ``marker_dict`` and
@@ -897,7 +897,7 @@ def _split_alpha(fmt, color, marker_dict, line_dict):
     """
     alpha = fmt.get('alpha')
     alpha = 1 if alpha is None else alpha
-    a_m, a_l = fmt.get('alpha_markers'), fmt.get('alpha_line')
+    a_m, a_l = fmt.get('alpha_marker'), fmt.get('alpha_line')
     if a_m is None and a_l is None:
         return alpha
     marker_dict['opacity'] = alpha if a_m is None else a_m
@@ -936,7 +936,7 @@ _DATASET_FORMAT_DEFAULTS = {
     'edge_color': 'black',
     'alpha':      1,
     # Marker-only / line-only opacity; None means "same as alpha".
-    'alpha_markers': None,
+    'alpha_marker': None,
     'alpha_line':    None,
     'fill':       True,
     # Colorscale for contours and hue-colored scatters. Lives here (rather than
@@ -953,8 +953,8 @@ _DATASET_FORMAT_DEFAULTS = {
 # reset sweep skips it too).
 _INHERITED_FORMAT_ATTRS = (
     'color', 'marker', 'linestyle', 'markersize', 'linewidth', 'edgewidth',
-    'alpha', 'alpha_markers', 'alpha_line', 'edge_color', 'fill', 'hue',
-    'hue_palette', 'hue_order', 'style', 'display_parms',
+    'alpha', 'alpha_marker', 'alpha_line', 'edge_color', 'fill', 'hue',
+    'hue_palette', 'hue_order', 'style', 'display_parms', 'zorder',
 )
 
 def _resolve_var_format(dataset, variable, variable_formats=None):
@@ -974,7 +974,7 @@ def _resolve_var_format(dataset, variable, variable_formats=None):
         'markersize': var_fmt.get('markersize', dataset.markersize),
         'linewidth':  var_fmt.get('linewidth',  dataset.linewidth),
         'alpha':      var_fmt.get('alpha',      dataset.alpha),
-        'alpha_markers': var_fmt.get('alpha_markers', getattr(dataset, 'alpha_markers', None)),
+        'alpha_marker': var_fmt.get('alpha_marker', getattr(dataset, 'alpha_marker', None)),
         'alpha_line':    var_fmt.get('alpha_line',    getattr(dataset, 'alpha_line', None)),
         'edge_color': getattr(dataset, 'edge_color', 'black'),
         'edgewidth':  getattr(dataset, 'edgewidth', 1),
@@ -1315,7 +1315,7 @@ class Dataset:
         self._linestyle = fmt.get('linestyle', None)
         self.markersize = fmt.get('markersize', 10)
         self.alpha = fmt.get('alpha', 1)
-        self.alpha_markers = fmt.get('alpha_markers', None)
+        self.alpha_marker = fmt.get('alpha_marker', None)
         self.alpha_line = fmt.get('alpha_line', None)
         self.hue = ""
         self.hue_palette = fmt.get('hue_palette', 'Jet')
@@ -1331,6 +1331,7 @@ class Dataset:
         self._display_parms = coerce_display_parms(display_parms)
         self._plot_type = 'scatter'
         self._order = None
+        self._zorder = 0
 
     def _raw_df(self):
         """All rows for this set, unmasked, with _SET_ID stripped."""
@@ -1419,6 +1420,18 @@ class Dataset:
             self._order = value
         else:
             raise ValueError(f"Invalid order column: {value}")
+
+    @property
+    def zorder(self):
+        """Draw order: sets are plotted in ascending ``zorder`` (default 0),
+        later traces on top; ties keep load order."""
+        return self._zorder
+
+    @zorder.setter
+    def zorder(self, value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"Invalid zorder (expected a number): {value!r}")
+        self._zorder = value
 
     @property
     def df(self):
@@ -1580,12 +1593,13 @@ class Dataset:
             'linestyle': self.linestyle,
             'markersize': self.markersize,
             'alpha': self.alpha,
-            'alpha_markers': self.alpha_markers,
+            'alpha_marker': self.alpha_marker,
             'alpha_line': self.alpha_line,
             'hue': self.hue,
             'hue_palette': self.hue_palette,
             'hue_order': self.hue_order,
             'reg_order': self.reg_order,
+            'zorder': self.zorder,
             'index': self.index,
             'style': self.style,
             'display_parms': self.display_parms,
@@ -1880,6 +1894,17 @@ def _calculate_regression(df, x_col, y_col, spec):
 # -----------------------------------------------------------------------------
 # Main Plotting Functions
 # -----------------------------------------------------------------------------
+def _in_draw_order(datasets):
+    """Datasets stable-sorted into draw order: ascending ``zorder`` (default
+    0), ties keeping load order — so ``zorder=1`` lifts one set above the
+    zorder-0 rest and negative values push a set behind. Plotly renders
+    later-added traces on top, so the overlaid plot builders iterate this
+    order; the per-dataset subplot variants keep panel order instead. Legend
+    order is kept by set index via per-set ``legendrank`` stamps at the
+    trace-add sites."""
+    return sorted(datasets, key=lambda d: getattr(d, 'zorder', 0))
+
+
 def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None, marker=None,
             markersize=10, marker_edge_color="black", linestyle=None, hue_palette="Jet",
             hue_order=None, line=False, suppress_msg=False, return_axes=False, axes=None,
@@ -1937,7 +1962,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
         **({'legend': dict(orientation="h")} if legend == 'above' else {}),
     ))
 
-    for dataset in list_of_datasets:
+    for dataset in _in_draw_order(list_of_datasets):
         if not dataset.select: continue
 
         fmt = dataset.get_format_dict()
@@ -2050,6 +2075,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                 x=df[x_col], y=df[yi], mode=mode,
                 name=f"{cur_idx}: {cur_title}",
                 legendgroup=f"group_{cur_idx}",
+                legendrank=1000 + cur_idx,
                 marker=marker_dict, line=line_dict,
                 opacity=cur_opacity,
                 customdata=custom_data, hovertemplate=ht,
@@ -2268,7 +2294,7 @@ def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
     variable_formats = variable_formats or {}
     n_y = len(y_list)
     nrows, ncols = _calc_grid(n_y, nrows, ncols)
-    active_ds = [d for d in list_of_datasets if d.select]
+    active_ds = _in_draw_order(d for d in list_of_datasets if d.select)
 
     # Expected legend entries, for row estimation: one bar entry per set, one
     # figure-wide entry per styled marker column, one per (set, column) for
@@ -2305,7 +2331,7 @@ def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
     bar_legend_shown = set()
     marker_legend_shown = set()
 
-    for idx_ds, ds in enumerate(active_ds):
+    for ds in active_ds:
         df = ds.cols([c for c in dict.fromkeys([x] + y_list + markers_list)
                       if c in ds.columns])
         offset_group = f"set_{ds.index}"
@@ -2321,7 +2347,7 @@ def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
                 x=df[x], y=df[yi],
                 name=f"{ds.index}: {ds.title}",
                 legendgroup=f"group_{ds.index}",
-                legendrank=1000 + idx_ds,
+                legendrank=1000 + ds.index,
                 offsetgroup=offset_group,
                 alignmentgroup="bars",
                 marker_color=ds.color if not color else color,
@@ -2363,7 +2389,7 @@ def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
                 legend_key = (ds.index, m_col)
                 trace_name = f"{ds.index}: {ds.title} — {m_col}"
                 legend_group = f"group_{ds.index}"
-                legend_rank = 1000 + idx_ds
+                legend_rank = 1000 + ds.index
             show = legend_key not in marker_legend_shown
             if show:
                 marker_legend_shown.add(legend_key)
@@ -2562,7 +2588,7 @@ def unibox(list_of_datasets, x, y, boxmode='group', points='outliers', notched=F
         legend=dict(orientation="h"),
     ))
 
-    for ds in list_of_datasets:
+    for ds in _in_draw_order(list_of_datasets):
         if not ds.select: continue
         df = ds.cols([c for c in dict.fromkeys([x] + y_list) if c in ds.columns])
 
@@ -2575,6 +2601,7 @@ def unibox(list_of_datasets, x, y, boxmode='group', points='outliers', notched=F
                 y=df[yi],
                 name=f"{ds.index}: {ds.title}",
                 legendgroup=f"group_{ds.index}",
+                legendrank=1000 + ds.index,
                 marker_color=ds.color if not color else color,
                 opacity=ds.alpha,
                 boxpoints=points,
@@ -2665,7 +2692,7 @@ def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
 
     xbins = _build_xbins(bin_size, bin_start, bin_end)
 
-    for ds in list_of_datasets:
+    for ds in _in_draw_order(list_of_datasets):
         if not ds.select: continue
         df = ds.cols([c for c in dict.fromkeys(x_list + ([y] if y else []))
                       if c in ds.columns])
@@ -2687,6 +2714,7 @@ def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
                 x=clean_data[xi],
                 name=f"{ds.index}: {ds.title}",
                 legendgroup=f"group_{ds.index}",
+                legendrank=1000 + ds.index,
                 marker_color=use_color,
                 opacity=alpha,
                 nbinsx=nbins,
@@ -2825,7 +2853,7 @@ def _add_contour_overlays(fig, overlay_datasets, x, y, n_subplots, ncols, darkmo
     # cell, so re-slicing the set per cell only multiplied the cost), then add
     # traces cell-major to keep the original draw/legend order.
     prepared = []
-    for ds in overlay_datasets:
+    for ds in _in_draw_order(overlay_datasets):
         ds_cols = ds.columns
         if x not in ds_cols or y not in ds_cols:
             continue
@@ -2865,6 +2893,7 @@ def _add_contour_overlays(fig, overlay_datasets, x, y, n_subplots, ncols, darkmo
                 mode=mode,
                 name=f"{ds.index}: {ds.title}",
                 legendgroup=f"overlay_{ds.index}",
+                legendrank=1000 + ds.index,
                 marker=marker_dict,
                 line=line_dict,
                 opacity=opacity,
@@ -2885,7 +2914,7 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
     """
     z_list = z if isinstance(z, list) else [z]
     n_z = len(z_list)
-    active_ds = [d for d in list_of_datasets if d.select]
+    active_ds = _in_draw_order(d for d in list_of_datasets if d.select)
     axis_limits = axis_limits or {}
 
     if not active_ds:
@@ -2948,6 +2977,7 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
                 zmin=zmin, zmax=zmax,  
                 name=f"{ds.index}: {ds.title}",
                 legendgroup=f"group_{ds.index}",
+                legendrank=1000 + ds.index,
                 colorscale=colorscale or ds.hue_palette,
                 contours_coloring=use_coloring,
                 ncontours=ncontours, 
@@ -3402,7 +3432,7 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
     variable_formats = variable_formats or {}
     axis_limits = axis_limits or {}
 
-    active = [d for d in list_of_datasets if d.select]
+    active = _in_draw_order(d for d in list_of_datasets if d.select)
     if not active:
         print("No datasets selected.")
         return None
@@ -3476,9 +3506,9 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
 
             y_axis_name = "y" if idx_y == 0 else f"y{idx_y + 1}"
 
-            # Markers carry ``alpha`` (or ``alpha_markers``) directly; the
+            # Markers carry ``alpha`` (or ``alpha_marker``) directly; the
             # line only goes translucent when ``alpha_line`` asks for it.
-            m_alpha = fmt['alpha'] if fmt.get('alpha_markers') is None else fmt['alpha_markers']
+            m_alpha = fmt['alpha'] if fmt.get('alpha_marker') is None else fmt['alpha_marker']
             l_color = (fmt['color'] if fmt.get('alpha_line') is None
                        else _color_with_alpha(fmt['color'], fmt['alpha_line']))
 
@@ -3500,6 +3530,7 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
                 name=f"{ds.index}: {ds.title}" if legend_group_by == 'vars' else yi,
                 yaxis=y_axis_name,
                 legendgroup=f"var_{yi}" if legend_group_by == 'vars' else f"set_{ds.index}",
+                legendrank=1000 if legend_group_by == 'vars' else 1000 + ds.index,
                 legendgrouptitle_text=yi if legend_group_by == 'vars' else f"{ds.index}: {ds.title}",
                 marker=dict(
                     size=fmt['markersize'],
@@ -4525,6 +4556,25 @@ class UnichartNotebook:
             return
         self._set_or_reset(uset_slice, 'linewidth', width_val)
 
+    def zorder(self, uset_slice=None, z_val=None):
+        """
+        Set the draw order (z-order) for the specified dataset(s).
+
+        Datasets are drawn in ascending ``zorder`` (default 0) with later
+        traces on top; ties keep load order. So ``nb.zorder(2, 1)`` lifts set
+        2 above everything else without touching the others, and a negative
+        value pushes a set behind. Applies wherever sets share axes — plot,
+        bar, box, hist, contour (incl. overlay sets) and plot_ymult; the
+        per-dataset subplot variants keep their panel order. Legend order
+        stays by set index regardless of zorder. Pass ``'reset'`` to restore
+        the default (0).
+
+        Args:
+            uset_slice (int, list, 'all', or Dataset): Dataset selector.
+            z_val (int or float): Draw priority, or ``'reset'``.
+        """
+        self._set_or_reset(uset_slice, 'zorder', z_val)
+
     def edgewidth(self, uset_slice, width_val):
         """
         Set the marker edge width (outline thickness) for the specified dataset(s).
@@ -4592,7 +4642,7 @@ class UnichartNotebook:
             raise ValueError(f"{name} must be in [0, 1], got {value}")
         return value
 
-    def alpha_markers(self, uset_slice=None, alpha_val=None):
+    def alpha_marker(self, uset_slice=None, alpha_val=None):
         """
         Set the opacity of just the *markers* for the target dataset(s) or
         variable(s), leaving the line at its ``alpha``.
@@ -4602,17 +4652,17 @@ class UnichartNotebook:
 
         Examples
         --------
-        nb.alpha_markers(0, 0.3)          # faint points, full-strength line
-        nb.alpha_markers('CHT1', 0.5)     # per-variable override
-        nb.alpha_markers(0, 'reset')
+        nb.alpha_marker(0, 0.3)          # faint points, full-strength line
+        nb.alpha_marker('CHT1', 0.5)     # per-variable override
+        nb.alpha_marker(0, 'reset')
         """
-        alpha_val = self._check_alpha('alpha_markers', alpha_val)
+        alpha_val = self._check_alpha('alpha_marker', alpha_val)
         variables = self._var_targets(uset_slice)
         if variables is not None:
             for v in variables:
-                self.var_format(v, alpha_markers=alpha_val if alpha_val is not None else 'reset')
+                self.var_format(v, alpha_marker=alpha_val if alpha_val is not None else 'reset')
             return
-        self._set_or_reset(uset_slice, 'alpha_markers', alpha_val)
+        self._set_or_reset(uset_slice, 'alpha_marker', alpha_val)
 
     def alpha_line(self, uset_slice=None, alpha_val=None):
         """
@@ -4744,7 +4794,7 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     def var_format(self, variable, color=None, marker=None, linestyle=None,
                    markersize=None, linewidth=None, alpha=None, style=None,
-                   alpha_markers=None, alpha_line=None, reset=False):
+                   alpha_marker=None, alpha_line=None, reset=False):
         """
         Set persistent per-variable formatting overrides.
 
@@ -4762,8 +4812,8 @@ class UnichartNotebook:
           variable(s), and ignores any other arguments passed in the same
           call (same convention as ``set_default_format(reset=True)``).
 
-        `alpha_markers` / `alpha_line` set the opacity of just the markers or
-        just the line (see :meth:`alpha_markers`, :meth:`alpha_line`); the
+        `alpha_marker` / `alpha_line` set the opacity of just the markers or
+        just the line (see :meth:`alpha_marker`, :meth:`alpha_line`); the
         other part keeps `alpha`.
 
         `style` only affects bar-plot overlay columns (the `markers=` argument
@@ -4800,7 +4850,7 @@ class UnichartNotebook:
         names = self._var_names(variable)
         pairs = {'color': color, 'marker': marker, 'linestyle': linestyle,
                  'markersize': markersize, 'linewidth': linewidth, 'alpha': alpha,
-                 'alpha_markers': alpha_markers, 'alpha_line': alpha_line,
+                 'alpha_marker': alpha_marker, 'alpha_line': alpha_line,
                  'style': style}
         for name in names:
             fmt = self.variable_formats.setdefault(name, {})
@@ -4881,7 +4931,7 @@ class UnichartNotebook:
             'linewidth':   lambda: fmt.get('linewidth', 2),
             'edgewidth':   lambda: fmt.get('edgewidth', 1),
             'alpha':       lambda: fmt.get('alpha', 1),
-            'alpha_markers': lambda: fmt.get('alpha_markers', None),
+            'alpha_marker': lambda: fmt.get('alpha_marker', None),
             'alpha_line':    lambda: fmt.get('alpha_line', None),
             'edge_color':  lambda: fmt.get('edge_color', 'black'),
             'fill':        lambda: fmt.get('fill', True),
@@ -4889,6 +4939,7 @@ class UnichartNotebook:
             'hue_palette': lambda: fmt.get('hue_palette', 'Jet'),
             'hue_order':   lambda: None,
             'reg_order':   lambda: None,
+            'zorder':      lambda: 0,
             'plot_type':   lambda: 'scatter',
         }
         if attrs is None:
@@ -5117,7 +5168,7 @@ class UnichartNotebook:
 
     def set_default_format(self, markersize=None, linestyle=None, linewidth=None,
                            edgewidth=None, edge_color=None, alpha=None, fill=None,
-                           marker=_UNSET, hue_palette=None, alpha_markers=_UNSET,
+                           marker=_UNSET, hue_palette=None, alpha_marker=_UNSET,
                            alpha_line=_UNSET, figsize=None, legend=None,
                            suppress_legends=None, ncols=None, nrows=None,
                            barmode=None, agg=None, histfunc=None, histnorm=None,
@@ -5146,9 +5197,9 @@ class UnichartNotebook:
         alpha : float in [0, 1]
             Default opacity for per-dataset styles *and* the histogram bar
             opacity default (the latter overridable per-call via ``histogram(alpha=)``).
-        alpha_markers, alpha_line : float in [0, 1], or None
+        alpha_marker, alpha_line : float in [0, 1], or None
             Default marker-only / line-only opacity for future datasets
-            (see :meth:`alpha_markers`, :meth:`alpha_line`). ``None`` means
+            (see :meth:`alpha_marker`, :meth:`alpha_line`). ``None`` means
             "same as alpha".
         linestyle : matplotlib/Plotly dash name (e.g. '--', 'dash') or None
         edge_color : color string (named, hex, or rgb)
@@ -5224,7 +5275,7 @@ class UnichartNotebook:
         if linewidth  is not None: updates['linewidth']  = _num('linewidth', linewidth)
         if edgewidth  is not None: updates['edgewidth']  = _num('edgewidth', edgewidth)
         if alpha      is not None: updates['alpha']      = _num('alpha', alpha, 0.0, 1.0)
-        for _name, _val in (('alpha_markers', alpha_markers), ('alpha_line', alpha_line)):
+        for _name, _val in (('alpha_marker', alpha_marker), ('alpha_line', alpha_line)):
             if _val is not _UNSET:
                 updates[_name] = None if _val is None else _num(_name, _val, 0.0, 1.0)
         if linestyle  is not None:
@@ -9222,7 +9273,7 @@ class UnichartNotebook:
                               'contour', 'histogram', 'line', 'highlight',
                               'save_png', 'dashboard']),
         ("Styling & format", ['color', 'marker', 'markersize', 'alpha',
-                              'alpha_markers', 'alpha_line', 'fill',
+                              'alpha_marker', 'alpha_line', 'fill',
                               'linestyle', 'linewidth', 'edgewidth', 'hue',
                               'hue_palette', 'reg_order', 'copy_format',
                               'set_color_palette',
