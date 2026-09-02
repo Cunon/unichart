@@ -12,6 +12,10 @@ figures into interactive Dash boards or self-contained HTML files.
 
 - **`unichart`** — the `UnichartNotebook` plotting environment (core).
 - **`unichart_dashboard`** — optional Dash dashboards built from notebook panels.
+- **`unichart_terminal`** — the `explore()` GUI: a sidebar, a chart pane and a
+  Python terminal for plotting on the fly.
+- **`unichart_cli`** — the `unichart` command: open that GUI on a data file
+  straight from a terminal.
 
 ---
 
@@ -36,11 +40,20 @@ pip install "unichart[dashboard] @ git+https://github.com/Cunon/unichart.git"
 pip install "unichart[all] @ git+https://github.com/Cunon/unichart.git"
 ```
 
+The `unichart` command comes with the package. Its GUI needs the `dashboard`
+extra (`--info` and `--html` work without it):
+
+```bash
+pip install "unichart[dashboard] @ git+https://github.com/Cunon/unichart.git"
+unichart runs.csv
+```
+
 ### Requirements
 
 - Python >= 3.9
 - `pandas`, `numpy`, `plotly`, `scipy`, `ipywidgets`, `ipython` (installed automatically)
-- Optional: `statsmodels` for trend lines, `dash` for dashboards, `kaleido` for static-image / PNG export
+- Optional: `statsmodels` for trend lines, `dash` for dashboards and the
+  `unichart` command's GUI, `kaleido` for static-image / PNG export
 
 ---
 
@@ -418,6 +431,98 @@ Key options:
 - `jupyter_mode` — `'inline'` (default), or `'external'` / `'tab'` to open a
   browser. Ports are auto-selected if the preferred one is busy.
 
+### Explorer — a plotting terminal
+
+`dashboard()` renders a board you specified in code. `explore()` opens a
+workspace you drive by **typing**: a sidebar with a drop zone, the loaded
+datasets and a clickable cheat sheet; a chart pane showing the latest figure;
+and a Python terminal underneath.
+
+```python
+from unichart_dashboard import explore
+
+explore(data='runs.csv')   # standalone — serves the board and opens your browser
+explore()                  # empty; drop a file on the sidebar, or hit "Load demo data"
+nb.explore()               # on a notebook you already have (inline in Jupyter)
+```
+
+The notebook's methods are bound as bare names in the terminal, so the cheat
+sheet reads the way the library does, and `nb` covers everything else:
+
+```python
+>>> nb.load('runs.csv')
+>>> plot(x='time', y=['temperature', 'pressure'])
+>>> select([0, 1]); color(0, 'red')
+>>> summary()
+```
+
+- **Enter** runs, **Shift+Enter** adds a line, **↑ / ↓** walks history.
+- **⧉ copy chart** in the top bar puts the current figure on the clipboard as a
+  2× PNG, rasterized from what's on screen (no `kaleido` needed). The same
+  `⧉ copy` affordance unichart shows under plots in a notebook — `nb.plot()` in
+  Jupyter still has its own; this is the board's.
+- **Syntax highlighting** everywhere Python appears: the cheat-sheet snippets,
+  every command in the transcript, and the input line as you type. The
+  transcript is coloured by Python's own tokenizer, so f-strings, comments and
+  nested quotes are handled properly; half-typed input degrades to plain text
+  rather than breaking.
+- **Drag the pane edges** to resize: the sidebar's right edge and the divider
+  between the chart and the terminal. Double-click an edge to reset it. Sizes
+  are remembered per browser, and the chart reflows as you drag.
+- A trailing expression echoes its value, like any REPL — `1 + 1` prints `2`.
+- Plots go to the chart pane; `table()` / `summary()` / `list_parms()` render as
+  their real sortable, filterable HTML tables inline in the transcript.
+- Errors show a traceback trimmed to the line you typed.
+- Dropping a file loads it through a visible `nb.load(...)` command, so the
+  transcript is a real record of the session.
+- The board runs against **your** notebook: what you load or restyle there is
+  on `nb` afterwards.
+
+The board is dark, and `explore()` switches the notebook to dark mode to match
+unless it already is. Options: `data=`, `panels=` (dashboard-style specs,
+replayed as startup commands), `title=`, `port=`, `open_browser=False` for
+headless hosts, and `jupyter_mode=`.
+
+> **The terminal executes real Python in your process.** It can do anything you
+> could do at a Python prompt, so the server binds to `127.0.0.1` only. It is
+> not a sandbox — don't expose it to a network.
+
+### Command line
+
+Installing the package puts a `unichart` command on your PATH, so a quick look
+at a data file never needs a Python session at all:
+
+```bash
+unichart                                # empty explorer; load from the data bar
+unichart runs.csv                       # open the explorer on one file
+unichart a.csv b.csv --combine          # several files, merged into one dataset
+unichart runs.csv --set-col run_id      # split into one dataset per run
+unichart runs.csv --info                # print datasets + columns, then exit
+unichart runs.csv --html board.html     # write a static board instead of serving
+```
+
+Seed the board with panels (repeat `--panel`, as `method:x:y[,y2][:z]`). For
+the GUI each one is replayed as a startup command in the transcript; for
+`--html` each becomes a card:
+
+```bash
+unichart runs.csv --panel plot:time:temp,press --panel histogram:temp
+unichart map.csv  --panel contour:rpm:torque:eff --html map.html --embed-js inline
+```
+
+Other flags: `--title` `--port` `--no-browser`; `--ncols` `--width` `--height`
+`--dark` apply to `--html` (the terminal board is always dark) (serve without opening a browser — headless or remote hosts),
+`--name-col`, and `--version`. `unichart --help` lists them all.
+
+Panel options beyond `method` / `x` / `y` / `z` — `kwargs` like `nbins` or
+`barmode`, dataset pins — aren't expressible as a flag; use `nb.dashboard` /
+`nb.explore` from Python, where the spec dict is clearer than any encoding
+would be. A missing file or malformed `--panel` prints one line and exits
+non-zero rather than raising.
+
+If `unichart` isn't found after installing, the module is runnable directly:
+`python -m unichart_cli runs.csv`.
+
 ### Export to standalone HTML
 
 ```python
@@ -472,7 +577,7 @@ Dash is imported lazily, so the core toolkit never requires it.
 
 ```python
 from unichart import UnichartNotebook
-from unichart_dashboard import dashboard   # optional, needs `dash`
+from unichart_dashboard import dashboard, explore   # optional, needs `dash`
 
 nb = UnichartNotebook()
 ```

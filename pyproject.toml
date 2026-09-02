@@ -27,10 +27,14 @@ dashboard = ["dash"]
 # Everything
 all = ["statsmodels", "dash"]
 
+[project.scripts]
+# `unichart` on PATH after install: opens the explorer GUI on a data file.
+unichart = "unichart_cli:main"
+
 [project.urls]
 Homepage = "https://github.com/Cunon/unichart"
 Repository = "https://github.com/Cunon/unichart"
 
 [tool.setuptools]
 # Flat top-level modules: `import unichart` and `from unichart_dashboard import dashboard`
-py-modules = ["unichart", "unichart_dashboard"]
+py-modules = ["unichart", "unichart_dashboard", "unichart_cli", "unichart_terminal"]

@@ -1,0 +1,2 @@
+[console_scripts]
+unichart = unichart_cli:main
