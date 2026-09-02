@@ -96,6 +96,10 @@ nb.load_df(df, set_idx_column='run_id', set_name_column='run_name')
 
 # 2. Select which datasets participate in the next plot
 nb.select([0, 1, 2])          # or nb.omit(3), nb.query('all', 'temp > 100')
+nb.select('1:10')             # range shorthand — sets 1-9 (exclusive stop,
+                              # like a Python slice). Also '0,3,7:', '::2', '-3:'.
+                              # Works anywhere a set selector is accepted:
+                              # nb.omit('5:8'), nb.color('0:3', 'red'), ...
 
 # 3. Plot — one subplot per Y variable by default
 nb.plot(x='time', y=['temperature', 'pressure'])

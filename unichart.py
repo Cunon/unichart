@@ -4237,6 +4237,31 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Selection & Filtering
     # ------------------------------------------------------------------
+    # One range-shorthand token: "1:10", ":5", "5:", "::2", "-3:", or a bare int.
+    # Only ``:`` separates a range, which leaves ``-`` free for negative indices.
+    _RANGE_TOKEN_RE = re.compile(r'^\s*-?\d*\s*(?::\s*-?\d*\s*){0,2}$')
+
+    @classmethod
+    def _is_range_str(cls, text):
+        """True if ``text`` is range shorthand (``"1:10"``, ``"0,2,5:8"``, ...).
+
+        Used both to parse selectors and to stop :meth:`_var_targets` from
+        mistaking a range string for a variable name.
+        """
+        if not isinstance(text, str) or not text.strip():
+            return False
+        tokens = text.split(',')
+        return all(t.strip() and cls._RANGE_TOKEN_RE.match(t) for t in tokens)
+
+    @staticmethod
+    def _parse_range_token(token):
+        """Turn one shorthand token into an ``int`` or a ``slice``."""
+        token = token.strip()
+        if ':' not in token:
+            return int(token)
+        parts = [p.strip() for p in token.split(':')]
+        return slice(*(int(p) if p else None for p in parts))
+
     def _get_uset_slice(self, uset_slice):
         """Normalize a selector into a list of Dataset objects.
 
@@ -4244,12 +4269,21 @@ class UnichartNotebook:
             None | 'all'    -> all datasets
             int             -> dataset at that index (negative indices count
                                from the end, so -1 is the last dataset)
+            slice | range   -> the datasets at those positions
+            str             -> range shorthand: comma-separated ints and/or
+                               ``start:stop[:step]`` slices, e.g. ``"1:10"``
+                               (sets 1-9), ``"0,3,7:"``, ``"::2"``, ``"-3:"``
             Dataset         -> wrapped in a list
             list            -> mixed list of any of the above
         Unknown inputs print a warning and return [].
 
-        Note: dataset titles are deliberately *not* accepted as selectors. A
-        bare string is reserved for variable/parameter targeting in the
+        Slice/range selectors follow Python semantics: the stop bound is
+        exclusive and out-of-range bounds clamp rather than raise, so
+        ``"1:999"`` runs to the last set. A bare int that is out of range still
+        returns ``[]``.
+
+        Note: dataset *titles* are deliberately not accepted as selectors. A
+        non-numeric string is reserved for variable/parameter targeting in the
         formatting setters (see :meth:`_var_targets`), so titles would be
         ambiguous here.
         """
@@ -4264,7 +4298,19 @@ class UnichartNotebook:
                 return [self.sets[uset_slice]]
             return []
 
-        if isinstance(uset_slice, (list, tuple, set)):
+        if isinstance(uset_slice, slice):
+            return list(self.sets[uset_slice])
+
+        if isinstance(uset_slice, str):
+            if not self._is_range_str(uset_slice):
+                print(f"Warning: don't know how to interpret {uset_slice!r} as a "
+                      f"dataset selector. Expected 'all' or range shorthand such "
+                      f"as '1:10' or '0,3,7:'.")
+                return []
+            return self._get_uset_slice(
+                [self._parse_range_token(t) for t in uset_slice.split(',')])
+
+        if isinstance(uset_slice, (list, tuple, set, range)):
             result = []
             seen_ids = set()
             for item in uset_slice:
@@ -4277,22 +4323,33 @@ class UnichartNotebook:
         print(f"Warning: don't know how to interpret {uset_slice!r} as a dataset selector.")
         return []
 
-    @staticmethod
-    def _var_targets(target):
+    @classmethod
+    def _var_targets(cls, target):
         """Autodetect whether a formatting-setter target names variable(s).
 
-        Dataset selectors are ints, ``'all'``/None, ``Dataset`` objects, or
-        lists thereof. Since titles are no longer valid selectors, a bare
-        string (other than ``'all'``) — or a list/tuple of such strings —
-        unambiguously denotes variable/parameter name(s).
+        Dataset selectors are ints, ``'all'``/None, slices/ranges, range
+        shorthand strings (``"1:10"``), ``Dataset`` objects, or lists thereof.
+        Since titles are not valid selectors, any *other* bare string — or a
+        list/tuple of such strings — unambiguously denotes variable/parameter
+        name(s).
 
         Returns the list of variable names when ``target`` names variables,
         otherwise ``None`` (meaning: treat as a dataset selector).
         """
-        if isinstance(target, str) and target != 'all':
+        def _is_var_name(t):
+            if not isinstance(t, str) or t == 'all':
+                return False
+            # Only the *new* shorthand spellings (they contain ':' or ',') are
+            # claimed as dataset selectors. A bare numeric string stays a
+            # variable name, so a column literally called '2020' still formats.
+            if (':' in t or ',' in t) and cls._is_range_str(t):
+                return False
+            return True
+
+        if _is_var_name(target):
             return [target]
         if isinstance(target, (list, tuple)) and target and all(
-                isinstance(t, str) and t != 'all' for t in target):
+                _is_var_name(t) for t in target):
             return list(target)
         return None
 
@@ -4361,7 +4418,18 @@ class UnichartNotebook:
         return mmap[index]
 
     def select(self, uset_slice=None):
-        """Select the specified dataset(s)."""
+        """Select the specified dataset(s), deselecting everything else.
+
+        ``uset_slice`` accepts an index, a list of indices, a ``slice``/
+        ``range``, or range shorthand as a string — see
+        :meth:`_get_uset_slice`. Shorthand follows Python slice semantics
+        (exclusive stop)::
+
+            nb.select("1:10")     # sets 1-9
+            nb.select("0,3,7:")   # set 0, set 3, and set 7 to the end
+            nb.select("::2")      # every other set
+            nb.select("-3:")      # the last three sets
+        """
         for ds in self.sets: ds.select = False
         for ds in self._get_uset_slice(uset_slice):
             ds.select = True
@@ -4371,10 +4439,15 @@ class UnichartNotebook:
         return [ds for ds in self.sets if ds.select]
 
     def omit(self, uset_slice=None):
+        """Deselect the given dataset(s), leaving the rest of the selection
+        untouched. Takes the same selectors as :meth:`select`, e.g.
+        ``nb.omit("5:8")``."""
         for ds in self._get_uset_slice(uset_slice):
             ds.select = False
 
     def restore(self, uset_slice=None):
+        """Re-select the given dataset(s), e.g. ``nb.restore("5:8")``. Takes the
+        same selectors as :meth:`select`."""
         targets = self.sets if uset_slice == "all" else self._get_uset_slice(uset_slice)
         for ds in targets:
             ds.select = True

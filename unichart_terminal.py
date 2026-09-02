@@ -98,6 +98,7 @@ CHEAT_SHEET = [
     ("histogram(x='temperature', nbins=30)", True),
     ("contour(x='rpm', y='pressure', z='temperature')", True),
     ("select([0, 1])", False),
+    ("select('1:10')  # sets 1-9", False),
     ("omit(2)", False),
     ("restore()", False),
     ("color(0, 'red')", False),
