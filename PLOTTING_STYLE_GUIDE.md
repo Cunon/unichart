@@ -34,7 +34,7 @@ plotting logic into a method.
   `variable_formats`, `display_parms`, `lines`, `highlights`, fonts).
 - Choose the right render function based on `by`.
 - Post-process (decorations, fonts, legends) and store `self.last_fig`.
-- Public methods: `plot`, `plot_ymult`, `bar`, `box`, `histogram`, `contour`.
+- Public methods: `plot`, `plot_ymult`, `plot_marginal`, `bar`, `box`, `histogram`, `contour`.
 
 ---
 
@@ -64,7 +64,12 @@ def XXX(self, x=None, y=None, [z=None,] [markers=None,]
         suptitle=None, suppress_legends=False):
 ```
 `x`/`y`/`z` default to `None` and fall back to `self.last_*`. `figsize`,
-`ncols`, `nrows`, `suptitle`, `suppress_legends` are the common tail.
+`ncols`, `nrows`, `suptitle`, `suppress_legends` are the common tail; gridded
+methods also take `hspace`/`vspace` and forward
+`**self._spacing_kwargs(hspace, vspace)` to their builder, which passes
+`hspace`, `vspace`, `spacing_ref` on to `_subplot_spacing(...)` for its
+`make_subplots` call (fixed pixel gaps by default; never hardcode a
+`horizontal_spacing`/`vertical_spacing`).
 
 ---
 
@@ -78,6 +83,7 @@ def XXX(self, x=None, y=None, [z=None,] [markers=None,]
 | `'sets'` / `'datasets'` | `uniXXX_per_dataset` | one subplot per dataset (synonyms) |
 | `'dataset_x'` | `uniXXX_datasets_as_x` | datasets on X, variables as series (bar/box) |
 | `'ymult'` | `plot_ymult` | single plot, multiple Y axes (line only) |
+| `'marginal'` | `plot_marginal` | scatter with marginal distribution strips (line only) |
 
 Branch on the per-dataset case with `if by in ['sets', 'datasets']:` — both spellings
 must work (see `:4291`, `:4439`, `:4502`). Do not invent new `by` values without
@@ -135,6 +141,7 @@ State passthrough rules:
 | Helper | Location | Use for |
 |--------|----------|---------|
 | `_calc_grid(n, nrows, ncols)` | `:124` | rows/cols for a subplot grid |
+| `_subplot_spacing(nrows, ncols, figsize, hspace, vspace, spacing_ref, h_px=, v_px=)` | after `_calc_grid` | `make_subplots` spacing kwargs: fixed px gaps (raise `h_px` for per-panel colorbars/extra axes) |
 | `_base_layout(darkmode, suptitle, figsize, **extra)` | `:134` | template, title, margin, size |
 | `_build_xbins(size, start, end)` | `:158` | histogram bin spec |
 | `_show_or_return(fig, return_axes)` | `:165` | the single render-function exit |
@@ -142,7 +149,9 @@ State passthrough rules:
 | `_resolve_var_format(dataset, variable, variable_formats)` | `:183` | per-(dataset, variable) style |
 | `_scatter_cls(n_points)` | `:217` | SVG vs WebGL scatter class |
 | `_get_uset_slice(selector)` | `:2788` | resolve a selector to a dataset list |
-| `_apply_decorations` | `:5243` | draw stored `lines` / `highlights` |
+| `_apply_decorations` | `:5243` | draw stored `lines` / `highlights`; pass `refs=[(xref, yref), ...]` per `plot_items` entry when the panels are not a regular grid (`plot_marginal`) |
+| `_xy_pairs(x, y)` | before `uniplot` | zip / broadcast `x` and `y` lists into `(x, y)` pairs |
+| `_numeric_hue_info` / `_marker_line_style` / `_apply_hue_coloraxes` | before `uniplot` | the scatter-trace styling `uniplot` and `unimarginal` share: numeric-hue colorbars, per-dataset marker/line dicts + alpha |
 | `self._line_label(line_spec, orientation)` | `:6746` | annotation kwargs for a reference line's label (`None` if unlabeled) |
 | `_prefix_annotation(annotation)` | `:392` | same, as `annotation_*` kwargs for `add_vline` / `add_hline` |
 | `_apply_fonts(fig)` | `:4012` | apply font-size settings |
