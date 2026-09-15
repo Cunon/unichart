@@ -424,6 +424,11 @@ _LEGEND_GAP    = 12             # gap title→legend and legend→plot
 # slack its autoexpand takes the difference out of the plot area.
 _PINNED_TOP_SLACK = 12
 _PINNED_ROW_SLACK = 4           # ...growing with each reserved legend row
+# Legend height cap (px) that switches off Plotly's legend scrollbar. Left to
+# itself Plotly caps a horizontal legend at 50% of the figure height and a side
+# legend at the plot height, then scrolls — which an image can't do. See
+# UnichartNotebook._fit_full_legend.
+_FULL_LEGEND_MAXHEIGHT = 100_000
 # Legend entry/column widths used only on the pinned path (see
 # UnichartNotebook._legend_row_estimate). _legend_rows leans small on purpose —
 # a little overlap is cheap when Plotly's autoexpand can absorb it — but here
@@ -455,6 +460,22 @@ _PINNED_ENTRY_BASE_PX = 40
 _PINNED_ENTRY_CHAR_PX = 10
 _PINNED_GROUP_BASE_PX = 46
 _PINNED_GROUP_CHAR_PX = 7
+# Full-legend size estimates (UnichartNotebook._fit_full_legend), calibrated
+# against legends Plotly rendered. A legend row is the legend font's line
+# height (with a floor) plus padding, and every legend group is followed by
+# Plotly's default tracegroupgap. Across a horizontal legend an entry takes its
+# glyph and padding plus ~0.5 font-px per character, and a group column ~0.45
+# font-px per character of its title, both including Plotly's itemgap; they
+# lean wide, since over-estimating only leaves whitespace.
+_FULL_ROW_LINE_FACTOR = 1.3
+_FULL_ROW_MIN_PX = 16
+_FULL_ROW_PAD_PX = 3
+_FULL_GROUP_GAP_PX = 10
+_FULL_LEGEND_PAD_PX = 2
+_FULL_ENTRY_BASE_PX = 50
+_FULL_ENTRY_CHAR_EM = 0.5
+_FULL_GROUP_BASE_PX = 30
+_FULL_GROUP_CHAR_EM = 0.45
 
 
 def _flow_rows(widths, usable):
@@ -4417,7 +4438,7 @@ class UnichartNotebook:
         # (resolved through _apply_default). An explicit per-call argument always
         # wins over the stored default. Cleared by set_default_format(reset=True).
         self.plot_defaults = {
-            'legend': None, 'suppress_legends': None,
+            'legend': None, 'suppress_legends': None, 'legend_scroll': None,
             'ncols': None, 'nrows': None, 'hspace': None, 'vspace': None,
             'barmode': None, 'agg': None, 'histfunc': None,
             'histnorm': None, 'alpha': None, 'boxmode': None, 'points': None,
@@ -6593,7 +6614,8 @@ class UnichartNotebook:
                            suppress_legends=None, ncols=None, nrows=None,
                            hspace=None, vspace=None,
                            barmode=None, agg=None, histfunc=None, histnorm=None,
-                           boxmode=None, points=None, reset=False):
+                           boxmode=None, points=None, legend_scroll=None,
+                           reset=False):
         """Set notebook-wide defaults for styling and for the plot methods.
 
         Two kinds of default live here. **Per-dataset styles** (markersize,
@@ -6602,8 +6624,8 @@ class UnichartNotebook:
         markersize/linewidth analogue of ``color_map``/``marker_map``, applied to
         *future* loaded datasets; already-loaded sets keep their styling until
         ``reset_format()`` re-applies the new defaults. **Figure / per-call
-        defaults** (figsize, legend, suppress_legends, ncols, nrows, hspace, vspace,
-        barmode, agg, histfunc, histnorm, points, boxmode) seed the matching argument of the
+        defaults** (figsize, legend, suppress_legends, legend_scroll, ncols, nrows,
+        hspace, vspace, barmode, agg, histfunc, histnorm, points, boxmode) seed the matching argument of the
         plot methods whenever a call doesn't pass its own value; an explicit
         per-call argument always wins. Only the values you pass change; others
         persist. Color remains controlled by ``color_map``.
@@ -6637,6 +6659,11 @@ class UnichartNotebook:
             Default legend placement for ``plot`` / ``plot_ymult`` (built-in 'above').
         suppress_legends : bool
             Default for all plot methods (built-in False).
+        legend_scroll : bool
+            Whether an interactive plot's legend scrolls when it is too tall for
+            the figure (built-in True, Plotly's behavior). ``False`` shows every
+            entry instead, making the figure taller so the plot area keeps its
+            size. ``save_png`` and static images always show the whole legend.
         ncols, nrows : positive int
             Default subplot grid. Takes precedence over the sticky "remember the
             last grid" memory in ``plot``, but an explicit per-call ncols/nrows
@@ -6665,6 +6692,7 @@ class UnichartNotebook:
         nb.set_default_format(markersize=6, linestyle='--', linewidth=1)
         nb.set_default_format(marker=None)   # turn markers off for future sets
         nb.set_default_format(figsize=(10, 6), legend='right', ncols=2)
+        nb.set_default_format(legend_scroll=False)  # never scroll the legend
         nb.set_default_format(vspace=100, hspace=0.05)  # 100 px rows, 5% columns
         nb.set_default_format(reset=True)    # clear styles, figsize, and defaults
         """
@@ -6749,6 +6777,11 @@ class UnichartNotebook:
                 raise TypeError("suppress_legends must be bool, got "
                                 f"{type(suppress_legends).__name__}")
             pd_updates['suppress_legends'] = suppress_legends
+        if legend_scroll is not None:
+            if not isinstance(legend_scroll, bool):
+                raise TypeError("legend_scroll must be bool, got "
+                                f"{type(legend_scroll).__name__}")
+            pd_updates['legend_scroll'] = legend_scroll
         for _name, _val in (('ncols', ncols), ('nrows', nrows)):
             if _val is not None:
                 if isinstance(_val, bool) or not isinstance(_val, int) or _val < 1:
@@ -7969,6 +8002,158 @@ class UnichartNotebook:
         return fig
 
     @staticmethod
+    def _legend_items(fig):
+        """The entries Plotly draws in ``fig``'s legend, in trace order, as
+        ``(legendgroup, group title, name)`` with repeats dropped."""
+        items, seen = [], set()
+        for tr in fig.data:
+            if getattr(tr, 'showlegend', None) is False:
+                continue
+            name = getattr(tr, 'name', None)
+            if not name:
+                continue
+            group = getattr(tr, 'legendgroup', None) or None
+            if (group, name) in seen:
+                continue
+            seen.add((group, name))
+            gt = getattr(tr, 'legendgrouptitle', None)
+            gt = getattr(gt, 'text', None) if gt is not None else None
+            items.append((group, gt or None, name))
+        return items
+
+    @staticmethod
+    def _legend_metrics(fig):
+        """``(font px, row px, group gap px)`` of ``fig``'s rendered legend."""
+        leg = fig.layout.legend
+        font = leg.font.size or fig.layout.font.size or 12
+        row = max(_FULL_ROW_MIN_PX, font * _FULL_ROW_LINE_FACTOR) + _FULL_ROW_PAD_PX
+        gap = _FULL_GROUP_GAP_PX if leg.tracegroupgap is None else leg.tracegroupgap
+        return font, row, gap
+
+    def _side_legend_height(self, fig):
+        """Estimated rendered height (px) of a vertical legend showing every
+        entry: a row per entry and per group title, and Plotly's
+        ``tracegroupgap`` after each legend group."""
+        _, row, gap = self._legend_metrics(fig)
+        items = self._legend_items(fig)
+        groups = {g for g, _, _ in items}
+        titles = {(g, t) for g, t, _ in items if t}
+        return (_FULL_LEGEND_PAD_PX + (len(items) + len(titles)) * row
+                + len(groups) * gap)
+
+    def _above_legend_height(self, fig):
+        """Estimated rendered height (px) of a horizontal legend showing every
+        entry, wrapped the way Plotly wraps it: across the plot-area width.
+
+        Plain entries flow into rows, each an entry row plus the group gap. A
+        grouped legend (traces with a ``legendgrouptitle``) flows whole group
+        columns instead, each band as tall as its deepest group (title row plus
+        entries) plus the gap. Unlike ``_legend_row_estimate`` — sized for the
+        pinned path's top band — this is measured in px against rendered
+        legends, so a very long legend doesn't pick up hundreds of px of
+        whitespace above the plot."""
+        font, row, gap = self._legend_metrics(fig)
+        m = fig.layout.margin
+        usable = max(200, (fig.layout.width or 1200)
+                     - (80 if m.l is None else m.l) - (80 if m.r is None else m.r))
+
+        def entry_w(text):
+            return _FULL_ENTRY_BASE_PX + _FULL_ENTRY_CHAR_EM * font * len(str(text))
+
+        columns, plain = {}, []
+        for group, title, name in self._legend_items(fig):
+            if title:
+                columns.setdefault((group, title), []).append(name)
+            else:
+                plain.append(name)
+        height = _FULL_LEGEND_PAD_PX
+        if plain:
+            height += _flow_rows([entry_w(n) for n in plain], usable) * (row + gap)
+        if columns:
+            widths = [max([_FULL_GROUP_BASE_PX + _FULL_GROUP_CHAR_EM * font * len(str(title))]
+                          + [entry_w(n) for n in names])
+                      for (_, title), names in columns.items()]
+            depth = 1 + max(len(names) for names in columns.values())
+            height += _flow_rows(widths, usable) * (depth * row + gap)
+        return height
+
+    def _title_band(self, fig):
+        """Height (px) of the suptitle band an above-legend is pinned just
+        below (the ``title_band`` of ``_top_space``)."""
+        no_legend, _, _ = _top_space(
+            fig.layout.title.text, (None, (fig.layout.height or 800) / 100),
+            False, title_font_size=self._font_size('suptitle_size'))
+        return no_legend - _TITLE_TOP_PAD
+
+    def _fit_full_legend(self, fig):
+        """Show every legend entry instead of letting Plotly scroll the legend,
+        growing the figure so the plot area keeps its size. Mutates ``fig``.
+
+        Plotly caps a horizontal legend at half the figure height and a side
+        legend at the plot height, and scrolls past that — fine on screen, but
+        an exported image just shows the clipped part. Short of the cap, an
+        above-legend that overflows the band reserved for it isn't clipped but
+        Plotly's margin autoexpand takes the overflow out of the plot area. So
+        the cap is lifted, and a legend that outgrows its space gets room made:
+
+        * an above-legend running past the top margin: the top margin and the
+          height both grow to fit it (``_above_legend_height``), and the title
+          and legend are re-anchored;
+        * a side legend taller than the plot area: the bottom margin and the
+          height grow by the difference, so it continues past the plot's bottom
+          edge, beside the x-axis labels.
+
+        A legend that already fits leaves the figure exactly as it was. Runs at
+        most once per figure (``meta['uc_legend_fit']`` marks it), and not at
+        all while ``_legend_fit_enabled`` is off (the dashboard's fixed-size
+        panels)."""
+        if fig is None or fig.layout.showlegend is False:
+            return fig
+        if not getattr(self, '_legend_fit_enabled', True):
+            return fig
+        meta = dict(fig.layout.meta or {})
+        if 'uc_legend_fit' in meta:
+            return fig
+        try:
+            fig.layout.legend.maxheight = _FULL_LEGEND_MAXHEIGHT
+        except ValueError:
+            return fig  # a Plotly without legend.maxheight: keep its scrolling
+
+        leg, m = fig.layout.legend, fig.layout.margin
+        height = fig.layout.height or 800
+        top = 100 if m.t is None else m.t
+        has_above = (leg.orientation == 'h' and leg.yref == 'container')
+        delta = 0
+        if has_above:
+            legend_bottom = self._title_band(fig) + self._above_legend_height(fig)
+            if legend_bottom > top:
+                delta = legend_bottom + _LEGEND_GAP + _PINNED_TOP_SLACK - top
+                fig.update_layout(margin=dict(t=top + delta),
+                                  height=height + delta)
+        else:
+            bottom = 80 if m.b is None else m.b
+            delta = max(0, self._side_legend_height(fig) - (height - top - bottom))
+            if delta:
+                fig.update_layout(margin=dict(b=bottom + delta),
+                                  height=height + delta)
+        meta['uc_legend_fit'] = {'delta': delta}
+        fig.update_layout(meta=meta)
+        if delta:
+            # The suptitle (and an above-legend) sit at container fractions of
+            # the old height; re-pin them so the growth doesn't slide them down.
+            self._anchor_top(fig)
+        return fig
+
+    def _full_legend_figure(self, fig):
+        """``fig`` with its whole legend showing, for image output
+        (``save_png``, static images). Fits a copy, so the interactive figure
+        cached as ``last_fig`` keeps its scrolling legend; a figure that is
+        already fitted (``legend_scroll=False``) is used as is."""
+        if fig is None or 'uc_legend_fit' in dict(fig.layout.meta or {}):
+            return fig
+        return self._fit_full_legend(go.Figure(fig))
+
+    @staticmethod
     def _extra_yaxes(fig):
         """The free-positioned right-hand y axes of a multi-axis plot
         (``plot_ymult``, ``bar``/``box`` with ``by='dataset_x'``), ordered
@@ -8507,6 +8692,10 @@ class UnichartNotebook:
         bottom margin is included when pinning the plot area). The watermark
         follows it: sized in paper coords, it is unaffected by either, and
         running last keeps it out of the margin arithmetic entirely.
+
+        With ``set_default_format(legend_scroll=False)`` the whole legend is
+        shown (``_fit_full_legend``) once the plot size is final; static images
+        always show it, via a fitted copy.
         """
         fig = self._apply_style(fig)
         fig = self._apply_grid(fig)
@@ -8514,11 +8703,14 @@ class UnichartNotebook:
         fig = self._apply_footer(fig, footer)
         fig = self._apply_watermark(fig)
         fig = self._enforce_plot_size(fig)
+        if not self._apply_default('legend_scroll', None, True):
+            fig = self._fit_full_legend(fig)
         if fig is not None and suppress_legends:
             fig.update_traces(visible='legendonly')
         self.last_fig = fig
         if self.static_images and fig is not None:
-            return self._render_static(fig)
+            # An image can't scroll: always render the whole legend.
+            return self._render_static(self._full_legend_figure(fig))
         if fig is not None and self.copy_buttons:
             self._display_copy_button()
         return fig
@@ -8556,7 +8748,8 @@ class UnichartNotebook:
         return a static PNG (via ``IPython.display.Image``) instead, while
         ``last_fig`` still caches the real figure so ``save_png`` and re-styling
         keep working. Requires the 'kaleido' package; if it's missing, plots
-        fall back to interactive automatically.
+        fall back to interactive automatically. Static images always show the
+        whole legend, made taller where it would otherwise scroll.
 
         Note: with static mode on, plotting methods return an ``Image``, not a
         Plotly ``Figure``, so you can't chain ``.update_layout(...)`` on the
@@ -8932,8 +9125,11 @@ class UnichartNotebook:
             _top, _, _ = _top_space(suptitle or self.suptitle, figsize, False)
             fig.update_layout(
                 showlegend=True,
+                # yref='paper' explicitly: update_layout merges, and an inherited
+                # container yref (from the above-legend default) parks this legend
+                # in the title band, where autoexpand takes it out of the plot area.
                 legend=dict(orientation='v', xanchor='left', x=1.02,
-                            yanchor='top', y=1),
+                            yanchor='top', y=1, yref='paper'),
                 margin=dict(r=self._keep_right_margin(fig, 160), t=_top),
             )
         else:  # 'above' (default)
@@ -9202,8 +9398,11 @@ class UnichartNotebook:
             _top, _, _ = _top_space(suptitle or self.suptitle, figsize, False)
             fig.update_layout(
                 showlegend=True,
+                # yref='paper' explicitly: update_layout merges, and an inherited
+                # container yref (from the above-legend default) parks this legend
+                # in the title band, where autoexpand takes it out of the plot area.
                 legend=dict(orientation='v', xanchor='left', x=1.02,
-                            yanchor='top', y=1),
+                            yanchor='top', y=1, yref='paper'),
                 margin=dict(r=self._keep_right_margin(fig, 160), t=_top),
             )
         else:  # 'above' (default)
@@ -9730,7 +9929,7 @@ class UnichartNotebook:
     # The table Command
     # ------------------------------------------------------------------
     def table(self, cols=None, title=None, x_col=None, x_in=None, kind=None,
-              sig_figs=None, output=None):
+              sig_figs=None, decimals=None, output=None):
         """
         Build a table of column values from the currently selected datasets.
 
@@ -9768,6 +9967,15 @@ class UnichartNotebook:
             display, keeping ordinary decimal notation (no scientific notation).
             Affects the rendered HTML table and Markdown output only; the
             ``output='df'`` DataFrame keeps its full-precision numeric values.
+            Mutually exclusive with ``decimals``.
+        decimals : int, optional
+            The fixed-decimal-places alternative to ``sig_figs``: round every
+            float column to this many places after the point, keeping trailing
+            zeros in the rendered table (``decimals=2`` shows ``1.5`` as
+            ``1.50``); use ``decimals=0`` for whole numbers. Affects display
+            only, exactly as ``sig_figs`` does, and with the same caveat that
+            Markdown output re-renders plain numeric columns without the
+            trailing zeros. Mutually exclusive with ``sig_figs``.
         output : {None, 'df', 'md', 'fig'}, optional
             What to return:
 
@@ -9801,9 +10009,10 @@ class UnichartNotebook:
             - ``'df'``: return the assembled :class:`pandas.DataFrame`.
             - ``'md'``: return a GitHub-flavored Markdown string.
             - ``'fig'``: return the styled Plotly ``go.Figure`` (a ``go.Table``),
-              with ``sig_figs`` and dark-mode already applied. Useful for
-              embedding the table alongside other figures (e.g. in a dashboard
-              panel) without triggering the HTML display side effect.
+              with ``sig_figs``/``decimals`` and dark-mode already applied.
+              Useful for embedding the table alongside other figures (e.g. in a
+              dashboard panel) without triggering the HTML display side
+              effect.
 
         Interpolation mode details
         --------------------------
@@ -9849,6 +10058,10 @@ class UnichartNotebook:
 
             df = chart.table(cols='power', x_in=[10, 15, 20],
                              kind='poly2', output='df')
+
+        Show every float to two decimal places instead::
+
+            chart.table(cols=['speed', 'power'], decimals=2)
         """
         if output is not None and output not in ('df', 'md', 'fig'):
             print(f"Unknown output mode '{output}'. Use None, 'df', 'md', or 'fig'.")
@@ -9856,6 +10069,13 @@ class UnichartNotebook:
         if sig_figs is not None and (not isinstance(sig_figs, int) or
                                      isinstance(sig_figs, bool) or sig_figs < 1):
             print("sig_figs must be a positive integer.")
+            return
+        if decimals is not None and (not isinstance(decimals, int) or
+                                     isinstance(decimals, bool) or decimals < 0):
+            print("decimals must be a non-negative integer.")
+            return
+        if sig_figs is not None and decimals is not None:
+            print("Pass either sig_figs or decimals, not both.")
             return
         combined_dfs = []
 
@@ -9995,20 +10215,22 @@ class UnichartNotebook:
         final_df = pd.concat(combined_dfs, ignore_index=True)
 
         # Capture float columns before fillna (which can turn columns
-        # containing NaN into object dtype) so sig_figs formatting below knows
-        # which columns to round.
+        # containing NaN into object dtype) so the sig_figs / decimals
+        # formatting below knows which columns to round.
         float_cols = (list(final_df.select_dtypes(include='float').columns)
-                      if sig_figs is not None else [])
+                      if sig_figs is not None or decimals is not None else [])
 
         final_df = final_df.fillna('-')
 
         if output == 'df':
             return final_df
 
-        if sig_figs is not None:
+        if sig_figs is not None or decimals is not None:
+            fmt = ((lambda v: self._sig_fig_str(v, sig_figs))
+                   if sig_figs is not None
+                   else (lambda v: self._decimals_str(v, decimals)))
             for c in float_cols:
-                final_df[c] = final_df[c].map(
-                    lambda v: self._sig_fig_str(v, sig_figs))
+                final_df[c] = final_df[c].map(fmt)
 
         if output == 'md':
             try:
@@ -10041,6 +10263,18 @@ class UnichartNotebook:
         if digits <= 0:
             return f"{round(v, digits):.0f}"
         return f"{v:.{digits}f}"
+
+    @staticmethod
+    def _decimals_str(v, decimals):
+        """
+        Round ``v`` to ``decimals`` places after the decimal point, keeping
+        trailing zeros (``decimals=0`` gives a whole number). Non-floats (e.g.
+        the ``'-'`` fill value or string columns) pass through unchanged, as in
+        :meth:`_sig_fig_str`.
+        """
+        if not isinstance(v, float) or not np.isfinite(v):
+            return v
+        return f"{v:.{decimals}f}"
 
     @staticmethod
     def _format_table_display(final_df, fmt='.5g'):
@@ -10657,6 +10891,10 @@ class UnichartNotebook:
         Save the last generated plot to a PNG file.
         Requires the 'kaleido' package to be installed.
 
+        The image always shows the whole legend: where the on-screen legend
+        would scroll, the image is made taller instead (the plot area keeps its
+        size). Passing ``height`` overrides that and can clip the legend again.
+
         By default the image also carries everything needed to remake the
         plot: the full plotting session (every set's rows, queries and
         formatting, the notebook-level formatting) plus the plotting call
@@ -10686,7 +10924,8 @@ class UnichartNotebook:
         try:
             self._suppress_mathjax()
 
-            self.last_fig.write_image(filename, scale=scale, width=width, height=height)
+            self._full_legend_figure(self.last_fig).write_image(
+                filename, scale=scale, width=width, height=height)
             note = ''
             if embed_session:
                 note = self._embed_png_session(filename, embed_session,
@@ -10838,8 +11077,8 @@ class UnichartNotebook:
 
         return filtered_cols
 
-    def summary(self, cols=None, title=None, sig_figs=None, output=None,
-                print_table=None):
+    def summary(self, cols=None, title=None, sig_figs=None, decimals=None,
+                output=None, print_table=None):
         """
         Summarize the given columns across the currently selected datasets.
 
@@ -10859,7 +11098,13 @@ class UnichartNotebook:
             keeping ordinary decimal notation (no scientific notation). Affects
             the rendered HTML table, the Markdown output and the ``'fig'``
             table only; the ``output='df'`` DataFrame keeps its full-precision
-            numeric values. Without it, statistics display as ``.4g``.
+            numeric values. Without it (or ``decimals``), statistics display as
+            ``.4g``. Mutually exclusive with ``decimals``.
+        decimals : int, optional
+            The fixed-decimal-places alternative to ``sig_figs``: round every
+            statistic to this many places after the point, keeping trailing
+            zeros in the rendered table. Affects display only, exactly as
+            ``sig_figs`` does. Mutually exclusive with ``sig_figs``.
         output : {None, 'df', 'md', 'fig'}, optional
             What to return:
 
@@ -10871,9 +11116,10 @@ class UnichartNotebook:
               numeric precision.
             - ``'md'``: return a GitHub-flavored Markdown string.
             - ``'fig'``: return the styled Plotly ``go.Figure`` (a ``go.Table``),
-              with ``sig_figs`` and dark-mode already applied. Useful for
-              embedding the summary alongside other figures (e.g. in a
-              dashboard panel) without triggering the HTML display side effect.
+              with ``sig_figs``/``decimals`` and dark-mode already applied.
+              Useful for embedding the summary alongside other figures (e.g. in
+              a dashboard panel) without triggering the HTML display side
+              effect.
         print_table : bool, optional
             Backwards-compatible switch from the older signature, where
             ``summary()`` always returned the DataFrame and only displayed the
@@ -10891,6 +11137,10 @@ class UnichartNotebook:
 
             chart.summary(cols=['speed', 'power'], sig_figs=3)
 
+        Or to two decimal places::
+
+            chart.summary(cols=['speed', 'power'], decimals=2)
+
         Get the numbers back instead of displaying them::
 
             df = chart.summary(cols='power', output='df')
@@ -10901,6 +11151,13 @@ class UnichartNotebook:
         if sig_figs is not None and (not isinstance(sig_figs, int) or
                                      isinstance(sig_figs, bool) or sig_figs < 1):
             print("sig_figs must be a positive integer.")
+            return
+        if decimals is not None and (not isinstance(decimals, int) or
+                                     isinstance(decimals, bool) or decimals < 0):
+            print("decimals must be a non-negative integer.")
+            return
+        if sig_figs is not None and decimals is not None:
+            print("Pass either sig_figs or decimals, not both.")
             return
 
         # ``output`` drives the new behavior; ``print_table`` keeps the old
@@ -10973,15 +11230,20 @@ class UnichartNotebook:
             return df
 
         # Build the rendered frame the same way :meth:`table` does: NaN becomes
-        # '-', then sig_figs (or the default .4g) formats the statistics.
+        # '-', then sig_figs / decimals (or the default .4g) formats the
+        # statistics.
         stat_cols = ["Min", "Mean", "Max", "Std"]
         final_df = df.copy()
         final_df["Count"] = final_df["Count"].astype(int)
         final_df = final_df.fillna('-')
+        if sig_figs is not None:
+            stat_fmt = lambda v: self._sig_fig_str(v, sig_figs)
+        elif decimals is not None:
+            stat_fmt = lambda v: self._decimals_str(v, decimals)
+        else:
+            stat_fmt = lambda v: f"{v:.4g}" if isinstance(v, float) else v
         for c in stat_cols:
-            final_df[c] = final_df[c].map(
-                lambda v: self._sig_fig_str(v, sig_figs) if sig_figs is not None
-                else (f"{v:.4g}" if isinstance(v, float) else v))
+            final_df[c] = final_df[c].map(stat_fmt)
 
         if output == 'md':
             try:

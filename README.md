@@ -429,8 +429,8 @@ Two consistent rules cover every reset:
   (polynomial or LOWESS; LOWESS needs `statsmodels`).
 - **`summary(cols=...)`** — per-dataset descriptive statistics (count / min /
   mean / max / std), displayed as the same sortable, filterable, copyable
-  table as `table(...)`; `output='df' | 'md' | 'fig'` and `sig_figs=` work the
-  same way too.
+  table as `table(...)`; `output='df' | 'md' | 'fig'`, `sig_figs=` and
+  `decimals=` work the same way too.
 - **`min` / `max` / `mean` / `median`** — quick per-column aggregates.
 
 ---

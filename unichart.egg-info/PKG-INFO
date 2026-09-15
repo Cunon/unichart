@@ -92,7 +92,7 @@ typical loop is:
 |------|---------|
 | **1. Load** | `load_df` · `load` · `load_clipboard` |
 | **2. Select** | `select` · `omit` · `query` · `restore` |
-| **3. Plot** | `plot` · `plot_ymult` · `bar` · `box` · `histogram` · `contour` · `table` |
+| **3. Plot** | `plot` · `plot_ymult` · `plot_marginal` · `bar` · `box` · `histogram` · `contour` · `table` |
 | **4. Style** | `color` · `marker` · `var_format` · `set_default_format` · `toggle_darkmode` · `set_plot_style` |
 | **5. Analyse** | `delta` · `table` · `summary` · `reg_info` · `combine_sets` |
 
@@ -120,6 +120,10 @@ nb.load_df(df, set_idx_column='run_id', set_name_column='run_name')
 
 # 2. Select which datasets participate in the next plot
 nb.select([0, 1, 2])          # or nb.omit(3), nb.query('all', 'temp > 100')
+nb.select('1:10')             # range shorthand — sets 1-9 (exclusive stop,
+                              # like a Python slice). Also '0,3,7:', '::2', '-3:'.
+                              # Works anywhere a set selector is accepted:
+                              # nb.omit('5:8'), nb.color('0:3', 'red'), ...
 
 # 3. Plot — one subplot per Y variable by default
 nb.plot(x='time', y=['temperature', 'pressure'])
@@ -166,13 +170,14 @@ list of ints, `'all'`, or `'selected'`.
 
 All plotting methods return an interactive Plotly `go.Figure` (cached in
 `nb.last_fig`) and share layout options (`figsize`, `ncols`/`nrows`,
-`suptitle`, `footer`, `legend`, `by`).
+`hspace`/`vspace`, `suptitle`, `footer`, `legend`, `by`).
 
 | Method | What it draws |
 |--------|---------------|
 | `plot(x, y, by=...)` | Line / scatter. `by='vars'` = one subplot per Y variable (default); `by='sets'` = one subplot per dataset; `by='ymult'` = single plot with multiple Y axes. |
 | `plot_ymult(x, y)` | One plot, multiple stacked/overlaid Y axes for differently-scaled variables. |
-| `bar(x, y, barmode=, agg=)` | Bar charts, grouped or stacked, with aggregation. |
+| `plot_marginal(x, y, marginal=)` | Scatter with marginal distribution strips: `x`'s distribution above the plot, `y`'s to its right (`'histogram'` default, or `'box'`, `'violin'`, `'rug'`, `'kde'`; `marginal_x`/`marginal_y` set one side or drop it with `False`). Also `plot(x, y, by='marginal')`. |
+| `bar(x, y, barmode=, agg=)` | Bar charts: one bar per dataset and `x` category, height = `agg` of `y` over that category's rows (`'mean'` default; any pandas reducer name, a callable, or `agg=False` for pre-reduced rows). Grouped or stacked; hover shows the reducer and row count. |
 | `box(x, y, points=, notched=)` | Box / distribution plots. |
 | `histogram(x, histfunc=, nbins=)` | Histograms with configurable binning and normalization. |
 | `contour(x, y, z, overlay_sets=)` | Filled/line contour maps from scattered data, with optional scatter overlays. |
@@ -180,6 +185,7 @@ All plotting methods return an interactive Plotly `go.Figure` (cached in
 
 ```python
 nb.plot(x='time', y='temp', by='sets', ncols=2, suptitle='Per run')
+nb.plot_marginal(x='rpm', y='torque', marginal='kde')
 nb.bar(x='config', y='efficiency', barmode='group', agg='mean')
 nb.histogram(x='error', nbins=40, histnorm='probability')
 nb.contour(x='rpm', y='torque', z='efficiency', overlay_sets=[1, 2])
@@ -215,7 +221,8 @@ nb.var_format(['CHT1', 'CHT2'], reset=True)           # drop all their overrides
 **Notebook-wide defaults & appearance:**
 
 - `set_default_format(...)` — persistent defaults (markersize, linestyle,
-  legend, grid, barmode, agg, alpha, …) applied to future plots/datasets.
+  legend, grid, subplot spacing, barmode, agg, alpha, …) applied to future
+  plots/datasets.
 - `set_color_palette` / `color_map` / `marker_map` — the ordered lists assigned
   to datasets by index (integer lookups cycle).
 - `toggle_darkmode(True/False)` — dark theme.
@@ -231,6 +238,16 @@ nb.var_format(['CHT1', 'CHT2'], reset=True)           # drop all their overrides
   opacity, position and size (see below).
 - `set_static_images(True)` / `save_png(...)` — render flat PNGs inline (keeps
   notebook file size down) or export a high-resolution PNG (needs `kaleido`).
+  Every saved PNG also carries the full plotting session (data, queries,
+  formatting and the plot call) in a metadata chunk, so
+  `UnichartNotebook.from_session('plot.png')` or `nb.load_session('plot.png')`
+  remakes the plot from the image alone; `read_png_session('plot.png')` shows
+  what is embedded, `save_png(..., embed_session=False)` writes a plain image.
+  `parms=['x', 'y']` whitelists the columns embedded (plotted, query and hue
+  columns are always kept) so a wide table doesn't bloat the file.
+- `save_session(path)` / `load_session(path)` — the same session as a
+  standalone `.json` (file references or embedded rows, `embed_data=`; the
+  same `parms=` whitelist applies to embedded sets).
 
 Marker and line-style strings are **Matplotlib-compatible** (`'o'`, `'s'`,
 `'^'`, `'--'`, `'-.'`, `':'`) and translated to Plotly automatically.
@@ -326,6 +343,31 @@ Note that in per-panel mode a wide grid makes a wide figure — five 6in panels
 side by side is a ~22in figure. Use a smaller per-panel size or `ncols=1` when
 that is inconvenient. Dashboard panels are rendered at the size the board gives
 them, so the pin governs notebook figures, not board tiles.
+
+### Subplot spacing
+
+The gap between subplots is a fixed pixel budget — 80px between columns, 70px
+between rows (enough for the neighbouring panel's tick labels, axis title and
+subplot title) — whatever the grid size, so a 6-row plot doesn't overlap and a
+2-row plot doesn't waste a third of the figure on the gap. Contour plots and
+secondary-axis plots reserve more for their colorbars and extra axes. When a
+grid is too crowded for its figure the gaps are clamped and a warning says so;
+a bigger `figsize` or `set_plot_size` is the cure.
+
+To change it, every gridded plot method (`plot`, `bar`, `box`, `histogram`,
+`contour`) takes `hspace` (columns) and `vspace` (rows), and
+`set_default_format` sets the standing default:
+
+```python
+nb.plot(x='t', y=['CHT', 'EGT', 'RPM'], ncols=1, vspace=100)   # 100px rows
+nb.plot(x='t', y=['CHT', 'EGT'], hspace=0.05)     # 5% of the plot width
+nb.set_default_format(hspace='60px', vspace=40)   # for every plot from now on
+```
+
+A value of 1 or more is pixels (`60` or `'60px'`); below 1 it is a fraction of
+the plot area, the way Plotly's `horizontal_spacing`/`vertical_spacing` take
+it. With `set_plot_size` pinned, the pixel gap is exact and the figure grows to
+hold it.
 
 ### Watermarks
 
@@ -437,8 +479,8 @@ nb.dashboard(panels=[
 
 Panel spec keys:
 
-- `method` — one of `plot`, `plot_ymult`, `bar`, `box`, `histogram`,
-  `contour`, `table` (default `plot`).
+- `method` — one of `plot`, `plot_ymult`, `plot_marginal`, `bar`, `box`,
+  `histogram`, `contour`, `table` (default `plot`).
 - `x`, `y`, `z` — variables (the `z` / legend controls appear only for the
   methods that use them).
 - `suptitle` — the card title (also names CSV exports).

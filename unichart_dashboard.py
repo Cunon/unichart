@@ -387,6 +387,10 @@ def render_panel(nb, method, x, y, dataset_indices, suptitle=None, legend='above
         # notebook is untouched after the board runs.
         select_snapshot = [(ds, ds.select) for ds in nb.sets]
         darkmode_snapshot = nb.darkmode
+        # Panels are fixed-size cards (_stamp overwrites width/height), so a
+        # figure grown to fit its whole legend would crush its plot area: keep
+        # the scrolling legend here whatever legend_scroll says.
+        fit_snapshot = getattr(nb, '_legend_fit_enabled', True)
         state_snapshot = {k: getattr(nb, k) for k in vars(nb)
                           if k.startswith('last_')}
         try:
@@ -397,6 +401,7 @@ def render_panel(nb, method, x, y, dataset_indices, suptitle=None, legend='above
             # Null last_fig first so the method's _clear_last_fig doesn't empty
             # (data=[], layout={}) the figure the user had cached before the board.
             nb.last_fig = None
+            nb._legend_fit_enabled = False
 
             # The y control is multi-select (a list), but some methods (e.g.
             # histogram) require a scalar y. Unwrap a single selection so every
@@ -462,6 +467,7 @@ def render_panel(nb, method, x, y, dataset_indices, suptitle=None, legend='above
             for ds, was in select_snapshot:
                 ds.select = was
             nb.darkmode = darkmode_snapshot
+            nb._legend_fit_enabled = fit_snapshot
             # Drop any last_* attribute the render created (e.g. contour's
             # last_z on a notebook that had never plotted a contour), then
             # restore the snapshotted values.
@@ -671,16 +677,17 @@ def _numish(v):
         return False
 
 
-def _table_records(trace, sig_figs=None):
+def _table_records(trace, sig_figs=None, decimals=None):
     """DataTable ``(data, columns)`` for a live-board table panel.
 
     Built from the same ``go.Table`` trace the panel used to display, so the
     content matches ``table()`` exactly. Numeric-looking columns are converted
-    to real numbers and typed ``'numeric'`` — with ``sig_figs`` applied the
-    trace's cells are pre-formatted *strings*, which DataTable's native sort
-    would order lexically ("9.5" > "10.2"). The d3 ``r`` (significant-digit
-    decimal) format re-applies the same rounding for display. ``'-'`` (the
-    table's NaN fill) stays text and shows as-is.
+    to real numbers and typed ``'numeric'`` — with ``sig_figs``/``decimals``
+    applied the trace's cells are pre-formatted *strings*, which DataTable's
+    native sort would order lexically ("9.5" > "10.2"). The d3 ``r``
+    (significant-digit decimal) / ``f`` (fixed decimal places) format
+    re-applies the same rounding for display. ``'-'`` (the table's NaN fill)
+    stays text and shows as-is.
     """
     from dash.dash_table.Format import Format, Scheme
 
@@ -690,13 +697,16 @@ def _table_records(trace, sig_figs=None):
         spec = {'name': h, 'id': h}
         if col and all(_numish(v) for v in col):
             spec['type'] = 'numeric'
-            # table() applies sig_figs to float columns only (ints pass
-            # through untouched), so only re-apply the display rounding where
-            # it did: a pure-int column keeps its plain rendering.
-            if sig_figs and not all(isinstance(v, (int, np.integer))
-                                    for v in col):
-                spec['format'] = Format(precision=sig_figs,
-                                        scheme=Scheme.decimal)
+            # table() applies sig_figs / decimals to float columns only
+            # (ints pass through untouched), so only re-apply the display
+            # rounding where it did: a pure-int column keeps its plain
+            # rendering.
+            if ((sig_figs or decimals is not None)
+                    and not all(isinstance(v, (int, np.integer)) for v in col)):
+                spec['format'] = (Format(precision=sig_figs,
+                                         scheme=Scheme.decimal) if sig_figs
+                                  else Format(precision=decimals,
+                                              scheme=Scheme.fixed))
             col = [float(v) if isinstance(v, str) and v.strip() not in ('', '-')
                    else v for v in col]
         specs.append(spec)
@@ -852,7 +862,8 @@ def _register_board_callbacks(app, nb, size):
         if (method in _TABLE_METHODS and fig.data
                 and fig.data[0].type == 'table'):
             data, columns = _table_records(
-                fig.data[0], sig_figs=(extra or {}).get('sig_figs'))
+                fig.data[0], sig_figs=(extra or {}).get('sig_figs'),
+                decimals=(extra or {}).get('decimals'))
             return no_update, data, columns, 'hidden', ''
         # Non-table methods — and a table render that *failed* (render_panel
         # returns an error figure, not a table trace) — paint the graph.
@@ -1393,7 +1404,7 @@ def dashboard(nb, panels, ncols=2, width=600, height=420, title=None,
         is the interpolation x-axis (used only with ``x_in``), and the panel
         title is the table title. Table panels display as a DataTable with
         native sorting — click a column header to sort (numeric columns sort
-        numerically, including under ``sig_figs`` formatting).
+        numerically, including under ``sig_figs`` / ``decimals`` formatting).
     ncols : int
         Number of columns in the panel grid.
     width, height : int
