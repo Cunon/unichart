@@ -79,7 +79,9 @@ Two conveniences run through the whole API:
   to re-specify them.
 - **Built-in help.** `nb.help()` prints a categorized method + attribute
   overview; `nb.help('delta')` prints one method's full signature and docstring;
-  `nb.help('Plotting')` lists a single category.
+  `nb.help('Plotting')` lists a single category. Headings, method names and
+  signatures are colored in a terminal, in Jupyter and in the explorer's
+  terminal (plain when piped; `NO_COLOR=1` disables it).
 
 ---
 
@@ -213,7 +215,8 @@ nb.var_format(['CHT1', 'CHT2'], reset=True)           # drop all their overrides
 - `watermark(...)` — stamp a logo or seal onto every plot, with control over
   opacity, position and size (see below).
 - `set_static_images(True)` / `save_png(...)` — render flat PNGs inline (keeps
-  notebook file size down) or export a high-resolution PNG (needs `kaleido`).
+  notebook file size down) or export a high-resolution PNG (needs `kaleido`:
+  `pip install unichart[png]`).
   Every saved PNG also carries the full plotting session (data, queries,
   formatting and the plot call) in a metadata chunk, so
   `UnichartNotebook.from_session('plot.png')` or `nb.load_session('plot.png')`
@@ -223,7 +226,15 @@ nb.var_format(['CHT1', 'CHT2'], reset=True)           # drop all their overrides
   columns are always kept) so a wide table doesn't bloat the file.
 - `save_session(path)` / `load_session(path)` — the same session as a
   standalone `.json` (file references or embedded rows, `embed_data=`; the
-  same `parms=` whitelist applies to embedded sets).
+  same `parms=` whitelist applies to embedded sets, and it likewise keeps the
+  columns the recorded plot needs). A `.json` session records the last plotting
+  call just as a PNG does, so `load_session` brings the figure back with the
+  data; pass `replay=False` for the data and formatting alone. A call that
+  won't replay — a `figsize` JSON could only store as text, say — warns and
+  leaves everything else restored.
+
+Both formats are openable from the `unichart` command and droppable on the
+explorer's sidebar; see [Command line](#command-line) below.
 
 Marker and line-style strings are **Matplotlib-compatible** (`'o'`, `'s'`,
 `'^'`, `'--'`, `'-.'`, `':'`) and translated to Plotly automatically.
@@ -486,6 +497,7 @@ from unichart_dashboard import explore
 explore(data='runs.csv')   # standalone — serves the board and opens your browser
 explore()                  # empty; drop a file on the sidebar, or hit "Load demo data"
 nb.explore()               # on a notebook you already have (inline in Jupyter)
+nb.explore(app_window=True)  # in its own desktop window instead of a browser tab
 ```
 
 The notebook's methods are bound as bare names in the terminal, so the cheat
@@ -516,7 +528,15 @@ sheet reads the way the library does, and `nb` covers everything else:
   their real sortable, filterable HTML tables inline in the transcript.
 - Errors show a traceback trimmed to the line you typed.
 - Dropping a file loads it through a visible `nb.load(...)` command, so the
-  transcript is a real record of the session.
+  transcript is a real record of the session. Drop a **saved session** —
+  `.json` or a `save_png` image — and it restores through an equally visible
+  `nb.load_session(...)`, bringing its datasets, formatting and plot back. The
+  file's contents decide, not its extension, so a data `.json` still loads as
+  data.
+- **💾 save session** in the top bar downloads the board as a session file:
+  everything loaded, however it is styled, and whatever is currently plotted.
+  Reopen it with `unichart that-file.json`, by dropping it back on the sidebar,
+  or with `nb.load_session(...)` from Python.
 - The board runs against **your** notebook: what you load or restyle there is
   on `nb` afterwards.
 
@@ -537,11 +557,31 @@ at a data file never needs a Python session at all:
 ```bash
 unichart                                # empty explorer; load from the data bar
 unichart runs.csv                       # open the explorer on one file
+unichart runs.csv --app                 # ...in its own window, like a desktop app
 unichart a.csv b.csv --combine          # several files, merged into one dataset
 unichart runs.csv --set-col run_id      # split into one dataset per run
 unichart runs.csv --info                # print datasets + columns, then exit
 unichart runs.csv --html board.html     # write a static board instead of serving
 ```
+
+A `FILE` can also be a **saved session** — a `.json` from `save_session`, or a
+PNG from `save_png`, which carries its session in a metadata chunk. Those are
+restored rather than read as data, so the datasets, queries, formatting *and the
+plot* come back:
+
+```bash
+unichart plot.png                       # reopen the plot that PNG came from
+unichart board.json --info              # inspect a session without serving
+unichart runs.csv board.json            # data first, then the session on top
+unichart runs.csv --panel plot:time:temp --save-session board.json
+```
+
+Data files load first (as one batch, so `--combine` still means what it says),
+then sessions in the order given — so a session's own formatting is the one that
+sticks, and any `--panel` draws on top of the restored state. A session records
+its own theme, which the explorer honours; `--dark` overrides it. `--combine`,
+`--set-col` and `--name-col` describe how to *read* a data file, so passing one
+with nothing but a session on the line is an error rather than a no-op.
 
 Seed the board with panels (repeat `--panel`, as `method:x:y[,y2][:z]`). For
 the GUI each one is replayed as a startup command in the transcript; for
@@ -552,9 +592,53 @@ unichart runs.csv --panel plot:time:temp,press --panel histogram:temp
 unichart map.csv  --panel contour:rpm:torque:eff --html map.html --embed-js inline
 ```
 
-Other flags: `--title` `--port` `--no-browser`; `--ncols` `--width` `--height`
-`--dark` apply to `--html` (the terminal board is always dark) (serve without opening a browser — headless or remote hosts),
-`--name-col`, and `--version`. `unichart --help` lists them all.
+`unichart --help` is colored when it's printing to a terminal — flags in cyan,
+metavars and choices in green, section headings in bold — and plain the moment
+it's piped or redirected. `NO_COLOR=1` turns it off; `FORCE_COLOR=1` forces it
+back on.
+
+#### A window of its own (`--app`)
+
+By default the explorer opens in a browser tab, next to everything else you had
+open. `--app` opens it as a **standalone window** instead — no tabs, no address
+bar, no bookmarks: just the board, titled and iconed as itself, with its own
+entry in the taskbar.
+
+```bash
+unichart runs.csv --app
+```
+
+```python
+explore(data='runs.csv', app_window=True)   # the same thing from Python
+nb.explore(app_window=True)
+```
+
+It works by handing the URL to a Chromium-family browser's `--app` mode (Chrome,
+Chromium, Brave or Edge — whichever is found first; `UNICHART_APP_BROWSER=/path/to/browser`
+names one the search misses). There is no extra dependency and no packaging
+step: it's the browser you already have, wearing a different window. On a
+machine with none of them — a Firefox-only box — the board opens in an ordinary
+tab and says why.
+
+Two things to know. `--no-browser` still wins, so a headless host is unaffected.
+And closing the window does not stop the server: the board is still running in
+the terminal you launched it from, and `Ctrl-C` there is what ends it.
+
+A note on the icon. The board serves its own — a line over three bars, in the
+board's palette — and the browser paints it in the window's title bar, the tab
+and the page. Whether it also reaches the *taskbar* is the desktop's call, not
+the browser's: X11 and Windows take the icon from the window, so it follows;
+Wayland matches windows to `.desktop` files instead, so an `--app` window there
+shows the browser's generic icon. The fix on those desktops is to install the
+board, which the served web app manifest exists for: Chrome's *Install page as
+app* (in the ⋮ menu) writes a real launcher entry carrying the unichart icon,
+and starting the board from it gets you the icon everywhere.
+
+Other flags: `--title`, `--port`, `--no-browser` (serve without opening a
+browser — headless or remote hosts), `--save-session`, and `--version`;
+`--ncols` `--width` `--height` apply to `--html`, and `--dark` to `--html` and
+to a session's stored theme (the terminal board's own chrome is always dark).
+`unichart --help` lists them all.
 
 Panel options beyond `method` / `x` / `y` / `z` — `kwargs` like `nbins` or
 `barmode`, dataset pins — aren't expressible as a flag; use `nb.dashboard` /
@@ -564,6 +648,36 @@ non-zero rather than raising.
 
 If `unichart` isn't found after installing, the module is runnable directly:
 `python -m unichart_cli runs.csv`.
+
+#### Tab completion
+
+Completion is built in — no extra package to install. Add one line to your
+shell's rc file:
+
+```bash
+eval "$(unichart --completion bash)"    # ~/.bashrc
+eval "$(unichart --completion zsh)"     # ~/.zshrc
+```
+
+Then `--<TAB>` lists the flags, and `--panel` completes field by field against
+the **real column names of the files already on the command line** — so a board
+can be built without opening the data first:
+
+```
+$ unichart runs.csv --panel <TAB>
+plot:  plot_ymult:  plot_marginal:  bar:  box:  histogram:  contour:  table
+
+$ unichart runs.csv --panel plot:<TAB>
+time   temp   press   rpm
+
+$ unichart runs.csv --panel plot:time:te<TAB>
+$ unichart runs.csv --panel plot:time:temp,<TAB>     # y takes a list
+```
+
+`--set-col` / `--name-col` complete column names the same way, `--embed-js` and
+`--completion` complete their choices, and filenames fall through to the
+shell's own completion. Only the column lookups read a file (header row only),
+so completing a flag costs nothing.
 
 ### Export to standalone HTML
 

@@ -1245,12 +1245,22 @@ _UPLOAD_READERS = {
 }
 
 
+def _upload_bytes(contents):
+    """The raw bytes behind one ``dcc.Upload`` payload.
+
+    Upload hands back a ``data:<mime>;base64,<payload>`` string rather than a
+    path. Split out from :func:`_df_from_upload` because a drop is not always a
+    data frame — the explorer sniffs these bytes for a saved session first.
+    """
+    _, _, payload = contents.partition(',')
+    return base64.b64decode(payload)
+
+
 def _df_from_upload(contents, filename):
     """Decode one ``dcc.Upload`` payload into a DataFrame.
 
-    Upload hands back a ``data:<mime>;base64,<payload>`` string rather than a
-    path, so the bytes are read in memory instead of through ``nb.load``. The
-    reader is picked from the original filename's extension.
+    The bytes are read in memory instead of through ``nb.load``, with the
+    reader picked from the original filename's extension.
     """
     suffix = Path(filename).suffix.lower()
     reader = _UPLOAD_READERS.get(suffix)
@@ -1258,8 +1268,7 @@ def _df_from_upload(contents, filename):
         raise ValueError(
             f"Can't read {filename!r} — supported: "
             f"{', '.join(sorted(_UPLOAD_READERS))}")
-    _, _, payload = contents.partition(',')
-    return reader(io.BytesIO(base64.b64decode(payload)), {})
+    return reader(io.BytesIO(_upload_bytes(contents)), {})
 
 
 # Columns that are row labels rather than measurements. They are still
@@ -1302,8 +1311,9 @@ def _default_panel_spec(nb):
     return {'method': 'plot', 'x': ranked[0], 'y': [ranked[1]]}
 
 
-def explore(nb=None, data=None, panels=None, title=None, port=8050,
-            debug=False, open_browser=None, jupyter_mode=None, **run_kwargs):
+def explore(nb=None, data=None, sessions=None, panels=None, title=None,
+            port=8050, debug=False, open_browser=None, app_window=False,
+            jupyter_mode=None, dark=None, **run_kwargs):
     """Launch the terminal explorer — a GUI for plotting on the fly.
 
     Where :func:`dashboard` renders a board you specified in code, this opens a
@@ -1323,6 +1333,15 @@ def explore(nb=None, data=None, panels=None, title=None, port=8050,
         board unless the notebook is already in it.
     data : str | DataFrame | list, optional
         Loaded before the board opens, via ``nb.load``.
+    sessions : str | Path | list, optional
+        Session files (``.json``, or a PNG from ``save_png``) restored at
+        startup, as visible ``nb.load_session(...)`` commands — so the board
+        opens on the plot the session recorded, in the theme it was saved in.
+        Restored after ``data``, and before ``panels``.
+    dark : bool, optional
+        Force the plot theme, overriding whatever a restored session carries.
+        None (default) lets the session decide; with no session the board's
+        usual "switch to dark to match" applies either way.
     panels : list[dict], optional
         Dashboard-style panel specs, replayed as terminal commands at startup
         so they appear in the transcript. Mostly here so the ``unichart``
@@ -1333,6 +1352,20 @@ def explore(nb=None, data=None, panels=None, title=None, port=8050,
         Preferred port; a free one is chosen if it is taken.
     open_browser : bool, optional
         Defaults to True outside a Jupyter kernel, False inside one.
+    app_window : bool
+        Open the board as a standalone desktop window — no tabs, no address
+        bar, its own taskbar entry — instead of a browser tab. Needs a
+        Chromium-family browser (Chrome, Chromium, Brave, Edge), whose
+        ``--app`` mode does the work; with none installed the board opens in an
+        ordinary tab and says so. Set ``UNICHART_APP_BROWSER`` to name one the
+        search misses. The board's icon lands in the window and the tab; the
+        taskbar icon is the desktop's business (it follows on X11 and Windows,
+        while Wayland wants the board installed — the served web app manifest
+        is what makes Chrome's "Install page as app" offer a real launcher
+        entry). From a kernel this implies the external board, since an app
+        window is not an inline iframe; ``open_browser=False`` still wins, and
+        the server is still stopped with Ctrl-C rather than by closing the
+        window.
     jupyter_mode : str, optional
         ``'inline'`` (default in a kernel) / ``'external'`` / ``'tab'``.
     debug, **run_kwargs
@@ -1354,12 +1387,14 @@ def explore(nb=None, data=None, panels=None, title=None, port=8050,
     >>> from unichart_dashboard import explore
     >>> explore(data='runs.csv')      # standalone
     >>> explore(nb)                   # on a notebook you already have
+    >>> explore(nb, app_window=True)  # in its own desktop window
     """
     from unichart_terminal import terminal
 
-    return terminal(nb=nb, data=data, panels=panels, title=title, port=port,
-                    debug=debug, open_browser=open_browser,
-                    jupyter_mode=jupyter_mode, **run_kwargs)
+    return terminal(nb=nb, data=data, sessions=sessions, panels=panels,
+                    title=title, port=port, debug=debug,
+                    open_browser=open_browser, app_window=app_window,
+                    jupyter_mode=jupyter_mode, dark=dark, **run_kwargs)
 
 
 def _in_notebook():

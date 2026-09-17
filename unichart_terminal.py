@@ -26,16 +26,24 @@ import base64
 import builtins
 import contextlib
 import io
+import json
+import os
+import re
+import shutil
+import subprocess
 import sys
 import tokenize
 import tempfile
 import threading
 import traceback
+import webbrowser
 from pathlib import Path
 
 import pandas as pd
 
-from unichart_dashboard import _df_from_upload, _pick_port, _require_dash
+from unichart import sniff_session
+from unichart_dashboard import (_df_from_upload, _pick_port, _require_dash,
+                                _upload_bytes)
 
 # ---------------------------------------------------------------------------
 # Palette — sampled from the web version. Dark only, on purpose: this board
@@ -90,6 +98,11 @@ def _uploads_dir():
         _UPLOADS = Path(tempfile.mkdtemp(prefix='unichart-'))
     return _UPLOADS
 
+
+def _slug(text):
+    """A filename-safe stub of a board title, for the session it downloads."""
+    return re.sub(r'[^A-Za-z0-9._-]+', '-', str(text)).strip('-').lower() or 'unichart'
+
 # The cheat sheet: (snippet, is_wide). Clicking one drops it into the input.
 CHEAT_SHEET = [
     ("plot(x='time', y=['temperature', 'pressure'])", True),
@@ -109,6 +122,8 @@ CHEAT_SHEET = [
     ("list_parms()", False),
     ("help()", False),
     ("help('plot')", False),
+    ("save_session('session.json')", True),
+    ("load_session('session.json')", True),
 ]
 
 # The transcript opens with what the notebook itself prints on construction,
@@ -138,11 +153,18 @@ def _scoped_output(nb, sink):
 
     The copy button is a Jupyter affordance and would just be noise here (this
     board has its own chart pane), so it is off for the duration too.
+
+    ``help()`` colors itself with ANSI, which _entry_divs turns into spans. Its
+    auto-detection can't help us here — commands run under redirect_stdout, so
+    it would always see "not a tty" — so the override is set explicitly and
+    restored with the rest. NO_COLOR still wins: it is the user's switch, and
+    this board is not special enough to override it.
     """
     import unichart
 
     real_display = unichart.display
     real_copy = nb.copy_buttons
+    real_help_color = unichart._HELP_COLOR
 
     def capture(*objs, **kwargs):
         for obj in objs:
@@ -150,11 +172,13 @@ def _scoped_output(nb, sink):
 
     unichart.display = capture
     nb.copy_buttons = False
+    unichart._HELP_COLOR = not os.environ.get('NO_COLOR')
     try:
         yield
     finally:
         unichart.display = real_display
         nb.copy_buttons = real_copy
+        unichart._HELP_COLOR = real_help_color
 
 
 def _format_exception(exc):
@@ -394,17 +418,83 @@ def demo_frame(n=90, seed=0):
 # Chrome
 # ---------------------------------------------------------------------------
 
-def _index_string():
+# The app icon: a line over three bars, in the board's own palette. Written as
+# SVG rather than shipped as a .png because unichart installs as flat top-level
+# modules with no package data — an icon that is source can't go missing — and
+# because one vector file covers the tab, the standalone window and the taskbar
+# at every size.
+_ICON_SVG = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="{BG}"/>
+  <g fill="{ACCENT}">
+    <rect x="11.5" y="34.6" width="8.3" height="16.6" rx="2.3" opacity=".35"/>
+    <rect x="26.2" y="25.6" width="8.3" height="25.6" rx="2.3" opacity=".55"/>
+    <rect x="41.0" y="15.4" width="8.3" height="35.8" rx="2.3" opacity=".75"/>
+  </g>
+  <polyline points="10.2,39.7 24.3,28.2 37.1,33.3 53.8,14.1" fill="none"
+            stroke="{INK}" stroke-width="4.8" stroke-linecap="round"
+            stroke-linejoin="round"/>
+  <circle cx="10.2" cy="39.7" r="3" fill="{INK}"/>
+  <circle cx="53.8" cy="14.1" r="3" fill="{INK}"/>
+</svg>"""
+
+# Served off the Dash server rather than out of an ``assets/`` folder, for the
+# same no-package-data reason, and because the manifest has to carry the board's
+# title, which only exists once build_terminal_app has one.
+_ICON_PATH = '_unichart/icon.svg'
+_MANIFEST_PATH = '_unichart/manifest.webmanifest'
+
+
+def _serve_icon(app, board_title):
+    """Add the icon and web app manifest routes to a built app."""
+    server = app.server
+    prefix = app.config.routes_pathname_prefix or '/'
+    manifest = json.dumps({
+        'name': board_title,
+        'short_name': board_title,
+        # Relative, so an installed window comes back to whichever host and
+        # port this board happens to be on.
+        'start_url': '.',
+        'scope': '.',
+        # What makes Chrome's "Install" give the board a real window of its
+        # own — the same chrome-less shape --app opens directly.
+        'display': 'standalone',
+        'background_color': BG,
+        'theme_color': BG,
+        'icons': [{'src': app.get_relative_path('/' + _ICON_PATH),
+                   'type': 'image/svg+xml', 'sizes': 'any'}],
+    })
+
+    @server.route(prefix + _ICON_PATH)
+    def _unichart_icon():
+        return server.response_class(_ICON_SVG, mimetype='image/svg+xml')
+
+    @server.route(prefix + _MANIFEST_PATH)
+    def _unichart_manifest():
+        return server.response_class(manifest,
+                                     mimetype='application/manifest+json')
+
+
+def _index_string(requests_prefix='/'):
     """Dark-only page shell.
 
     Deliberately not ``unichart_dashboard._index_string``: that one stamps the
     light/dark ``data-theme`` tokens the seeded boards run on, and this board
     must not drag them along.
+
+    Dash's ``{{%favicon%}}`` is replaced rather than joined: it points at the
+    plotly mark Dash ships, and two icon links would leave which one the
+    standalone window picks up to the browser.
     """
+    icon = requests_prefix + _ICON_PATH
     return f"""<!DOCTYPE html>
 <html>
     <head>
-        {{%metas%}}<title>{{%title%}}</title>{{%favicon%}}{{%css%}}
+        {{%metas%}}<title>{{%title%}}</title>
+        <link rel="icon" type="image/svg+xml" href="{icon}">
+        <link rel="apple-touch-icon" href="{icon}">
+        <link rel="manifest" href="{requests_prefix + _MANIFEST_PATH}">
+        <meta name="theme-color" content="{BG}">
+        {{%css%}}
         <style>{_CSS}</style>
     </head>
     <body>{{%app_entry%}}
@@ -652,6 +742,8 @@ def _sidebar(html, dcc, nb):
                     html.B('Drop a file'), ' or click to browse',
                     html.Span('.csv · .tsv · .txt · .xlsx · .xls · .json',
                               className='exts'),
+                    html.Span('or a saved session — .json · .png',
+                              className='exts'),
                 ])),
         ], className='term-section'),
 
@@ -682,6 +774,38 @@ def _sidebar(html, dcc, nb):
     ], className='term-side')
 
 
+# ANSI (from nb.help()) rendered as spans, in this board's palette. Only the
+# codes unichart actually emits are mapped; anything else is stripped rather
+# than left to show up as a literal "[36m" in the transcript.
+_ANSI_RE = re.compile(r'\x1b\[([0-9;]*)m')
+_ANSI_STYLE = {
+    '1': {'fontWeight': 600},
+    '2': {'color': MUTED},
+    '31': {'color': ERROR},
+    '32': {'color': SYNTAX['str']},
+    '33': {'color': SYNTAX['bi']},
+    '36': {'color': SYNTAX['fn']},
+}
+
+
+def _ansi_spans(html, text):
+    """``text`` as children: plain strings, with ANSI runs wrapped in spans."""
+    if '\x1b' not in text:
+        return text
+    children, style, pos = [], {}, 0
+    for match in _ANSI_RE.finditer(text):
+        chunk = text[pos:match.start()]
+        if chunk:
+            children.append(html.Span(chunk, style=style) if style else chunk)
+        for code in (c for c in match.group(1).split(';') if c) or ['0']:
+            style = {} if code == '0' else {**style, **_ANSI_STYLE.get(code, {})}
+        pos = match.end()
+    tail = text[pos:]
+    if tail:
+        children.append(html.Span(tail, style=style) if style else tail)
+    return children
+
+
 def _entry_divs(html, entries):
     """Render the stored transcript. Rich HTML rides in an iframe.
 
@@ -703,7 +827,7 @@ def _entry_divs(html, entries):
             out.append(html.Iframe(srcDoc=text, className='term-rich',
                                    style={'height': f"{e.get('height', 320)}px"}))
         elif text:
-            out.append(html.Div(text, className='term-out'))
+            out.append(html.Div(_ansi_spans(html, text), className='term-out'))
     return out
 
 
@@ -735,7 +859,8 @@ def build_terminal_app(nb, title=None, banner=True, startup=()):
 
     app = Dash(__name__, title=board_title,
                update_title=None, suppress_callback_exceptions=True)
-    app.index_string = _index_string()
+    app.index_string = _index_string(app.config.requests_pathname_prefix)
+    _serve_icon(app, board_title)
     app.layout = html.Div([
         html.Div([
             html.Div('UC', className='term-badge'),
@@ -747,6 +872,10 @@ def build_terminal_app(nb, title=None, banner=True, startup=()):
                             className='term-btn',
                             title='Copy the current chart to the clipboard '
                                   'as a PNG'),
+                html.Button('💾 save session', id='term-save', n_clicks=0,
+                            className='term-btn',
+                            title='Download the data, formatting and current '
+                                  'plot as a session file you can reopen'),
                 html.Button('Load demo data', id='term-demo', n_clicks=0,
                             className='term-btn',
                             title='Load a three-run demo dataset'),
@@ -792,10 +921,11 @@ def build_terminal_app(nb, title=None, banner=True, startup=()):
 
         dcc.Store(id='term-entries', data=entries),
         dcc.Store(id='term-history', data=list(startup)),
+        dcc.Download(id='term-save-download'),
         html.Div(id='term-resize-sink', className='hidden'),
     ], className='term-app')
 
-    _register(app, nb, session, uploads, dcc, html, ctx,
+    _register(app, nb, session, uploads, board_title, dcc, html, ctx,
               Input, Output, State, ALL, no_update)
     return app
 
@@ -816,15 +946,18 @@ def _result_entries(result):
     return out
 
 
-def _register(app, nb, session, uploads, dcc, html, ctx,
+def _register(app, nb, session, uploads, board_title, dcc, html, ctx,
               Input, Output, State, ALL, no_update):
     """Wire the board up.
 
     One callback owns the transcript, the chart, the dataset list and the input
     box, because every trigger — submitting a command, clicking a cheat-sheet
-    chip, dropping a file, loading the demo — wants to write some subset of
-    those four. Splitting them would mean two callbacks with the same Output,
-    which Dash rejects at construction.
+    chip, dropping a file, loading the demo, saving the session — wants to write
+    some subset of those four. Splitting them would mean two callbacks with the
+    same Output, which Dash rejects at construction. Saving could have been a
+    sibling callback, since ``dcc.Download`` is an Output of its own — but then
+    it would be the one action on this board that leaves no trace in the
+    transcript.
     """
 
     @app.callback(
@@ -835,9 +968,11 @@ def _register(app, nb, session, uploads, dcc, html, ctx,
         Output('term-input', 'value'),
         Output('term-history', 'data'),
         Output('term-upload', 'contents'),
+        Output('term-save-download', 'data'),
         Input('term-submit', 'n_clicks'),
         Input('term-upload', 'contents'),
         Input('term-demo', 'n_clicks'),
+        Input('term-save', 'n_clicks'),
         Input({'type': 'term-chip', 'index': ALL}, 'n_clicks'),
         State('term-input', 'value'),
         State('term-entries', 'data'),
@@ -846,26 +981,42 @@ def _register(app, nb, session, uploads, dcc, html, ctx,
         State('term-chart', 'figure'),
         prevent_initial_call=True,
     )
-    def _dispatch(submit_n, upload_contents, demo_n, chip_clicks,
+    def _dispatch(submit_n, upload_contents, demo_n, save_n, chip_clicks,
                   source, entries, history, upload_names, current_figure):
         trigger = ctx.triggered_id
         entries = list(entries or [])
         history = list(history or [])
+        download = no_update
 
         # A chip only stages text in the input — the user still presses Enter,
         # so a mis-click is editable rather than immediately executed.
         if isinstance(trigger, dict) and trigger.get('type') == 'term-chip':
             if not any(chip_clicks or []):
-                return (no_update,) * 7
+                return (no_update,) * 8
             snippet = CHEAT_SHEET[trigger['index']][0]
             return (no_update, no_update, no_update, no_update,
-                    snippet, no_update, no_update)
+                    snippet, no_update, no_update, no_update)
 
         commands = []
         if trigger == 'term-upload':
             if not upload_contents:
-                return (no_update,) * 7
+                return (no_update,) * 8
             for contents, name in zip(upload_contents, upload_names or []):
+                try:
+                    raw = _upload_bytes(contents)
+                except Exception as exc:                  # noqa: BLE001
+                    entries.append({'kind': 'err', 'text': f'{name}: {exc}'})
+                    continue
+                path = uploads / Path(name).name
+                # A drop is not always data: a session .json or a save_png image
+                # is a whole board to restore, not a frame to read. Sniff the
+                # bytes rather than the extension — .json is both formats — and
+                # write them through untouched, since a session is not
+                # frame-shaped and a PNG would not survive a to_csv.
+                if sniff_session(raw) is not None:
+                    path.write_bytes(raw)
+                    commands.append(f'nb.load_session({str(path)!r})')
+                    continue
                 try:
                     frame = _df_from_upload(contents, name)
                 except Exception as exc:                  # noqa: BLE001
@@ -873,7 +1024,6 @@ def _register(app, nb, session, uploads, dcc, html, ctx,
                     continue
                 # Land the upload on disk so the command reads like a real
                 # load — and so re-running it from history actually works.
-                path = uploads / Path(name).name
                 frame.to_csv(path, index=False)
                 commands.append(f'nb.load({str(path)!r})')
         elif trigger == 'term-demo':
@@ -881,9 +1031,19 @@ def _register(app, nb, session, uploads, dcc, html, ctx,
             demo_frame().to_csv(path, index=False)
             commands.append(f'nb.load({str(path)!r})')
             commands.append("plot(x='time', y=['temperature', 'pressure'])")
+        elif trigger == 'term-save':
+            if not save_n or not nb.sets:
+                return (no_update,) * 8
+            # Written to the uploads dir and then handed to the browser: the
+            # board is served to a browser, so "save" has to mean a download,
+            # not a file left on whichever machine is running the server. Named
+            # after the board because the uploads dir is per *process*, and two
+            # explore() calls in one notebook share it.
+            save_path = uploads / f'{_slug(board_title)}-session.json'
+            commands.append(f'nb.save_session({str(save_path)!r})')
         else:
             if not (source or '').strip():
-                return (no_update,) * 7
+                return (no_update,) * 8
             commands.append(source.strip())
 
         figure = current_figure
@@ -896,8 +1056,11 @@ def _register(app, nb, session, uploads, dcc, html, ctx,
             if command != (history[-1] if history else None):
                 history.append(command)
 
+        if trigger == 'term-save' and save_path.exists():
+            download = dcc.send_file(str(save_path))
+
         return (entries, _entry_divs(html, entries), figure,
-                _dataset_rows(html, nb), '', history, None)
+                _dataset_rows(html, nb), '', history, None, download)
 
     # Enter runs, Shift+Enter adds a line, up/down walks history. All of it is
     # clientside: an arrow key must never cost a server round trip, and the
@@ -1168,11 +1331,109 @@ def _register(app, nb, session, uploads, dcc, html, ctx,
     )
 
 
-def terminal(nb=None, data=None, panels=None, title=None, port=8050,
-             debug=False, open_browser=None, jupyter_mode=None, **run_kwargs):
-    """Launch the terminal explorer. See :func:`unichart_dashboard.explore`."""
-    import webbrowser
+# ---------------------------------------------------------------------------
+# Standalone window
+# ---------------------------------------------------------------------------
+#
+# ``--app=URL`` is Chromium's standalone mode: no tabs, no address bar, no
+# bookmarks — a window that belongs to this board, with its own taskbar entry
+# and the page's icon on it. It is the whole desktop-app illusion for the price
+# of a subprocess, which is why the explorer reaches for it rather than for a
+# webview toolkit nobody has installed.
+#
+# Chromium-family only: Firefox dropped -app years ago, so a machine with only
+# Firefox falls back to an ordinary tab.
 
+_APP_BROWSER_COMMANDS = (
+    'google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser',
+    'brave-browser', 'microsoft-edge', 'microsoft-edge-stable', 'chrome',
+    'msedge',
+)
+
+# Where the same browsers live when they aren't on PATH, which on macOS and
+# Windows is the normal case.
+_APP_BROWSER_PATHS = (
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+    r'C:\Program Files\Google\Chrome\Application\chrome.exe',
+    r'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
+    r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe',
+    r'C:\Program Files\Microsoft\Edge\Application\msedge.exe',
+    r'C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe',
+)
+
+APP_WINDOW_SIZE = (1440, 920)
+
+
+def _app_browser():
+    """Path to a browser that can open a standalone window, or None.
+
+    ``UNICHART_APP_BROWSER`` overrides the search — a name on PATH or a full
+    path — for the Chromium build this list doesn't know about.
+    """
+    override = os.environ.get('UNICHART_APP_BROWSER')
+    if override:
+        return shutil.which(override) or (override if os.path.exists(override)
+                                          else None)
+    for name in _APP_BROWSER_COMMANDS:
+        found = shutil.which(name)
+        if found:
+            return found
+    for path in _APP_BROWSER_PATHS:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _browser_launcher(url, app_window):
+    """A no-arg callable that opens ``url`` once the server is up.
+
+    The browser is resolved here rather than inside the callable so that the
+    "no Chromium found" note prints next to the URL, at launch, instead of
+    surfacing a second later out of a timer thread.
+    """
+    if app_window:
+        browser = _app_browser()
+        if browser is None:
+            # Told which browser to use and it isn't there: naming the value
+            # back is the whole answer, where the generic note would advise
+            # setting the variable that is already set.
+            override = os.environ.get('UNICHART_APP_BROWSER')
+            if override:
+                print(f'unichart: UNICHART_APP_BROWSER={override!r} is not a '
+                      'browser I can start; opening a normal browser tab '
+                      'instead')
+            else:
+                print('unichart: no Chromium-family browser found for the app '
+                      'window (Chrome, Chromium, Brave or Edge — or set '
+                      'UNICHART_APP_BROWSER); opening a normal browser tab '
+                      'instead')
+        else:
+            # No --user-data-dir on purpose: reusing the running browser opens
+            # the window instantly and skips the first-run chrome a cold
+            # profile drags in. The cost is that this process can't tell when
+            # the window closes, so the server still stops with Ctrl-C.
+            argv = [browser, f'--app={url}',
+                    '--window-size={},{}'.format(*APP_WINDOW_SIZE)]
+            return lambda: _spawn(argv, url)
+    return lambda: webbrowser.open(url)
+
+
+def _spawn(argv, url):
+    """Start the browser detached, falling back to a normal tab if it won't."""
+    try:
+        subprocess.Popen(argv, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    except OSError:                                       # noqa: BLE001
+        webbrowser.open(url)
+
+
+def terminal(nb=None, data=None, sessions=None, panels=None, title=None,
+             port=8050, debug=False, open_browser=None, app_window=False,
+             jupyter_mode=None, dark=None, **run_kwargs):
+    """Launch the terminal explorer. See :func:`unichart_dashboard.explore`."""
     from unichart_dashboard import _in_notebook
 
     if nb is None:
@@ -1185,26 +1446,43 @@ def terminal(nb=None, data=None, panels=None, title=None, port=8050,
     startup = []
     if data is not None:
         nb.load(data)
+    # Sessions restore as startup commands rather than here, for three reasons:
+    # the restore lands in the transcript like every other action on this board;
+    # the plot call it replays paints the chart pane, which otherwise opens blank
+    # because it is only ever seeded from a startup result; and it runs after the
+    # dark flip above, so a session saved in light mode keeps its theme.
+    for path in ([sessions] if isinstance(sessions, (str, Path)) else sessions or []):
+        startup.append(f'nb.load_session({str(path)!r})')
+    # ...which is also why an explicit dark=True has to be re-asserted here: the
+    # session would otherwise overwrite it on its way back in.
+    if dark is not None and sessions:
+        startup.append(f'nb.toggle_darkmode({bool(dark)!r})')
     for panel in panels or []:
         startup.append(_panel_command(panel))
 
     app = build_terminal_app(nb, title=title, startup=[c for c in startup if c])
 
     in_notebook = _in_notebook()
+    # A standalone window is a browser window either way, so asking for one
+    # from a kernel means the external board rather than the inline iframe.
+    standalone = app_window or not in_notebook
     if jupyter_mode is None:
-        jupyter_mode = 'inline' if in_notebook else 'external'
-    if jupyter_mode == 'inline' and 'jupyter_height' not in run_kwargs:
-        run_kwargs['jupyter_height'] = 860
+        jupyter_mode = 'external' if standalone else 'inline'
+    if jupyter_mode == 'inline':
+        # An explicit inline mode wins: the iframe resolves its own URL, so
+        # nothing below applies to it — app_window included.
+        standalone = False
+        run_kwargs.setdefault('jupyter_height', 860)
     if open_browser is None:
-        open_browser = not in_notebook
+        open_browser = standalone
 
     port = _pick_port(port)
-    if not in_notebook:
+    if standalone:
         url = f'http://127.0.0.1:{port}/'
         print(f'unichart terminal: {url}')
         if open_browser:
-            threading.Timer(1.0, lambda: webbrowser.open(url)).start()
-        # Pinned explicitly outside a kernel: the terminal executes arbitrary
+            threading.Timer(1.0, _browser_launcher(url, app_window)).start()
+        # Pinned explicitly off the inline path: the terminal executes arbitrary
         # Python, so the board is for this machine only. Inside a kernel the
         # host is left to Dash — its inline mode resolves the iframe's URL
         # itself, and forcing a host there yields a blank frame. Dash already

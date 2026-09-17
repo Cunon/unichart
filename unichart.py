@@ -54,6 +54,7 @@ import functools
 import gc
 import json
 import os
+import sys
 import base64
 import struct
 import zlib
@@ -4362,6 +4363,45 @@ def read_png_session(path):
     return json.loads(text) if text else None
 
 
+# How much of a non-PNG file to look at when sniffing. json.dump writes keys in
+# insertion order and _build_session sets 'unichart_session' first, so the marker
+# is always in the opening bytes of a file this library wrote.
+_SESSION_SNIFF_BYTES = 8192
+
+
+def sniff_session(source):
+    """``'png'``, ``'json'`` or None for a session file — by path or by bytes.
+
+    The cheap "is this a session?" question, for callers dispatching a file the
+    user handed over: the ``unichart`` command deciding between :meth:`load` and
+    :meth:`load_session`, or the explorer's drop zone deciding between a data
+    frame and a restore. Answers without parsing a possibly huge file: a PNG is
+    identified by its signature and its text chunk, a JSON by the
+    ``"unichart_session"`` marker in the opening bytes.
+
+    That marker check is positional, so a session file whose keys have been
+    re-ordered by hand sniffs as ``None`` — it then takes the ordinary data
+    path, which is what happens today, rather than failing. Never raises:
+    anything unreadable, half-typed or not a session is None.
+    """
+    try:
+        if isinstance(source, (bytes, bytearray)):
+            head = bytes(source[:_SESSION_SNIFF_BYTES])
+            data = bytes(source)
+        else:
+            with open(source, 'rb') as fh:
+                head = fh.read(_SESSION_SNIFF_BYTES)
+            data = None
+        if head.startswith(_PNG_SIGNATURE):
+            if data is None:
+                with open(source, 'rb') as fh:
+                    data = fh.read()
+            return 'png' if png_read_text(data, _PNG_SESSION_KEYWORD) else None
+        return 'json' if b'"unichart_session"' in head else None
+    except Exception:                                         # noqa: BLE001
+        return None
+
+
 class UnichartNotebook:
     """Interactive multi-dataset plotting environment for notebooks.
 
@@ -4852,9 +4892,63 @@ class UnichartNotebook:
         ".parquet": lambda path, kw: pd.read_parquet(path, **kw),
     }
 
-    def load(self, source, title=None, set_name_column=None, set_idx_column=None,
+    @classmethod
+    def _pick_files(cls):
+        """Open the OS file-chooser and return the selected paths as a tuple.
+
+        Returns an empty tuple when the dialog is cancelled. Raises
+        ``RuntimeError`` when no dialog can be opened at all — tkinter missing
+        (Pyodide, or Debian/Ubuntu without ``python3-tk``) or no display
+        (a headless server) — since the caller asked for a picker and silently
+        loading nothing would be the more confusing outcome.
+
+        tkinter is imported lazily: unichart imports fine without it, and only
+        this method needs it.
+        """
+        try:
+            import tkinter
+            from tkinter import filedialog
+        except ImportError:
+            raise RuntimeError(
+                "load() needs tkinter to open a file browser (install it with "
+                "e.g. 'sudo apt install python3-tk', or pass a filepath: "
+                "load('data.csv')).") from None
+
+        patterns = " ".join(f"*{ext}" for ext in cls._FILE_READERS)
+        root = None
+        try:
+            root = tkinter.Tk()
+            root.withdraw()
+            # Without this the dialog can open behind the browser window when
+            # called from a Jupyter kernel.
+            root.attributes('-topmost', True)
+            paths = filedialog.askopenfilenames(
+                parent=root, title="Select data file(s) to load",
+                filetypes=[("Data files", patterns), ("All files", "*.*")])
+        except tkinter.TclError as e:
+            raise RuntimeError(
+                f"load() could not open a file browser ({e}); no display is "
+                f"available. Pass a filepath instead: load('data.csv').") from None
+        finally:
+            if root is not None:
+                # Leaving the root alive hangs the *next* dialog in the same
+                # kernel, so tear it down even when the dialog raised.
+                try:
+                    root.update()
+                    root.destroy()
+                except Exception:
+                    pass
+
+        # Cancel gives '' on some platforms and () on others.
+        return tuple(paths) if paths else ()
+
+    def load(self, source=None, title=None, set_name_column=None, set_idx_column=None,
              load_cols_as_vars=False, combined=False, read_kwargs=None):
         """Load datasets from DataFrames, filepaths, dicts, or numpy arrays.
+
+        Called with no ``source`` (or ``source=None``), opens the OS file
+        browser and loads whatever is picked there — several files at once is
+        fine, and cancelling loads nothing.
 
         ``source`` may be a single item or a list of items; each is coerced to a DataFrame
         and loaded via load_df. Supported files: .csv, .tsv, .txt, .xlsx, .xls, .json, .parquet
@@ -4862,6 +4956,12 @@ class UnichartNotebook:
         merges everything into one set while ``combined=False`` loads each separately. A file's
         title defaults to its filename when no title or SETNUMBER/INDEX split column is present.
         """
+        if source is None:
+            source = self._pick_files()
+            if not source:
+                print("No files selected.")
+                return
+
         sources = list(source) if isinstance(source, (list, tuple)) else [source]
         coerced = [self._coerce_to_df(s, read_kwargs) for s in sources]
 
@@ -5105,6 +5205,10 @@ class UnichartNotebook:
         and the path relative to the session file, so a session moved
         together with its data files still loads.
 
+        The most recent plotting call is recorded too, so ``load_session``
+        replays it and the figure comes back with the data — the same thing
+        :meth:`save_png` embeds in a PNG.
+
         Parameters
         ----------
         path : str | Path
@@ -5120,8 +5224,9 @@ class UnichartNotebook:
         parms : str | list of str, optional
             Whitelist of columns to embed. By default an embedded set stores
             every column it owns; with a whitelist only these columns (plus
-            any a set's query, hue or style needs, added automatically) are
-            written, which keeps sessions small when the data is wide. Has no
+            any a set's query, hue, style or recorded plot call needs, added
+            automatically) are written, which keeps sessions small when the
+            data is wide. Has no
             effect on file-referenced sets, which re-read the whole file. A
             set with none of the columns is skipped with a warning.
 
@@ -5134,10 +5239,17 @@ class UnichartNotebook:
         saved as expressions and re-run on load.
         """
         path = Path(path)
-        session, stats = self._build_session(embed_data, path, parms=parms)
+        session, stats = self._build_session(embed_data, path,
+                                             plot_call=self._last_plot_call,
+                                             parms=parms)
         with open(path, 'w') as fh:
             json.dump(session, fh, indent=1, default=self._session_json_default)
-        print(f"Saved session to {path}: " + self._session_summary(stats))
+        print(f"Saved session to {path}: " + self._session_summary(stats)
+              + self._plot_call_note())
+
+    def _plot_call_note(self):
+        """The hint both session writers append when there is no plot to replay."""
+        return "" if self._last_plot_call else "; no plot call recorded"
 
     @staticmethod
     def _session_summary(stats):
@@ -5254,7 +5366,7 @@ class UnichartNotebook:
         """Restore a session saved by :meth:`save_session` — or embedded in a
         PNG by :meth:`save_png` — reload every set from its file reference or
         embedded data, then reapply titles, queries, select flags and all
-        formatting. For a PNG, the plot call stored with it is then replayed
+        formatting. The plot call stored with the session is then replayed
         (``replay=True``) so the figure comes back as ``last_fig`` and is
         displayed.
 
@@ -5276,10 +5388,13 @@ class UnichartNotebook:
             sizes, ...). Default True; pass False to keep the current
             notebook-level settings and only load the sets.
         replay : bool
-            When the session records a plot call (PNGs from :meth:`save_png`
-            do), call that plotting method again with the same arguments after
-            restoring. The figure is displayed and cached as ``last_fig``.
-            Pass False to only restore the data and formatting.
+            When the session records a plot call (both :meth:`save_session`
+            and :meth:`save_png` record the last one), call that plotting
+            method again with the same arguments after restoring. The figure is
+            displayed and cached as ``last_fig``. A call that will not replay —
+            a kwarg JSON could not round-trip, say — warns and leaves the
+            restored data and formatting in place. Pass False to only restore
+            the data and formatting.
 
         Returns the list of Datasets created.
         """
@@ -5308,9 +5423,19 @@ class UnichartNotebook:
                 print(f"Warning: cannot replay unknown plot method {call['method']!r}")
             else:
                 kwargs = dict(call.get('kwargs') or {})
-                result = method(**kwargs)
-                if result is not None and _display_renders():
-                    display(result)
+                try:
+                    result = method(**kwargs)
+                except Exception as exc:                      # noqa: BLE001
+                    # JSON has no type for a tuple limit or a numpy scalar, and
+                    # _session_json_default falls back to str(o) — so a kwarg can
+                    # come back as something the method won't take. The data and
+                    # formatting are already restored and are what matter; warn
+                    # the way a missing source file does rather than losing them
+                    # to a traceback.
+                    print(f"Warning: could not replay {call['method']}(): {exc}")
+                else:
+                    if result is not None and _display_renders():
+                        display(result)
         return created
 
     @classmethod
@@ -10954,34 +11079,133 @@ class UnichartNotebook:
         with open(filename, 'wb') as fh:
             fh.write(png_embed_text(data, _PNG_SESSION_KEYWORD, text))
         return (" (session embedded: " + self._session_summary(stats)
-                + ("" if self._last_plot_call else "; no plot call recorded") + ")")
+                + self._plot_call_note() + ")")
 
-    def list_sets(self, search=None):
+    def list_sets(self, search=None, output=None):
         """
-        Display a table of all loaded datasets (styled HTML: sortable,
+        Display a table of the loaded datasets (styled HTML: sortable,
         filterable, copyable — same look as :meth:`table`).
 
-        With a ``search`` substring, instead lists the parameters matching
-        it across *all* loaded sets, with a column showing which sets own
-        each parameter (delegates to :meth:`list_parms`).
-        """
-        if search is not None:
-            return self.list_parms(set_number='all', search_string=search)
+        ``search`` doubles as a set selector: pass a dataset selector — an
+        int, a ``slice``/``range``, range shorthand such as ``'1:4'`` or
+        ``'0,3,7:'``, a :class:`Dataset`, ``'all'``, or a list of those — and
+        only those sets are listed. Pass any *other* string and it is taken
+        as a parameter search instead, listing the parameters matching it
+        across all loaded sets (delegates to :meth:`list_parms`).
 
-        if not self.sets:
-            print("No datasets loaded.")
+        The int/string split follows the rest of the library (see
+        :meth:`_get_uset_slice`): titles are never selectors, and a bare
+        numeric string stays a parameter name — so ``list_sets(2)`` shows set
+        2 while ``list_sets('2')`` searches parameters for '2'.
+
+        Parameters
+        ----------
+        search : int, str, slice, range, Dataset or list, optional
+            A dataset selector narrows the table to those sets; any other
+            string searches the parameters of all loaded sets instead (on
+            that path ``output`` does not apply — :meth:`list_parms` returns
+            its parameter names).
+        output : {None, 'df', 'md', 'fig'}, optional
+            What to return, following :meth:`table` and :meth:`summary`:
+
+            - ``None`` (default): display the styled HTML table and return
+              ``None``.
+            - ``'df'``: return the listed sets as a :class:`pandas.DataFrame`
+              with raw, unformatted values — ``Selected`` is a real ``bool``
+              and the shape is split into integer ``Rows`` / ``Cols`` columns
+              (the display path renders these as ``✓``/``✗`` and
+              ``"rows x cols"``). Nothing is displayed.
+            - ``'md'``: return a GitHub-flavored Markdown string.
+            - ``'fig'``: return the styled Plotly ``go.Figure`` (a
+              ``go.Table``), with dark-mode already applied.
+
+        Examples
+        --------
+        Work with the set table as data, or narrow it to a few sets::
+
+            df = chart.list_sets(output='df')
+            df[df['Selected']]['Title'].tolist()
+
+            chart.list_sets('0,3:5')        # sets 0, 3 and 4
+            chart.list_sets(-1, output='df')
+        """
+        if output not in (None, 'df', 'md', 'fig'):
+            print("output must be one of None, 'df', 'md' or 'fig'.")
             return
 
+        # A selector narrows the sets listed; any other string means the
+        # caller wants a parameter search (_var_targets draws the same line
+        # the formatting setters do).
+        title = "Loaded Datasets"
+        if search is None:
+            target_sets = list(self.sets)
+        elif self._var_targets(search) is not None:
+            return self.list_parms(set_number='all', search_string=search)
+        else:
+            target_sets = self._get_uset_slice(search)
+            if target_sets and len(target_sets) < len(self.sets):
+                # Name the sets actually listed, not the selector's spelling —
+                # a list of Dataset objects would repr badly.
+                title = ("Loaded Datasets: set"
+                         f"{'' if len(target_sets) == 1 else 's'} "
+                         f"{_compact_indices(ds.index for ds in target_sets)}")
+
+        columns = ["Set", "Title", "Selected", "Rows", "Cols", "Query"]
+
+        if not target_sets:
+            if output is None:
+                print("No datasets loaded." if not self.sets else
+                      f"No datasets match selector {search!r}.")
+                return
+            empty = pd.DataFrame(columns=columns)
+            empty = empty.astype({"Selected": bool, "Rows": int, "Cols": int})
+            if output == 'df':
+                return empty
+            return self._list_sets_render(empty, output, title)
+
         rows = []
-        for ds in self.sets:
-            selected = "✓" if ds.select else "✗"
+        for ds in target_sets:
             # Shape from cached row positions and own-column count — no
             # full-width materialization.
-            shape = f"{len(ds._masked_positions())} x {len(ds._own_col_positions())}"
-            rows.append([ds.index, ds.title, selected, shape, str(ds.query)])
+            rows.append([ds.index, ds.title, bool(ds.select),
+                         len(ds._masked_positions()), len(ds._own_col_positions()),
+                         ds.query])
 
-        df = pd.DataFrame(rows, columns=["Set", "Title", "Selected", "Shape", "Query"])
-        self._display_html_table(df, title="Loaded Datasets")
+        df = pd.DataFrame(rows, columns=columns)
+        # Keep ``Query`` as plain objects so an unfiltered set stays ``None``
+        # rather than being coerced to NaN by the string dtype.
+        df["Query"] = pd.Series([r[-1] for r in rows], dtype=object)
+
+        if output == 'df':
+            return df
+
+        return self._list_sets_render(df, output, title)
+
+    def _list_sets_render(self, df, output, title="Loaded Datasets"):
+        """
+        Turn the raw frame built by :meth:`list_sets` into its display form
+        (``✓``/``✗``, ``"rows x cols"``) and emit it per ``output``.
+        """
+        display_df = pd.DataFrame({
+            "Set": df["Set"],
+            "Title": df["Title"],
+            "Selected": df["Selected"].map(lambda s: "✓" if s else "✗"),
+            "Shape": [f"{r} x {c}" for r, c in zip(df["Rows"], df["Cols"])],
+            "Query": df["Query"].map(str),
+        })
+
+        if output == 'md':
+            try:
+                return display_df.to_markdown(index=False)
+            except ImportError:
+                print("Markdown output requires the 'tabulate' package "
+                      "(pip install tabulate).")
+                return
+
+        if output == 'fig':
+            return self._build_table_figure(display_df, title=title)
+
+        self._display_html_table(display_df, title=title)
 
     def list_parms(self, set_number=None, search_string=None, use_regex=False):
         """
@@ -11309,7 +11533,11 @@ class UnichartNotebook:
         """Two-line overview entry: signature + first docstring line."""
         doc = inspect.getdoc(func)
         preview = doc.split('\n')[0] if doc else "No description available."
-        print(f"  • {name}{self._help_sig(name)}")
+        # The preview is one docstring line, so its ``literals`` get the same
+        # treatment as the full docstring in help('<name>').
+        preview = _DOC_LITERAL_RE.sub(
+            lambda m: _hc(m.group(0)[2:-2], 'lit'), preview)
+        print(f"  • {_hc(name, 'name')}{_hc(self._help_sig(name), 'sig')}")
         print(f"      → {preview}")
 
     @staticmethod
@@ -11317,7 +11545,7 @@ class UnichartNotebook:
         s = str(val)
         if len(s) > 100:
             s = s[:100] + "..."
-        return f"  • {name}: {type(val).__name__} = {s}"
+        return f"  • {_hc(name, 'name')}: {type(val).__name__} = {s}"
 
     def _help_topic(self, key):
         """Detailed help for a single method or a category (see :meth:`help`)."""
@@ -11325,13 +11553,14 @@ class UnichartNotebook:
         func = getattr(cls, key, None)
         if callable(func) and not key.startswith('_'):
             print("=" * 70)
-            print(f"📖 {key}{self._help_sig(key)}")
+            print(f"📖 {_hc(key, 'name')}{_hc(self._help_sig(key), 'sig')}")
             print("=" * 70)
-            print(inspect.getdoc(func) or "No description available.")
+            print(_color_docstring(inspect.getdoc(func)
+                                  or "No description available."))
             return
         for label, names in self._HELP_CATEGORIES:
             if key.lower() == label.lower():
-                print(f"📂 {label}")
+                print("📂 " + _hc(label, 'head'))
                 print("-" * 70)
                 for n in names:
                     f = getattr(cls, n, None)
@@ -11357,46 +11586,58 @@ class UnichartNotebook:
             overview. A method name (e.g. ``'delta'``) prints that method's full
             signature and docstring; a category name (e.g. ``'Plotting'``) lists
             just that group. An unknown topic suggests the closest matches.
+
+        Notes
+        -----
+        Headings, category labels, method names and signatures are colored with
+        ANSI wherever that renders: a terminal, a Jupyter kernel, and the
+        explorer's web terminal (which turns the codes into styled spans). A
+        method's docstring is painted too — its section headings, parameter
+        names and types, and its ``literals``, whose backticks the color
+        replaces.
+        Output that is piped or redirected stays plain. ``NO_COLOR=1`` turns it
+        off; ``unichart._HELP_COLOR = True/False`` forces it either way.
         """
         if topic is not None:
             self._help_topic(str(topic).strip())
             return
 
         print("=" * 70)
-        print("📚 UnichartNotebook HELP")
+        print(_hc("📚 UnichartNotebook HELP", 'head'))
         print("=" * 70)
 
         cls = self.__class__
         doc = inspect.getdoc(cls)
         if doc:
-            print("\n📋 CLASS DESCRIPTION:")
-            print(doc)
+            print("\n" + _hc("📋 CLASS DESCRIPTION:", 'head'))
+            print(_color_docstring(doc))
 
         # Methods, grouped. Anything not mapped falls into "Other" via
         # set-difference so nothing is ever hidden.
         public = {n: f for n, f in inspect.getmembers(cls, inspect.isfunction)
                   if not n.startswith('_')}
-        print("\n🔍 PUBLIC METHODS  (call nb.help('name') for full details):")
+        print("\n" + _hc("🔍 PUBLIC METHODS  (call nb.help('name') for "
+                          "full details):", 'head'))
         print("-" * 70)
         shown = set()
         for label, names in self._HELP_CATEGORIES:
             entries = [n for n in names if n in public]
             if not entries:
                 continue
-            print(f"\n{label}")
+            print("\n" + _hc(label, 'label'))
             for n in entries:
                 self._help_method_line(n, public[n])
                 shown.add(n)
         leftover = sorted(set(public) - shown)
         if leftover:
-            print("\nOther")
+            print("\n" + _hc("Other", 'label'))
             for n in leftover:
                 self._help_method_line(n, public[n])
 
         # Attributes, split into user-facing config vs internal plot memory
         # (the volatile ``last_*`` cache). The rule is prefix-based rather than a
         # fixed list, so a new attribute defaults to Config and stays visible.
-        print("\n🛠️  ATTRIBUTES:")
+        print("\n" + _hc("🛠️  ATTRIBUTES:", 'head'))
         print("-" * 70)
         attrs = {a: v for a, v in self.__dict__.items() if not a.startswith('_')}
         if not attrs:
@@ -11405,15 +11646,15 @@ class UnichartNotebook:
             config = {a: v for a, v in attrs.items() if not a.startswith('last_')}
             state = {a: v for a, v in attrs.items() if a.startswith('last_')}
             if config:
-                print("\nConfig")
+                print("\n" + _hc("Config", 'label'))
                 for name in sorted(config):
                     print(self._help_attr_line(name, config[name]))
             if state:
-                print("\nState (last-plot memory)")
+                print("\n" + _hc("State (last-plot memory)", 'label'))
                 for name in sorted(state):
                     print(self._help_attr_line(name, state[name]))
 
-        print("\n💡 QUICK START:")
+        print("\n" + _hc("💡 QUICK START:", 'head'))
         print("-" * 70)
         print("1. Load data:       nb.load_df(df, title='MyData')")
         print("2. Select datasets: nb.select([0, 1])")
@@ -11538,3 +11779,224 @@ class UnichartNotebook:
                                       opacity=h['alpha'], layer=highlight_layer, line_width=0)
 
         return fig
+
+# ======================================================================
+# new_uc — one-call notebook factory
+# ======================================================================
+
+class _Auto:
+    """Sentinel for a ``new_uc`` knob left alone: the value is decided by the
+    plot style (``markersize``, ``hue_palette``, ``color_map``, ``marker_map``)
+    or differs per plot method (``alpha``, ``barmode``), so there is no single
+    literal that could sit in the signature without being wrong somewhere.
+    Renders as ``auto`` in ``help(new_uc)``."""
+    __slots__ = ()
+    def __repr__(self):
+        return 'auto'
+
+
+AUTO = _Auto()
+
+
+def new_uc(
+    # ---- overall look ------------------------------------------------
+    plot_style='matplotlib',
+    darkmode=False,
+    color_map=AUTO,
+    marker_map=AUTO,
+    # ---- per-dataset styles (applied to datasets as they load) -------
+    # Sourced from _DATASET_FORMAT_DEFAULTS rather than retyped, so these can
+    # never drift out of sync with the constructor. Signature defaults are
+    # evaluated at def time, so help(new_uc) still shows the literal values.
+    marker='map',                                      # _MARKER_BY_INDEX, as the API spells it
+    markersize=AUTO,
+    linestyle=_DATASET_FORMAT_DEFAULTS['linestyle'],
+    linewidth=_DATASET_FORMAT_DEFAULTS['linewidth'],
+    edgewidth=_DATASET_FORMAT_DEFAULTS['edgewidth'],
+    edge_color=_DATASET_FORMAT_DEFAULTS['edge_color'],
+    alpha=AUTO,
+    alpha_marker=_DATASET_FORMAT_DEFAULTS['alpha_marker'],
+    alpha_line=_DATASET_FORMAT_DEFAULTS['alpha_line'],
+    fill=_DATASET_FORMAT_DEFAULTS['fill'],
+    hue_palette=AUTO,
+    # ---- figure / per-call plot defaults -----------------------------
+    figsize=(12, 8),
+    legend='above',
+    suppress_legends=False,
+    legend_scroll=True,
+    ncols=None,
+    nrows=None,
+    hspace=None,
+    vspace=None,
+    barmode=AUTO,
+    agg='mean',
+    histfunc='sum',
+    histnorm='',
+    boxmode='group',
+    points='outliers',
+    # ---- fonts, decorations, plot area -------------------------------
+    font_sizes=None,
+    suptitle=None,
+    footer=None,
+    plot_size=None,
+    plot_size_per_subplot=True,
+    # ---- output ------------------------------------------------------
+    static_images=False,
+    static_scale=2,
+    copy_buttons=True,
+    # ---- data --------------------------------------------------------
+    data=None,
+    **load_kwargs,
+):
+    """Return a configured :class:`UnichartNotebook` in one call.
+
+    Every keyword is a *preset*: its default is unichart's current built-in, so
+    ``new_uc()`` is equivalent to ``UnichartNotebook()`` and the signature
+    doubles as the list of what those built-ins are. Override any of them to
+    start a notebook already styled the way you want, instead of following the
+    constructor with a run of ``set_*`` calls::
+
+        nb = new_uc()                                  # today's defaults
+        nb = new_uc(plot_style='plotly', darkmode=True) # dark plotly look
+        nb = new_uc(markersize=5, linewidth=1, figsize=(10, 6), legend='right')
+        nb = new_uc(data=df, set_name_column='ENGINE')  # styled, then loaded
+
+    Settings are applied in dependency order — style first (it installs its own
+    palette and format defaults), then palettes, then the format and per-call
+    defaults, and ``data`` last, so loaded datasets pick up the finished look.
+
+    Parameters
+    ----------
+    plot_style : 'matplotlib' | 'plotly'
+        Overall look. Installs the style's ``color_map``, its ``markersize`` /
+        ``hue_palette``, and its font-size fallbacks — which is why those knobs
+        default to ``auto`` rather than a literal.
+    darkmode : bool
+        Dark or light variant of the style.
+    color_map, marker_map : list
+        Per-index color / marker sequences. ``auto`` keeps the style's own
+        (matplotlib: the mpl color cycle; plotly: ``px.colors.qualitative.Plotly``).
+    marker, markersize, linestyle, linewidth, edgewidth, edge_color, alpha,
+    alpha_marker, alpha_line, fill, hue_palette
+        Per-dataset styles, exactly as :meth:`UnichartNotebook.set_default_format`
+        takes them. ``markersize`` and ``hue_palette`` are style-owned
+        (matplotlib: 8.3 / 'Viridis'; plotly: 10 / 'Jet'). ``alpha`` is ``auto``
+        because it is double-booked: it sets the per-dataset opacity (built-in 1)
+        *and* the histogram / marginal-strip opacity (built-in 0.7), so passing a
+        value changes both.
+    figsize, legend, suppress_legends, legend_scroll, ncols, nrows, hspace,
+    vspace, barmode, agg, histfunc, histnorm, boxmode, points
+        Figure and per-call plot defaults, as in ``set_default_format``. An
+        explicit argument to a plot method still wins over any of them.
+        ``barmode`` is ``auto`` because its built-in differs per method
+        (``bar`` 'group', ``histogram`` 'overlay'); setting it pins both.
+    font_sizes : dict, optional
+        Forwarded to :meth:`UnichartNotebook.set_font_sizes`, e.g.
+        ``{'all': 16, 'suptitle': 24}``. ``None`` keeps the style's fallbacks.
+    suptitle, footer : str, optional
+        Standing figure title / footnote (the ``suptitle`` and ``footer``
+        attributes), used whenever a plot call doesn't pass its own.
+    plot_size : (width, height), optional
+        Pin the plot area, in inches, via :meth:`set_plot_size`. Either element
+        may be ``None`` to leave that dimension free. Distinct from ``figsize``,
+        which sizes the whole figure.
+    plot_size_per_subplot : bool
+        Whether ``plot_size`` sizes one panel (default) or the whole grid.
+    static_images : bool
+        Render plots as flat PNGs instead of interactive figures (needs kaleido).
+    static_scale : float
+        Resolution multiplier for those PNGs.
+    copy_buttons : bool
+        Show the copy-to-clipboard button on interactive plots.
+    data : DataFrame, optional
+        Loaded with ``nb.load_df(data, **load_kwargs)`` *after* everything above,
+        so the datasets are styled by the presets.
+    **load_kwargs
+        Remaining keywords go to ``load_df`` (``set_name_column=``,
+        ``set_idx_column=``, ...). Passing any without ``data`` is an error,
+        which is also how a misspelled preset name gets caught.
+
+    Returns
+    -------
+    UnichartNotebook
+
+    See Also
+    --------
+    uc_defaults : the same presets as a plain dict.
+    UnichartNotebook.set_default_format : change these on an existing notebook.
+    """
+    if load_kwargs and data is None:
+        raise TypeError(
+            f"new_uc() got unexpected keyword argument(s) {sorted(load_kwargs)}. "
+            f"Load arguments are only accepted alongside data=; for a preset, "
+            f"check the spelling against uc_defaults().")
+
+    nb = UnichartNotebook()
+
+    # Style first: _apply_style_defaults overwrites color_map and the
+    # style-owned default_format entries, so anything set before it is lost.
+    if plot_style != nb.plot_style:
+        nb.set_plot_style(plot_style)
+    if bool(darkmode) != nb.darkmode:
+        nb.toggle_darkmode(bool(darkmode))
+
+    if color_map is not AUTO:
+        nb.color_map = list(color_map)
+    if marker_map is not AUTO:
+        nb.marker_map = list(marker_map)
+
+    # One set_default_format call so a bad value fails before anything else is
+    # touched. AUTO knobs are dropped; the rest pass None through harmlessly
+    # (set_default_format reads None as "leave unchanged", and for these that
+    # is also the built-in).
+    fmt = {
+        'marker': marker, 'markersize': markersize, 'linestyle': linestyle,
+        'linewidth': linewidth, 'edgewidth': edgewidth, 'edge_color': edge_color,
+        'alpha': alpha, 'alpha_marker': alpha_marker, 'alpha_line': alpha_line,
+        'fill': fill, 'hue_palette': hue_palette,
+        'figsize': figsize, 'legend': legend, 'suppress_legends': suppress_legends,
+        'legend_scroll': legend_scroll, 'ncols': ncols, 'nrows': nrows,
+        'hspace': hspace, 'vspace': vspace, 'barmode': barmode, 'agg': agg,
+        'histfunc': histfunc, 'histnorm': histnorm, 'boxmode': boxmode,
+        'points': points,
+    }
+    nb.set_default_format(**{k: v for k, v in fmt.items() if v is not AUTO})
+
+    if font_sizes:
+        nb.set_font_sizes(**font_sizes)
+    if suptitle is not None:
+        nb.suptitle = suptitle
+    if footer is not None:
+        nb.footer = footer
+    if plot_size is not None:
+        if not isinstance(plot_size, (tuple, list)) or len(plot_size) != 2:
+            raise ValueError("plot_size must be a (width, height) tuple in "
+                             f"inches, got {plot_size!r}")
+        nb.set_plot_size(plot_size[0], plot_size[1],
+                         per_subplot=plot_size_per_subplot)
+
+    if bool(static_images) != nb.static_images or static_scale != nb.static_scale:
+        nb.set_static_images(static_images, scale=static_scale)
+    if bool(copy_buttons) != nb.copy_buttons:
+        nb.set_copy_buttons(copy_buttons)
+
+    if data is not None:
+        nb.load_df(data, **load_kwargs)
+    return nb
+
+
+def uc_defaults():
+    """Return ``new_uc``'s presets — every setting and the built-in it defaults
+    to — as a plain dict. The values are read off the signature, so this is the
+    same list ``new_uc()`` applies, with ``auto`` for the style-dependent ones.
+
+    Handy for seeing what unichart's current defaults are, and for building a
+    named preset on top of them::
+
+        report = {**uc_defaults(), 'figsize': (10, 6), 'markersize': 5}
+        report.pop('data')
+        nb = new_uc(**report)
+    """
+    return {name: p.default
+            for name, p in inspect.signature(new_uc).parameters.items()
+            if p.kind is not inspect.Parameter.VAR_KEYWORD}

@@ -24,8 +24,10 @@ dependencies = [
 trend = ["statsmodels"]
 # Interactive web dashboards (unichart_dashboard.dashboard / nb.dashboard)
 dashboard = ["dash"]
+# High-resolution PNG export (nb.save_png), which renders through kaleido
+png = ["kaleido"]
 # Everything
-all = ["statsmodels", "dash"]
+all = ["statsmodels", "dash", "kaleido"]
 
 [project.scripts]
 # `unichart` on PATH after install: opens the explorer GUI on a data file.
