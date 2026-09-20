@@ -62,6 +62,120 @@ from datetime import datetime
 from pathlib import Path
 
 # -----------------------------------------------------------------------------
+# Help coloring
+# -----------------------------------------------------------------------------
+# ``help()`` prints ANSI so one code path serves every front end: a real
+# terminal renders it, the explorer's web terminal converts it to spans, and
+# anything that can't gets plain text. The ~10 lines of gating are duplicated
+# from unichart_cli rather than imported — the CLI depends on this module, not
+# the other way round.
+#
+# _HELP_COLOR is the override the explorer terminal sets: it runs commands under
+# redirect_stdout, so auto-detection there would always see "not a tty".
+_HELP_COLOR = None                      # None = auto, True/False = forced
+
+try:
+    from IPython import get_ipython as _get_ipython
+except ImportError:                     # plain script / Pyodide
+    _get_ipython = None
+
+_HELP_ANSI = {
+    'head': '\033[1;33m',               # section headings
+    'label': '\033[1m',                 # category / group labels
+    'name': '\033[36m',                 # method and attribute names
+    'sig': '\033[2m',                   # signatures, types, section underlines
+    'lit': '\033[32m',                  # ``literals`` in a docstring
+    'off': '\033[0m',
+}
+
+# Docstring structure, numpydoc-style: a heading is any line underlined with
+# dashes, a parameter is `name : type` at the left margin, and ``...`` marks a
+# literal. Painting is line-at-a-time and never nested — an inner reset would
+# cut a heading's color short halfway through the line.
+#
+# A literal's backticks are dropped when it is painted: the color already says
+# "this is code", and the markup is noise on screen. Uncolored output keeps
+# them, so piped text stays the docstring as written.
+_DOC_RULE_RE = re.compile(r'^-{3,}\s*$')
+_DOC_PARAM_RE = re.compile(r'^([A-Za-z_*][\w, *]*) : (.+)$')
+# Bounded so an unbalanced pair can't swallow half a docstring; [^`] spans
+# newlines on purpose, because a literal often wraps across two lines.
+_DOC_LITERAL_RE = re.compile(r'``[^`]{1,160}``')
+
+
+def _color_docstring(text):
+    """Paint a docstring's headings, parameter names/types and literals."""
+    if not _help_color_on():
+        return text
+    def unmark(fragment):
+        # Headings and parameter types carry their own color, so their
+        # literals only need the markup dropped.
+        return _DOC_LITERAL_RE.sub(lambda m: m.group(0)[2:-2], fragment)
+
+    lines = text.split('\n')
+    painted, body = [], []
+
+    def flush():
+        # Prose is painted a block at a time, not a line at a time: a literal
+        # that wraps across two lines is one match only if the regex can see
+        # both of them.
+        if body:
+            painted.append(_DOC_LITERAL_RE.sub(
+                lambda m: _hc(m.group(0)[2:-2], 'lit'), '\n'.join(body)))
+            body.clear()
+
+    for i, line in enumerate(lines):
+        following = lines[i + 1] if i + 1 < len(lines) else ''
+        if line.strip() and _DOC_RULE_RE.match(following):
+            flush()
+            painted.append(_hc(unmark(line), 'head'))
+        elif _DOC_RULE_RE.match(line):
+            flush()
+            painted.append(_hc(line, 'sig'))
+        elif _DOC_PARAM_RE.match(line):
+            flush()
+            name, kind = _DOC_PARAM_RE.match(line).groups()
+            painted.append(f"{_hc(name, 'name')} : {_hc(unmark(kind), 'sig')}")
+        else:
+            body.append(line)
+    flush()
+    return '\n'.join(painted)
+
+
+def _help_color_on():
+    """Whether ``help()`` should emit ANSI right now."""
+    if _HELP_COLOR is not None:
+        return bool(_HELP_COLOR)
+    if os.environ.get('NO_COLOR'):      # set and non-empty, per no-color.org
+        return False
+    if os.environ.get('TERM') == 'dumb':
+        return False
+    try:
+        if sys.stdout.isatty():
+            return True
+    except Exception:
+        pass
+    # A Jupyter kernel renders ANSI in stream output — IPython's own tracebacks
+    # are colored the same way — so a notebook gets color even though its
+    # stdout is not a tty. (_get_ipython is resolved at import: help() asks this
+    # question once per painted fragment, a few hundred times a call.)
+    if _get_ipython is None:
+        return False
+    try:
+        shell = _get_ipython()
+    except Exception:
+        return False
+    return shell is not None and type(shell).__name__ == 'ZMQInteractiveShell'
+
+
+def _hc(text, key):
+    """``text`` wrapped in the ANSI for ``key``, or unchanged when off."""
+    if not _help_color_on():
+        return text
+    return f"{_HELP_ANSI[key]}{text}{_HELP_ANSI['off']}"
+
+
+# -----------------------------------------------------------------------------
 # Constants & Mappers (Translation Layer)
 # -----------------------------------------------------------------------------
 
@@ -3520,6 +3634,21 @@ def _add_contour_overlays(fig, overlay_datasets, x, y, n_subplots, ncols, darkmo
                                f"{y}: %{{y:.3g}}<extra></extra>")
             ), row=row, col=col)
 
+def _contour_line_style(ds, coloring):
+    """The ``go.Contour.line`` dict giving a set's contour boundaries its style.
+
+    Boundaries take the set's normal line style — ``linewidth``, ``linestyle``
+    (mapped to a Plotly dash) and ``color`` — the same values a line plot uses.
+    ``color`` is left out when Plotly would discard it: under
+    ``contours_coloring='lines'`` the boundaries are colored from the
+    colorscale by z, and a line color has no effect there.
+    """
+    line = dict(width=ds.linewidth, dash=get_plotly_linestyle(ds.linestyle))
+    if coloring != 'lines':
+        line['color'] = ds.color
+    return line
+
+
 def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=None,
                interpolate=True, interp_res=100, interp_method='linear',
                ncontours=None, overlay_datasets=None,
@@ -3530,6 +3659,15 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
     """
     Create a unified contour plot for a list of datasets.
     Subplots are organized by Z-variables.
+
+    Each set's contour boundaries are drawn in its own style — ``color``,
+    ``linestyle`` and ``linewidth``. With more than one set the default
+    ``contours_coloring='fill'`` becomes ``'none'`` (bare boundaries), since
+    overlapping fills would hide each other and this is what lets the sets'
+    colors tell them apart; the legend then carries the set styles instead of
+    a colorbar. Passing ``contours_coloring='lines'`` explicitly keeps
+    Plotly's colorscale-by-z line coloring, which ignores a line color
+    (``linestyle``/``linewidth`` still apply).
     """
     z_list = z if isinstance(z, list) else [z]
     n_z = len(z_list)
@@ -3542,15 +3680,25 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
 
     nrows, ncols = _calc_grid(n_z, nrows, ncols)
 
-    # Each panel carries its own colorbar (bar, tick labels, title) on its
-    # right, which the column gap has to hold on top of the next panel's y axis.
+    # Filled contours from several sets would hide each other, so a multi-set
+    # plot draws bare boundaries instead. 'none' — not Plotly's 'lines'
+    # coloring, which paints the boundaries from the colorscale by z and
+    # ignores line.color — is what lets each set keep its own color, linestyle
+    # and linewidth.
+    use_coloring = ('none' if len(active_ds) > 1 and contours_coloring == 'fill'
+                    else contours_coloring)
+    show_colorbars = use_coloring != 'none'
+
+    # A panel with a colorbar carries it (bar, tick labels, title) on its
+    # right, which the column gap has to hold on top of the next panel's y
+    # axis; without one the normal gap and right margin are enough.
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles or z_list,
                         **_subplot_spacing(nrows, ncols, figsize, hspace, vspace, spacing_ref,
-                                           h_px=160))
+                                           h_px=160 if show_colorbars else None))
     fig.update_layout(**_base_layout(
         darkmode, None, figsize,
         title={'text': suptitle or f"Contour: {y} vs {x}", 'x': 0.5, 'xanchor': 'center', 'y': 0.98, 'yanchor': 'top', 'yref': 'container'},
-        showlegend=True, margin=dict(r=100),
+        showlegend=True, margin=dict(r=100) if show_colorbars else {},
         legend=dict(orientation="h"),
     ))
 
@@ -3562,8 +3710,6 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
         for idx_z, zi in enumerate(z_list):
             if zi not in df.columns: continue
             row, col = (idx_z // ncols) + 1, (idx_z % ncols) + 1
-
-            use_coloring = 'lines' if len(active_ds) > 1 and contours_coloring == 'fill' else contours_coloring
 
             clean_df = df.dropna(subset=[x, y, zi])
             if clean_df.empty: continue
@@ -3604,8 +3750,8 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
                 colorscale=colorscale or ds.hue_palette,
                 contours_coloring=use_coloring,
                 ncontours=ncontours, 
-                line=dict(width=ds.linewidth, color=ds.color if use_coloring=='lines' else None),
-                showscale=(idx_ds == 0),
+                line=_contour_line_style(ds, use_coloring),
+                showscale=(show_colorbars and idx_ds == 0),
                 showlegend=(idx_z == 0),
                 colorbar=dict(
                     title=zi,
@@ -3632,6 +3778,12 @@ def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', 
                            hspace=None, vspace=None, spacing_ref=None):
     """
     Contour plot where Subplots are organized by Dataset.
+
+    Boundaries take the set's ``color``, ``linestyle`` and ``linewidth``. With
+    several z variables in one panel the default ``'fill'`` coloring becomes
+    ``'lines'`` so the fills don't hide each other; each z keeps its own
+    colorbar and colors its lines from the colorscale, so the set's color
+    doesn't apply in that case (its linestyle and linewidth still do).
     """
     active_ds = [d for d in list_of_datasets if d.select]
     z_list = z if isinstance(z, list) else [z]
@@ -3701,6 +3853,7 @@ def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', 
                 colorscale=colorscale or ds.hue_palette,
                 contours_coloring=use_coloring,
                 ncontours=ncontours,
+                line=_contour_line_style(ds, use_coloring),
                 showscale=(idx_ds == 0),
                 showlegend=(idx_ds == 0),
                 colorbar=dict(
@@ -4892,15 +5045,102 @@ class UnichartNotebook:
         ".parquet": lambda path, kw: pd.read_parquet(path, **kw),
     }
 
+    # Dialog programs that can stand in for tkinter. This is what a sandboxed
+    # kernel has: the VS Code Flatpak's runtime python ships no Tk, but the
+    # runtime does carry zenity, so a subprocess still reaches a real dialog.
+    # Only the zenity CLI is listed (qarma is a clone of it) because the rc==1
+    # reading below is zenity's: a program whose usage errors also exit 1 would
+    # have them read back as "the user cancelled", which is the one failure
+    # worth never guessing at. Adding kdialog or yad means verifying that first.
+    _DIALOG_PROGRAMS = ('zenity', 'qarma')
+
+    @classmethod
+    def _dialog_argv(cls, program):
+        """Build the argv that asks ``program`` for a multi-select open dialog."""
+        patterns = [f"*{ext}" for ext in cls._FILE_READERS]
+        # The default separator is '|', which is a legal filename character, so
+        # ask for newlines instead.
+        return [program, '--file-selection', '--multiple', '--separator=\n',
+                '--title=Select data file(s) to load',
+                f"--file-filter=Data files | {' '.join(patterns)}",
+                '--file-filter=All files | *']
+
+    @classmethod
+    def _pick_files_native(cls):
+        """Pick files with an OS dialog program instead of tkinter.
+
+        Returns the chosen paths, an empty tuple when the dialog was cancelled,
+        or ``None`` when no dialog program could be run at all — the caller
+        needs to tell "user picked nothing" apart from "there was nothing to
+        ask", and only the first of those means load nothing.
+        """
+        import shutil
+        import subprocess
+
+        for program in cls._DIALOG_PROGRAMS:
+            exe = shutil.which(program)
+            if exe is None:
+                continue
+            argv = cls._dialog_argv(program)
+            argv[0] = exe
+            try:
+                proc = subprocess.run(argv, capture_output=True, text=True)
+            except OSError:
+                continue
+            if proc.returncode == 1:
+                return ()          # zenity's cancel; its usage errors are 255
+            if proc.returncode != 0:
+                # Couldn't display (no Wayland/X11 socket, say). Another
+                # program might still manage it, so keep looking. GTK chatters
+                # on stderr even on success, so stderr alone proves nothing.
+                continue
+            # A picked path can be a document-portal mount
+            # (/run/user/<uid>/doc/...) when the dialog ran behind a portal.
+            # Those read fine now but are not stable, so a session saved from
+            # one may not reload — see annotate() in load().
+            return tuple(line for line in proc.stdout.split('\n') if line)
+        return None
+
+    @staticmethod
+    def _no_picker_message(reason):
+        """Build the "no file browser" error, with advice that fits the runtime.
+
+        The advice has to branch on where the interpreter lives: inside a
+        sandbox (the VS Code Flatpak runs its kernels on a runtime python that
+        ships no Tk at all) a host ``apt install python3-tk`` installs into a
+        filesystem this process cannot see, so the stock advice would send the
+        caller down a dead end. The underlying exception is quoted rather than
+        swallowed — "tkinter is unavailable" and "libtk8.6.so is unloadable"
+        need different fixes.
+        """
+        hints = []
+        if os.environ.get('container') or os.path.exists('/.flatpak-info'):
+            hints.append(
+                "this interpreter runs inside a sandbox (e.g. a kernel started "
+                "by the VS Code Flatpak), whose runtime ships no Tk — installing "
+                "python3-tk on the host is invisible to it, so run the kernel "
+                "from a host interpreter instead")
+        else:
+            hints.append("install Tk (e.g. 'sudo apt install python3-tk')")
+        if not os.environ.get('DISPLAY') and os.environ.get('WAYLAND_DISPLAY'):
+            hints.append(
+                "tkinter also talks X11 only, and DISPLAY is unset in this "
+                "Wayland session, so it needs XWayland even once Tk is present")
+        return (f"load() could not open a file browser: {reason}. "
+                + "; ".join(hints)
+                + ". Or pass a filepath: load('data.csv').")
+
     @classmethod
     def _pick_files(cls):
         """Open the OS file-chooser and return the selected paths as a tuple.
 
         Returns an empty tuple when the dialog is cancelled. Raises
         ``RuntimeError`` when no dialog can be opened at all — tkinter missing
-        (Pyodide, or Debian/Ubuntu without ``python3-tk``) or no display
-        (a headless server) — since the caller asked for a picker and silently
-        loading nothing would be the more confusing outcome.
+        (Pyodide, a sandboxed runtime built without Tk, or Debian/Ubuntu
+        without ``python3-tk``) or no display reachable (a headless server, or
+        a sandboxed kernel with no Wayland/X11 socket) — since the caller asked
+        for a picker and silently loading nothing would be the more confusing
+        outcome.
 
         tkinter is imported lazily: unichart imports fine without it, and only
         this method needs it.
@@ -4908,14 +5148,16 @@ class UnichartNotebook:
         try:
             import tkinter
             from tkinter import filedialog
-        except ImportError:
+        except ImportError as e:
+            picked = cls._pick_files_native()
+            if picked is not None:
+                return picked
             raise RuntimeError(
-                "load() needs tkinter to open a file browser (install it with "
-                "e.g. 'sudo apt install python3-tk', or pass a filepath: "
-                "load('data.csv')).") from None
+                cls._no_picker_message(f"tkinter is unavailable ({e})")) from None
 
         patterns = " ".join(f"*{ext}" for ext in cls._FILE_READERS)
         root = None
+        tcl_error = None
         try:
             root = tkinter.Tk()
             root.withdraw()
@@ -4926,9 +5168,11 @@ class UnichartNotebook:
                 parent=root, title="Select data file(s) to load",
                 filetypes=[("Data files", patterns), ("All files", "*.*")])
         except tkinter.TclError as e:
-            raise RuntimeError(
-                f"load() could not open a file browser ({e}); no display is "
-                f"available. Pass a filepath instead: load('data.csv').") from None
+            # Tk is installed but cannot reach a display — a Wayland-only
+            # session without XWayland lands here, where zenity still works.
+            # Dealt with below rather than here so the dead root is torn down
+            # before the fallback dialog opens.
+            tcl_error = e
         finally:
             if root is not None:
                 # Leaving the root alive hangs the *next* dialog in the same
@@ -4938,6 +5182,13 @@ class UnichartNotebook:
                     root.destroy()
                 except Exception:
                     pass
+
+        if tcl_error is not None:
+            picked = cls._pick_files_native()
+            if picked is not None:
+                return picked
+            raise RuntimeError(cls._no_picker_message(
+                f"tkinter could not open a display ({tcl_error})")) from None
 
         # Cancel gives '' on some platforms and () on others.
         return tuple(paths) if paths else ()
@@ -9383,6 +9634,11 @@ class UnichartNotebook:
         columns you want. Datasets loaded in the GUI stay on this notebook
         afterwards; panel renders leave its state untouched.
 
+        From a kernel the board has no close button: it would have to end the
+        process, and here that process is the kernel. Standalone — the
+        ``unichart`` command, or a script — it does, and so does ``exit()`` in
+        the terminal pane.
+
         Thin wrapper around :func:`unichart_dashboard.explore`; imported lazily
         so the optional Dash dependency isn't required to use the rest of the
         toolkit. See that function for the keyword options.
@@ -9921,6 +10177,15 @@ class UnichartNotebook:
         size, linewidth and ``fill`` are all respected. The same overlay sets
         are drawn on every subplot (including ``by='sets'``, where each subplot
         is a different dataset). Defaults to ``None`` (no overlay).
+
+        Contour boundaries are drawn in each set's own ``color``,
+        ``linestyle`` and ``linewidth``. ``contours_coloring`` defaults to
+        ``'fill'``; when a single plot would stack several filled fields on
+        each other (more than one set with ``by='vars'``, or more than one
+        ``z`` with ``by='sets'``) it drops to bare boundaries so they stay
+        readable. The one mode where a set's color has no effect is an
+        explicit ``contours_coloring='lines'``, which is Plotly's
+        "color the lines from the colorscale by z" mode.
 
         ``suppress_legends`` (default False) falls back to the
         ``set_default_format`` default when not passed.

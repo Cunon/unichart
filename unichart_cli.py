@@ -25,6 +25,10 @@ Tab completion is built in — ``eval "$(unichart --completion bash)"`` (or
 method / x / y / z fields against the real column names of the data files
 already on the command line.
 
+The explorer serves until you close it: the board's ✕ close button (or
+``exit()`` in its terminal pane) stops the server and returns the shell, and
+Ctrl-C here does the same.
+
 Panels are optional. For the GUI each ``--panel`` is replayed as a terminal
 command at startup, so the board opens with those plots already drawn and the
 commands visible in the transcript; for ``--html`` each one becomes a card.
@@ -750,7 +754,8 @@ def main(argv=None):
             print(f'Wrote {args.html}')
             return 0
 
-        # Default: serve the explorer. This blocks until interrupted.
+        # Default: serve the explorer. This blocks until the board is
+        # closed (its ✕ ends the process from inside) or Ctrl-C.
         # ncols/width/height size a static --html grid; the terminal board has
         # one chart pane that fills its own space, so they are not forwarded.
         # --dark is passed through rather than applied above: a restored session

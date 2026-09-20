@@ -533,6 +533,11 @@ sheet reads the way the library does, and `nb` covers everything else:
   `nb.load_session(...)`, bringing its datasets, formatting and plot back. The
   file's contents decide, not its extension, so a data `.json` still loads as
   data.
+- **✕ close** in the top bar shuts the board down: it asks first, then stops
+  the server and ends the process — so `unichart runs.csv` in a shell returns
+  to the prompt without a `Ctrl-C`. Typing `exit()` in the terminal pane does
+  the same. Inside a Jupyter kernel neither is offered, because the process
+  they would end is the kernel.
 - **💾 save session** in the top bar downloads the board as a session file:
   everything loaded, however it is styled, and whatever is currently plotted.
   Reopen it with `unichart that-file.json`, by dropping it back on the sidebar,
@@ -621,8 +626,12 @@ machine with none of them — a Firefox-only box — the board opens in an ordin
 tab and says why.
 
 Two things to know. `--no-browser` still wins, so a headless host is unaffected.
-And closing the window does not stop the server: the board is still running in
-the terminal you launched it from, and `Ctrl-C` there is what ends it.
+And closing the *window* does not stop the server — the board is still running
+in the terminal you launched it from. To end it, use the top bar's **✕ close**
+(or type `exit()` in the terminal pane), which asks first and then stops the
+server and the program; `Ctrl-C` in the launching terminal still works too.
+Inside a Jupyter kernel there is no close button, because the process it would
+end is the kernel.
 
 A note on the icon. The board serves its own — a line over three bars, in the
 board's palette — and the browser paints it in the window's title bar, the tab

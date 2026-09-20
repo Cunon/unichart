@@ -12,6 +12,10 @@ The notebook's own methods are bound as bare names in the terminal's namespace,
 so the cheat sheet reads the way the library does. ``nb`` is there too, for
 anything the shortcuts don't cover.
 
+The top bar's ✕ closes the board: outside a Jupyter kernel the board owns the
+process it is served from, so closing it (or typing ``exit()``) stops the
+server and ends the program, after asking.
+
 Every command runs in-process against one ``UnichartNotebook``, so the board is
 a view onto a live notebook rather than a copy of one — and because the terminal
 executes arbitrary Python, the server binds to 127.0.0.1 only. It has exactly
@@ -102,6 +106,64 @@ def _uploads_dir():
 def _slug(text):
     """A filename-safe stub of a board title, for the session it downloads."""
     return re.sub(r'[^A-Za-z0-9._-]+', '-', str(text)).strip('-').lower() or 'unichart'
+
+
+# ---------------------------------------------------------------------------
+# Closing the board
+# ---------------------------------------------------------------------------
+#
+# "Close" means "end this process". A Dash server has no supported way to
+# unbind its port and leave the process running — werkzeug dropped the shutdown
+# hook in 2.1 — and there would be nothing left to run anyway: the board owns
+# the process it serves from (the `unichart` command, or a script that calls
+# explore()). So the control is only offered where that is true, which is
+# everywhere except inside a Jupyter kernel, where closing the board would take
+# the kernel and the user's variables with it.
+#
+# os._exit rather than sys.exit because the serving thread is not this one: a
+# SystemExit raised in a timer thread ends the timer and nothing else.
+
+def _shutdown(delay=0.4, code=0):
+    """End the process, once the response that asked for it is on the wire.
+
+    The delay is what lets the browser finish the round trip that triggered
+    this — without it the socket dies mid-response and the board is left
+    showing a network error instead of its goodbye.
+    """
+    def stop():
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(int(code or 0))
+
+    threading.Timer(delay, stop).start()
+
+
+class _Quitter:
+    """``exit`` / ``quit`` in the terminal's namespace.
+
+    Python's own are :class:`site.Quitter`, which raises ``SystemExit`` — here
+    that is caught by the command runner and painted into the transcript as a
+    traceback. Someone will type ``exit()``; it should close the board.
+    """
+
+    def __init__(self, allowed=True):
+        self.allowed = allowed
+
+    def __call__(self, code=0):
+        if not self.allowed:
+            # "the board", not "the tab": from a kernel it may be a window.
+            print('unichart: this board runs inside a notebook kernel, so '
+                  'closing it would close the kernel too. Close the board '
+                  'instead; the notebook keeps the data.')
+            return
+        print('unichart: closing — the server is stopping.')
+        # Longer than the button's: this one is answering a command, and the
+        # transcript it prints into has to reach the browser first.
+        _shutdown(0.8, code)
+
+    def __repr__(self):
+        return ('Use exit() to close the board.' if self.allowed
+                else 'This board is in a notebook kernel; close the tab.')
 
 # The cheat sheet: (snippet, is_wide). Clicking one drops it into the input.
 CHEAT_SHEET = [
@@ -285,13 +347,17 @@ class Session:
 
     The namespace exposes the notebook's public methods as bare names — the
     cheat sheet's ``plot(...)`` / ``select(...)`` are those, not globals of our
-    own — plus ``nb`` itself for anything else.
+    own — plus ``nb`` itself for anything else, and ``exit`` / ``quit``, which
+    close the board when it owns its process.
     """
 
-    def __init__(self, nb):
+    def __init__(self, nb, allow_quit=True):
         self.nb = nb
         self.ns = {'__name__': '__console__', '__builtins__': __builtins__,
                    'nb': nb, 'pd': pd}
+        # Shadowing the builtins: a bare exit() should close the board rather
+        # than raise SystemExit into the transcript.
+        self.ns['exit'] = self.ns['quit'] = _Quitter(allow_quit)
         for name in dir(nb):
             if name.startswith('_') or name in _RECURSIVE:
                 continue
@@ -668,9 +734,39 @@ body.term-dragging iframe {{ pointer-events: none; }}
   cursor: pointer; transition: border-color 120ms, background 120ms;
 }}
 .term-btn:hover {{ border-color: {ACCENT}; background: rgba(59,130,246,0.10); }}
+/* The one button that ends things reads red on hover, not blue. */
+.term-btn.danger:hover {{ border-color: {ERROR}; background: rgba(248,113,113,0.12); }}
 .term-link {{ color: {MUTED}; text-decoration: none; font-size: 12.5px; }}
 .term-link:hover {{ color: {INK}; }}
 .hidden {{ display: none !important; }}
+
+/* ---- the close dialog ----
+   In-page rather than window.confirm(): a native box is the one unstyled
+   thing that could land on this board, and it cannot say what is being lost.
+   The same card carries the goodbye — once the server is going there is no
+   round trip left to swap children with, so both states ship with the page
+   and a class on the backdrop chooses between them. */
+.term-modal {{
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(11,13,17,0.72);
+}}
+.term-modal-card {{
+  background: {SURFACE}; border: 1px solid {HAIRLINE}; border-radius: 12px;
+  padding: 22px 24px; width: 380px; max-width: calc(100vw - 32px);
+  box-shadow: 0 18px 50px rgba(0,0,0,0.55);
+}}
+.term-modal-title {{ font-size: 15px; font-weight: 700; margin-bottom: 8px; }}
+.term-modal-note {{ color: {MUTED}; font-size: 12.5px; line-height: 1.6; }}
+.term-modal-row {{
+  display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px;
+}}
+.term-modal-row .term-btn {{ padding: 6px 14px; }}
+.term-modal-row .danger {{ border-color: {ERROR}; color: {ERROR}; }}
+.term-modal-row .danger:hover {{ background: rgba(248,113,113,0.12); }}
+.term-modal .term-modal-bye {{ display: none; }}
+.term-modal.closing .term-modal-ask {{ display: none; }}
+.term-modal.closing .term-modal-bye {{ display: block; }}
 
 ::-webkit-scrollbar {{ width: 10px; height: 10px; }}
 ::-webkit-scrollbar-thumb {{ background: {HAIRLINE}; border-radius: 5px; }}
@@ -831,19 +927,28 @@ def _entry_divs(html, entries):
     return out
 
 
-def build_terminal_app(nb, title=None, banner=True, startup=()):
+def build_terminal_app(nb, title=None, banner=True, startup=(),
+                       allow_quit=None):
     """Build (but do not run) the terminal explorer.
 
     ``startup`` is a sequence of commands run before the first paint — how the
     CLI's ``--panel`` specs and ``explore(panels=...)`` are honored, so they
     land in the transcript exactly as if they had been typed.
+
+    ``allow_quit`` offers the top bar's close button, and makes ``exit()`` in
+    the terminal mean it. It defaults to "unless we are in a Jupyter kernel",
+    which is the same question :func:`_shutdown` is documented against: closing
+    the board ends the process, and in a kernel that process is the user's.
     """
     (Dash, dcc, html, dash_table, no_update,
      Input, Output, State, MATCH, ALL) = _require_dash()
     from dash import ctx
 
     board_title = title or 'Unichart'
-    session = Session(nb)
+    if allow_quit is None:
+        from unichart_dashboard import _in_notebook
+        allow_quit = not _in_notebook()
+    session = Session(nb, allow_quit=allow_quit)
     uploads = _uploads_dir()
 
     entries = []
@@ -881,6 +986,11 @@ def build_terminal_app(nb, title=None, banner=True, startup=()):
                             title='Load a three-run demo dataset'),
                 html.A('GitHub', href='https://github.com/Cunon/unichart',
                        target='_blank', className='term-link'),
+                html.Button('✕ close', id='term-quit', n_clicks=0,
+                            className='term-btn danger',
+                            title='Close unichart — stops the server and ends '
+                                  'the program')
+                if allow_quit else None,
             ], className='term-top-actions'),
         ], className='term-top'),
 
@@ -923,11 +1033,44 @@ def build_terminal_app(nb, title=None, banner=True, startup=()):
         dcc.Store(id='term-history', data=list(startup)),
         dcc.Download(id='term-save-download'),
         html.Div(id='term-resize-sink', className='hidden'),
+        _quit_dialog(html) if allow_quit else None,
     ], className='term-app')
 
     _register(app, nb, session, uploads, board_title, dcc, html, ctx,
-              Input, Output, State, ALL, no_update)
+              Input, Output, State, ALL, no_update, allow_quit)
     return app
+
+
+def _quit_dialog(html):
+    """The close confirmation, and the goodbye it turns into.
+
+    Both states are in the page from the start; see the ``.term-modal`` rules
+    for why. It ships hidden and is shown by the callback.
+    """
+    return html.Div(
+        html.Div([
+            html.Div([
+                html.Div('Close unichart?', className='term-modal-title'),
+                html.Div(
+                    'This stops the server and ends the program. Loaded data, '
+                    'formatting and the current plot go with it — save a '
+                    'session first if you want them back.',
+                    className='term-modal-note'),
+                html.Div([
+                    html.Button('Cancel', id='term-quit-cancel', n_clicks=0,
+                                className='term-btn'),
+                    html.Button('Close unichart', id='term-quit-yes',
+                                n_clicks=0, className='term-btn danger'),
+                ], className='term-modal-row'),
+            ], className='term-modal-ask'),
+            html.Div([
+                html.Div('Unichart closed.', className='term-modal-title'),
+                html.Div('The server has stopped. You can close this window.',
+                         className='term-modal-note'),
+            ], className='term-modal-bye'),
+            html.Div(id='term-quit-sink', className='hidden'),
+        ], className='term-modal-card'),
+        id='term-quit-modal', className='term-modal hidden')
 
 
 def _result_entries(result):
@@ -947,7 +1090,7 @@ def _result_entries(result):
 
 
 def _register(app, nb, session, uploads, board_title, dcc, html, ctx,
-              Input, Output, State, ALL, no_update):
+              Input, Output, State, ALL, no_update, allow_quit=False):
     """Wire the board up.
 
     One callback owns the transcript, the chart, the dataset list and the input
@@ -1330,6 +1473,48 @@ def _register(app, nb, session, uploads, board_title, dcc, html, ctx,
         Input('term-scroll', 'children'),
     )
 
+    if not allow_quit:
+        return
+
+    # Close the board. Deliberately its own callback rather than another branch
+    # of _dispatch: this one has to answer *before* the process goes away, and
+    # it shares none of that callback's outputs.
+    @app.callback(
+        Output('term-quit-modal', 'className'),
+        Input('term-quit', 'n_clicks'),
+        Input('term-quit-cancel', 'n_clicks'),
+        Input('term-quit-yes', 'n_clicks'),
+        prevent_initial_call=True,
+    )
+    def _quit(open_n, cancel_n, confirm_n):
+        trigger = ctx.triggered_id
+        if trigger == 'term-quit-yes':
+            _shutdown()
+            # The card's goodbye state: this is the last thing the board says,
+            # and it has to be on screen before the server stops answering.
+            return 'term-modal closing'
+        if trigger == 'term-quit':
+            return 'term-modal'
+        # Cancelled — and anything unexpected is read as a cancel, because the
+        # one branch that ends the process should only ever be reached by the
+        # button that says so.
+        return 'term-modal hidden'
+
+    # Try to take the window with it. A window opened by --app (or a tab the
+    # user opened themselves) was not opened by script, so Chrome is entitled
+    # to refuse — which is why the goodbye card above is the real answer and
+    # this is only a courtesy for the windows where it works.
+    app.clientside_callback(
+        """
+        function(n) {
+            if (n) { setTimeout(function() { window.close(); }, 900); }
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output('term-quit-sink', 'className'),
+        Input('term-quit-yes', 'n_clicks'),
+    )
+
 
 # ---------------------------------------------------------------------------
 # Standalone window
@@ -1414,7 +1599,8 @@ def _browser_launcher(url, app_window):
             # No --user-data-dir on purpose: reusing the running browser opens
             # the window instantly and skips the first-run chrome a cold
             # profile drags in. The cost is that this process can't tell when
-            # the window closes, so the server still stops with Ctrl-C.
+            # the window closes — closing the *window* leaves the server up,
+            # so the way out is the board's ✕ close button, or Ctrl-C.
             argv = [browser, f'--app={url}',
                     '--window-size={},{}'.format(*APP_WINDOW_SIZE)]
             return lambda: _spawn(argv, url)
@@ -1460,9 +1646,11 @@ def terminal(nb=None, data=None, sessions=None, panels=None, title=None,
     for panel in panels or []:
         startup.append(_panel_command(panel))
 
-    app = build_terminal_app(nb, title=title, startup=[c for c in startup if c])
-
+    # Asked before the board is built: whether closing it may end the process
+    # is the one layout decision that depends on where we are running.
     in_notebook = _in_notebook()
+    app = build_terminal_app(nb, title=title, startup=[c for c in startup if c],
+                             allow_quit=not in_notebook)
     # A standalone window is a browser window either way, so asking for one
     # from a kernel means the external board rather than the inline iframe.
     standalone = app_window or not in_notebook

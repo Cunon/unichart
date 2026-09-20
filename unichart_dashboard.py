@@ -1364,8 +1364,8 @@ def explore(nb=None, data=None, sessions=None, panels=None, title=None,
         is what makes Chrome's "Install page as app" offer a real launcher
         entry). From a kernel this implies the external board, since an app
         window is not an inline iframe; ``open_browser=False`` still wins, and
-        the server is still stopped with Ctrl-C rather than by closing the
-        window.
+        closing the window does not stop the server — the board's ✕ close
+        button does, or Ctrl-C.
     jupyter_mode : str, optional
         ``'inline'`` (default in a kernel) / ``'external'`` / ``'tab'``.
     debug, **run_kwargs
@@ -1381,6 +1381,11 @@ def explore(nb=None, data=None, sessions=None, panels=None, title=None,
     The terminal runs real Python in this process, so the server is bound to
     127.0.0.1. It can do anything you could do at a Python prompt; it is not a
     sandbox and must not be exposed to a network.
+
+    That is also why the board can close itself: outside a Jupyter kernel the
+    process exists to serve it, so the top bar's ✕ (and ``exit()`` in the
+    terminal pane) stops the server and ends the process, after asking. In a
+    kernel the process is the kernel, so neither is offered.
 
     Examples
     --------
