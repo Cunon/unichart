@@ -508,6 +508,45 @@ _ICON_SVG = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
 # title, which only exists once build_terminal_app has one.
 _ICON_PATH = '_unichart/icon.svg'
 _MANIFEST_PATH = '_unichart/manifest.webmanifest'
+_GALLERY_PATH = '_unichart/gallery.html'
+
+# Mirrors unichart_cli.GALLERY_URL, kept separate so neither module has to
+# import the other. Used when the built page isn't in this install.
+GALLERY_URL = 'https://github.com/Cunon/unichart/tree/main/gallery'
+
+
+def _gallery_file():
+    """The built example gallery page, if this is a source checkout."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for folder in (here, os.path.dirname(here)):
+        page = os.path.join(folder, 'gallery', 'index.html')
+        if os.path.isfile(page):
+            return page
+    return None
+
+
+def _serve_gallery(app):
+    """Serve the example gallery off the board, and return its href.
+
+    The board is an http page, and browsers refuse to follow a ``file://``
+    link from one — so the local page has to come off this server or not at
+    all. Returns ``None`` when the page isn't in this install, leaving the
+    caller to fall back to the repository URL.
+    """
+    page = _gallery_file()
+    if page is None:
+        return None
+    server = app.server
+    prefix = app.config.routes_pathname_prefix or '/'
+
+    @server.route(prefix + _GALLERY_PATH)
+    def _unichart_gallery():
+        # Read per request, so rebuilding the gallery shows up on reload
+        # instead of needing the board restarted.
+        with open(page, encoding='utf-8') as fh:
+            return server.response_class(fh.read(), mimetype='text/html')
+
+    return app.get_relative_path('/' + _GALLERY_PATH)
 
 
 def _serve_icon(app, board_title):
@@ -966,6 +1005,7 @@ def build_terminal_app(nb, title=None, banner=True, startup=(),
                update_title=None, suppress_callback_exceptions=True)
     app.index_string = _index_string(app.config.requests_pathname_prefix)
     _serve_icon(app, board_title)
+    gallery_href = _serve_gallery(app)
     app.layout = html.Div([
         html.Div([
             html.Div('UC', className='term-badge'),
@@ -984,6 +1024,10 @@ def build_terminal_app(nb, title=None, banner=True, startup=(),
                 html.Button('Load demo data', id='term-demo', n_clicks=0,
                             className='term-btn',
                             title='Load a three-run demo dataset'),
+                html.A('Gallery', href=gallery_href or GALLERY_URL,
+                       target='_blank', className='term-link',
+                       title='Example gallery — every plot type on one page, '
+                             'each with the code that drew it'),
                 html.A('GitHub', href='https://github.com/Cunon/unichart',
                        target='_blank', className='term-link'),
                 html.Button('✕ close', id='term-quit', n_clicks=0,

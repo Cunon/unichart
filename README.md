@@ -184,6 +184,26 @@ nb.markersize(0, 12); nb.alpha('selected', 0.5); nb.fill(1, True)
 nb.linewidth(0, 3); nb.edgewidth(0, 1); nb.hue(0, 'category')
 nb.alpha_marker(0, 0.3); nb.alpha_line(1, 0.2)   # opacity of just the markers / just the line
 nb.zorder(2, 1)       # draw set 2 on top of the rest (higher = later = on top)
+nb.sig_figs(0, 4)     # set 0's values display to 4 significant figures
+nb.decimals(1, 2)     # set 1's to two decimal places instead
+```
+
+`sig_figs` and `decimals` are the display-precision knob, in its two
+spellings: significant figures, or places after the point (trailing zeros
+kept, `0` = whole numbers). They round what is *shown* — `table()` cells,
+`summary()` statistics and the plot hover readouts (x/y/z and the
+`display_parms` lines) — and never the stored data, so `output='df'` and
+`ds.df` keep full precision. A value is rounded one way or the other, so
+setting either clears the other. One argument is the notebook-wide form (it
+also restyles the sets already loaded), two are selector-then-value, and
+`'reset'` restores the built-in precision:
+
+```python
+nb.sig_figs(4)          # 4 sig figs everywhere, and for sets loaded later
+nb.decimals(2)          # ... or two decimal places everywhere
+nb.sig_figs(0, 6)       # just set 0 (use this form when you mean a set index)
+nb.sig_figs('reset')    # back to the built-in precision
+nb.sig_figs()           # report the current setting
 ```
 
 **Per-variable** (applies wherever that column is plotted):
@@ -199,8 +219,8 @@ nb.var_format(['CHT1', 'CHT2'], reset=True)           # drop all their overrides
 **Notebook-wide defaults & appearance:**
 
 - `set_default_format(...)` — persistent defaults (markersize, linestyle,
-  legend, grid, subplot spacing, barmode, agg, alpha, …) applied to future
-  plots/datasets.
+  sig_figs/decimals, legend, grid, subplot spacing, barmode, agg, alpha, …)
+  applied to future plots/datasets.
 - `set_color_palette` / `color_map` / `marker_map` — the ordered lists assigned
   to datasets by index (integer lookups cycle).
 - `toggle_darkmode(True/False)` — dark theme.
@@ -436,6 +456,8 @@ Two consistent rules cover every reset:
   set's color/marker so it reads as a continuation of that series.
 - **`table(...)` / `table_read(...)`** — tabulate columns, or interpolate a
   Y column at arbitrary X inputs (`kind='linear'`, extrapolation controllable).
+  `sig_figs=` / `decimals=` round the displayed cells; without them each set's
+  own `sig_figs` / `decimals` (see `nb.sig_figs`, `nb.decimals`) applies.
 - **`reg_info(...)`** / `reg_order` — fit and report regressions / trend lines
   (polynomial or LOWESS; LOWESS needs `statsmodels`).
 - **`summary(cols=...)`** — per-dataset descriptive statistics (count / min /

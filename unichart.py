@@ -1187,13 +1187,21 @@ _DATASET_FORMAT_DEFAULTS = {
     'alpha_marker': None,
     'alpha_line':    None,
     'fill':       True,
+    # Precision used when a value is *displayed* — table/summary cells, plot
+    # hover readouts. Two spellings of one knob, so at most one is ever set:
+    # sig_figs counts significant figures, decimals counts places after the
+    # point. Both None = every display keeps its own built-in precision
+    # (.5g table cells, .4g statistics, .2g/.4g/.6g hover).
+    'sig_figs':   None,
+    'decimals':   None,
     # Colorscale for contours and hue-colored scatters. Lives here (rather than
     # only on Dataset) so a plot style can swap it — see MPL_DATASET_FORMAT.
     'hue_palette': 'Jet',
 }
 
 # Per-dataset *styling* a derived set copies from the set it was built from
-# (see ``UnichartNotebook._inherit_set_format``). Purely how a series is drawn:
+# (see ``UnichartNotebook._inherit_set_format``). How a series is drawn — plus
+# ``sig_figs``/``decimals``, how precisely its values are written out:
 # the attributes ``_reset_set_attrs`` restores, minus the two that are not
 # styling. ``reg_order`` is left out because a trendline is analysis, not
 # appearance — a delta should not silently acquire the study set's fit — and
@@ -1203,6 +1211,7 @@ _INHERITED_FORMAT_ATTRS = (
     'color', 'marker', 'linestyle', 'markersize', 'linewidth', 'edgewidth',
     'alpha', 'alpha_marker', 'alpha_line', 'edge_color', 'fill', 'hue',
     'hue_palette', 'hue_order', 'style', 'display_parms', 'zorder',
+    'sig_figs', 'decimals',
 )
 
 def _resolve_var_format(dataset, variable, variable_formats=None):
@@ -1576,6 +1585,12 @@ class Dataset:
         self.style = None
         self.linewidth = fmt.get('linewidth', 2)
         self.edgewidth = fmt.get('edgewidth', 1)
+        # Mutually exclusive, and each setter clears the other, so the raw
+        # attributes must exist before either is assigned.
+        self._sig_figs = None
+        self._decimals = None
+        self.sig_figs = fmt.get('sig_figs', None)
+        self.decimals = fmt.get('decimals', None)
         self.set_type = 1
         self.data_type = 'discrete'
         self.delta_sets = None
@@ -1834,6 +1849,36 @@ class Dataset:
             raise ValueError(f"Invalid edgewidth: {value}")
 
     @property
+    def sig_figs(self): return self._sig_figs
+
+    @sig_figs.setter
+    def sig_figs(self, value):
+        # None = unset: every display keeps its own built-in precision.
+        if value is None or (isinstance(value, int) and not isinstance(value, bool)
+                             and value >= 1):
+            self._sig_figs = value
+            if value is not None:
+                self._decimals = None     # the two are alternatives
+        else:
+            raise ValueError(
+                f"Invalid sig_figs: {value!r} (expected a positive integer or None)")
+
+    @property
+    def decimals(self): return self._decimals
+
+    @decimals.setter
+    def decimals(self, value):
+        # The fixed-places spelling of sig_figs; 0 means whole numbers.
+        if value is None or (isinstance(value, int) and not isinstance(value, bool)
+                             and value >= 0):
+            self._decimals = value
+            if value is not None:
+                self._sig_figs = None     # the two are alternatives
+        else:
+            raise ValueError(
+                f"Invalid decimals: {value!r} (expected a non-negative integer or None)")
+
+    @property
     def display_parms(self): return self._display_parms
 
     @display_parms.setter
@@ -1873,6 +1918,8 @@ class Dataset:
             'plot_type': self.plot_type,
             'linewidth': self.linewidth,
             'edgewidth': self.edgewidth,
+            'sig_figs': self.sig_figs,
+            'decimals': self.decimals,
         }
     
     def set_format_option(self, key, value):
@@ -1915,7 +1962,18 @@ def coerce_display_parms(value):
     return out
 
 
-def build_hover_data(df, parms):
+def _hover_fmt(sig_figs, default, decimals=None):
+    """d3 number format for a hover readout: ``.<n>g`` when the dataset carries
+    a ``sig_figs``, ``.<n>f`` when it carries ``decimals`` instead, else the
+    call site's own built-in format."""
+    if sig_figs:
+        return f".{sig_figs}g"
+    if decimals is not None:
+        return f".{decimals}f"
+    return default
+
+
+def build_hover_data(df, parms, sig_figs=None, decimals=None):
     """Build robust hover ``customdata`` + template lines for ``display_parms``.
 
     Returns ``(customdata, lines)`` where ``customdata`` is an ndarray suitable
@@ -1929,7 +1987,8 @@ def build_hover_data(df, parms):
       ``...T00:00:00`` ISO blobs, and ``NaT`` shows blank);
     * booleans show ``True`` / ``False`` rather than ``1`` / ``0``;
     * integers print in full, without scientific notation;
-    * floats use general precision (``.6g``);
+    * floats use general precision (``.6g``, or the dataset's ``sig_figs`` /
+      ``decimals`` when it has one);
     * anything else (categories, strings, objects) is shown as-is;
     * missing values render blank instead of ``NaN`` / ``None``.
 
@@ -1937,6 +1996,7 @@ def build_hover_data(df, parms):
     also avoids the mixed-dtype ``to_numpy()`` collapse that previously turned
     timestamps into opaque objects.
     """
+    float_fmt = _hover_fmt(sig_figs, '.6g', decimals)
     cols = []
     lines = []
     for parm in parms:
@@ -1962,7 +2022,7 @@ def build_hover_data(df, parms):
             lines.append(f"<br>{parm}: %{{customdata[{i}]}}")
         elif pd.api.types.is_numeric_dtype(s):
             cols.append(s.to_numpy())
-            lines.append(f"<br>{parm}: %{{customdata[{i}]:.6g}}")
+            lines.append(f"<br>{parm}: %{{customdata[{i}]:{float_fmt}}}")
         else:
             col = s.astype(object).where(s.notna(), '')
             cols.append(col.to_numpy())
@@ -2308,6 +2368,9 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
         cur_linewidth = fmt.get('linewidth', 2)
         cur_reg_order = fmt.get('reg_order')
         cur_idx = fmt.get('index')
+        cur_sig = fmt.get('sig_figs')
+        cur_dec = fmt.get('decimals')
+        num_fmt = _hover_fmt(cur_sig, '.2f', cur_dec)
         hover_parms = display_parms or fmt.get('display_parms', [])
 
         base_cols = dataset.columns
@@ -2359,9 +2422,11 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             # x/y are already serialized as the trace's own arrays, so only the
             # hover parms ride in customdata (as a plain ndarray, not a frame) —
             # shipping x/y there as well doubled the figure payload.
-            custom_data, hover_lines = build_hover_data(df, valid_hover)
+            custom_data, hover_lines = build_hover_data(df, valid_hover,
+                                                        cur_sig, cur_dec)
 
-            ht = f"<b><u>Set: {cur_idx}</u></b><br><b>{cur_title}</b><br>{x_col}: %{{x:.2f}}<br>{yi}: %{{y:.2f}}"
+            ht = (f"<b><u>Set: {cur_idx}</u></b><br><b>{cur_title}</b><br>"
+                  f"{x_col}: %{{x:{num_fmt}}}<br>{yi}: %{{y:{num_fmt}}}")
             ht += "".join(hover_lines)
             ht += "<extra></extra>"
 
@@ -2499,13 +2564,15 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
         if dataset.linestyle:
             line_dict['dash'] = get_plotly_linestyle(dataset.linestyle)
 
-        hover_cd, hover_lines = build_hover_data(df, valid_hover)
+        ds_sig, ds_dec = dataset.sig_figs, dataset.decimals
+        num_fmt = _hover_fmt(ds_sig, '.2f', ds_dec)
+        hover_cd, hover_lines = build_hover_data(df, valid_hover, ds_sig, ds_dec)
         hover_suffix = "".join(hover_lines)
 
         if primary_y in df.columns:
             color0 = color_cycle[0]
-            ht = (f"<b>{dataset.title}</b><br>{x_col}: %{{x:.2f}}"
-                  f"<br>{primary_y}: %{{y:.2f}}{hover_suffix}<extra></extra>")
+            ht = (f"<b>{dataset.title}</b><br>{x_col}: %{{x:{num_fmt}}}"
+                  f"<br>{primary_y}: %{{y:{num_fmt}}}{hover_suffix}<extra></extra>")
             fig.add_trace(
                 _scatter_cls(len(df))(
                     x=df[x_col], y=df[primary_y],
@@ -2535,8 +2602,8 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
             if yi not in df.columns:
                 continue
             color_k = color_cycle[(k + 1) % len(color_cycle)]
-            ht = (f"<b>{dataset.title}</b><br>{x_col}: %{{x:.2f}}"
-                  f"<br>{yi}: %{{y:.2f}}{hover_suffix}<extra></extra>")
+            ht = (f"<b>{dataset.title}</b><br>{x_col}: %{{x:{num_fmt}}}"
+                  f"<br>{yi}: %{{y:{num_fmt}}}{hover_suffix}<extra></extra>")
             fig.add_trace(
                 _scatter_cls(len(df))(
                     x=df[x_col], y=df[yi],
@@ -2665,7 +2732,8 @@ def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
                 showlegend=show_bar,
                 customdata=None if n_df is None else n_df[yi],
                 hovertemplate=(f"<b>{ds.title}</b><br>{x}: %{{x}}<br>"
-                               f"{_agg_hover(agg_name, yi, n_df)}<extra></extra>")
+                               f"{_agg_hover(agg_name, yi, n_df, ds.sig_figs, ds.decimals)}"
+                               f"<extra></extra>")
             ), row=row, col=col)
 
         # Overlay columns: positional pairing (see docstring). Each column is
@@ -2720,7 +2788,8 @@ def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
                 showlegend=show,
                 customdata=None if n_df is None else n_df[m_col],
                 hovertemplate=(f"<b>{ds.title}</b><br>{x}: %{{x}}<br>"
-                               f"{_agg_hover(agg_name, m_col, n_df)}<extra></extra>")
+                               f"{_agg_hover(agg_name, m_col, n_df, ds.sig_figs, ds.decimals)}"
+                               f"<extra></extra>")
             ), row=row, col=col)
 
             # Dashed stems can't ride on the marker trace's error bars
@@ -2833,7 +2902,8 @@ def unibar_per_dataset(list_of_datasets, x, y, markers=None, variable_formats=No
                 showlegend=show_bar,
                 customdata=None if n_df is None else n_df[yi],
                 hovertemplate=(f"<b>{yi}</b><br>{x}: %{{x}}<br>"
-                               f"{_agg_hover(agg_name, yi, n_df)}<extra></extra>")
+                               f"{_agg_hover(agg_name, yi, n_df, ds.sig_figs, ds.decimals)}"
+                               f"<extra></extra>")
             ), row=row, col=col)
 
         for m_idx, m_col in enumerate(markers_list):
@@ -2878,7 +2948,8 @@ def unibar_per_dataset(list_of_datasets, x, y, markers=None, variable_formats=No
                 showlegend=show_marker,
                 customdata=None if n_df is None else n_df[m_col],
                 hovertemplate=(f"<b>{m_col}</b><br>{x}: %{{x}}<br>"
-                               f"{_agg_hover(agg_name, m_col, n_df)}<extra></extra>")
+                               f"{_agg_hover(agg_name, m_col, n_df, ds.sig_figs, ds.decimals)}"
+                               f"<extra></extra>")
             ), row=row, col=col)
 
             if m_style == 'whisker' and attach and m_dash and m_dash != 'solid':
@@ -3411,6 +3482,9 @@ def _render_marginal(panels, marginal_x, marginal_y, marginal_size,
             cur_linewidth = fmt.get('linewidth', 2)
             cur_reg_order = fmt.get('reg_order')
             cur_idx = fmt.get('index')
+            cur_sig = fmt.get('sig_figs')
+            cur_dec = fmt.get('decimals')
+            num_fmt = _hover_fmt(cur_sig, '.2f', cur_dec)
             hover_parms = display_parms or fmt.get('display_parms', [])
             valid_hover = [p for p in hover_parms if p in dataset.columns]
             hue_in_cols = bool(cur_hue) and cur_hue in dataset.columns
@@ -3425,9 +3499,10 @@ def _render_marginal(panels, marginal_x, marginal_y, marginal_size,
             df = df.dropna(subset=[x_col, y_col])
             if df.empty: continue
 
-            custom_data, hover_lines = build_hover_data(df, valid_hover)
+            custom_data, hover_lines = build_hover_data(df, valid_hover,
+                                                        cur_sig, cur_dec)
             ht = (f"<b><u>Set: {cur_idx}</u></b><br><b>{cur_title}</b><br>"
-                  f"{x_col}: %{{x:.2f}}<br>{y_col}: %{{y:.2f}}")
+                  f"{x_col}: %{{x:{num_fmt}}}<br>{y_col}: %{{y:{num_fmt}}}")
             ht += "".join(hover_lines) + "<extra></extra>"
 
             show_line = bool(cur_linestyle) and not cur_reg_order
@@ -3630,8 +3705,10 @@ def _add_contour_overlays(fig, overlay_datasets, x, y, n_subplots, ncols, darkmo
                 line=line_dict,
                 opacity=opacity,
                 showlegend=(cell == 0),
-                hovertemplate=(f"<b>{ds.title}</b><br>{x}: %{{x:.3g}}<br>"
-                               f"{y}: %{{y:.3g}}<extra></extra>")
+                hovertemplate=(f"<b>{ds.title}</b><br>"
+                               f"{x}: %{{x:{_hover_fmt(ds.sig_figs, '.3g', ds.decimals)}}}<br>"
+                               f"{y}: %{{y:{_hover_fmt(ds.sig_figs, '.3g', ds.decimals)}}}"
+                               f"<extra></extra>")
             ), row=row, col=col)
 
 def _contour_line_style(ds, coloring):
@@ -3760,7 +3837,11 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
                     len=cb_len,
                     thickness=15
                 ),
-                hovertemplate=f"<b>{ds.title}</b><br>{x}: %{{x:.3g}}<br>{y}: %{{y:.3g}}<br>{zi}: %{{z:.3g}}<extra></extra>"
+                hovertemplate=(f"<b>{ds.title}</b><br>"
+                               f"{x}: %{{x:{_hover_fmt(ds.sig_figs, '.3g', ds.decimals)}}}<br>"
+                               f"{y}: %{{y:{_hover_fmt(ds.sig_figs, '.3g', ds.decimals)}}}<br>"
+                               f"{zi}: %{{z:{_hover_fmt(ds.sig_figs, '.3g', ds.decimals)}}}"
+                               f"<extra></extra>")
             ), row=row, col=col)
 
     _add_contour_overlays(fig, overlay_datasets, x, y, n_z, ncols, darkmode)
@@ -3863,7 +3944,11 @@ def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', 
                     len=cb_len,
                     thickness=15
                 ),
-                hovertemplate=f"<b>{zi}</b><br>{x}: %{{x:.3g}}<br>{y}: %{{y:.3g}}<br>Value: %{{z:.3g}}<extra></extra>"
+                hovertemplate=(f"<b>{zi}</b><br>"
+                               f"{x}: %{{x:{_hover_fmt(ds.sig_figs, '.3g', ds.decimals)}}}<br>"
+                               f"{y}: %{{y:{_hover_fmt(ds.sig_figs, '.3g', ds.decimals)}}}<br>"
+                               f"Value: %{{z:{_hover_fmt(ds.sig_figs, '.3g', ds.decimals)}}}"
+                               f"<extra></extra>")
             ), row=row, col=col)
 
     _add_contour_overlays(fig, overlay_datasets, x, y, n_sets, ncols, darkmode)
@@ -3950,12 +4035,14 @@ def _bar_frame(df, x, cols, func):
     return values.reset_index(), counts.reset_index()
 
 
-def _agg_hover(agg_name, col, counts_col):
+def _agg_hover(agg_name, col, counts_col, sig_figs=None, decimals=None):
     """Hover fragment for one value: ``mean EGT: 643 (n=64)`` when aggregated,
-    else the plain ``EGT: 643``."""
+    else the plain ``EGT: 643``. The set's ``sig_figs`` / ``decimals`` replace
+    the built-in ``.4g`` precision."""
+    fmt = _hover_fmt(sig_figs, '.4g', decimals)
     if agg_name is None or counts_col is None:
-        return f"{col}: %{{y:.4g}}"
-    return f"{agg_name} {col}: %{{y:.4g}} (n=%{{customdata}})"
+        return f"{col}: %{{y:{fmt}}}"
+    return f"{agg_name} {col}: %{{y:{fmt}}} (n=%{{customdata}})"
 
 
 def unibar_datasets_as_x(list_of_datasets, y, agg='mean', markers=None, variable_formats=None,
@@ -4308,6 +4395,9 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
 
         ds_hover = display_parms if display_parms is not None else getattr(ds, 'display_parms', [])
         valid_hover = [p for p in (ds_hover or []) if p in base_cols]
+        ds_sig = getattr(ds, 'sig_figs', None)
+        ds_dec = getattr(ds, 'decimals', None)
+        num_fmt = _hover_fmt(ds_sig, '.4g', ds_dec)
 
         # Fetch only the columns this plot touches, then sort the narrow
         # frame — sorting the full set width dominated on wide frames.
@@ -4340,9 +4430,10 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
 
             ht = (f"<b>Set {ds.index}: {ds.title}</b><br>"
                   f"<b>{yi}</b><br>"
-                  f"{x}: %{{x:.4g}}<br>"
-                  f"{yi}: %{{y:.4g}}")
-            customdata, hover_lines = build_hover_data(df, valid_hover)
+                  f"{x}: %{{x:{num_fmt}}}<br>"
+                  f"{yi}: %{{y:{num_fmt}}}")
+            customdata, hover_lines = build_hover_data(df, valid_hover,
+                                                       ds_sig, ds_dec)
             ht += "".join(hover_lines)
             ht += "<extra></extra>"
 
@@ -5295,6 +5386,7 @@ class UnichartNotebook:
         'alpha', 'alpha_marker', 'alpha_line', 'edge_color', 'fill', 'hue',
         'hue_palette', 'hue_order', 'reg_order', 'style', 'zorder',
         'plot_type', 'set_type', 'data_type', 'display_parms', 'delta_sets',
+        'sig_figs', 'decimals',
     )
 
     # Notebook-level formatting captured by save_session. plot_style and
@@ -6342,6 +6434,171 @@ class UnichartNotebook:
             return
         self._set_or_reset(uset_slice, 'linewidth', width_val)
 
+    # Smallest sensible value for each spelling of the precision knob:
+    # 1 significant figure, or 0 decimal places (whole numbers).
+    _PRECISION_MIN = {'sig_figs': 1, 'decimals': 0}
+
+    def _set_precision(self, attr, uset_slice, value):
+        """Shared body of :meth:`sig_figs` and :meth:`decimals`.
+
+        The two are spellings of one knob — round a displayed value to n
+        significant figures, or to n places after the point — so setting either
+        clears the other, and ``'reset'`` clears both. ``attr`` says which one
+        this call sets; everything else (the one-argument notebook-wide form,
+        the selector + value form, the report, the sentinels) is identical.
+        """
+        other = 'decimals' if attr == 'sig_figs' else 'sig_figs'
+        low = self._PRECISION_MIN[attr]
+
+        def _valid(v):
+            if isinstance(v, bool) or not isinstance(v, int) or v < low:
+                print(f"{attr} must be a "
+                      f"{'positive' if low else 'non-negative'} integer.")
+                return False
+            return True
+
+        def _reset(targets):
+            # Both attributes, so a reset always lands back on the notebook
+            # default whichever spelling the set was carrying.
+            for ds in self._get_uset_slice(targets):
+                self._reset_set_attrs(ds, ('sig_figs', 'decimals'))
+
+        def _describe(sig, dec):
+            if sig:
+                return f"{sig} sig figs"
+            if dec is not None:
+                return f"{dec} decimals"
+            return "off"
+
+        # Report: no arguments at all.
+        if uset_slice is None and value is None:
+            sig = self.default_format.get('sig_figs')
+            dec = self.default_format.get('decimals')
+            print(f"Display precision: {_describe(sig, dec)} (notebook default)")
+            overrides = {ds.index: (ds.sig_figs, ds.decimals) for ds in self.sets
+                         if (ds.sig_figs, ds.decimals) != (sig, dec)}
+            if overrides:
+                print("  per-set: " + ", ".join(
+                    f"{i}: {_describe(s, d)}" for i, (s, d) in overrides.items()))
+            return self.default_format.get(attr)
+
+        # One positional argument is the notebook-wide form: nb.sig_figs(3).
+        # A lone int would otherwise read as a set index with no value.
+        if value is None:
+            if isinstance(uset_slice, str):
+                if uset_slice == 'reset':
+                    self.default_format['sig_figs'] = None
+                    self.default_format['decimals'] = None
+                    _reset('all')
+                    return
+                # A selector with no value ('all', '1:3', ...) — the integer
+                # message below would only confuse.
+                print(f"{attr}({uset_slice!r}) needs a value too: "
+                      f"nb.{attr}({uset_slice!r}, {low + 3}).")
+                return
+            if not _valid(uset_slice):
+                print(f"To target sets, pass a selector and a value: "
+                      f"nb.{attr}(0, {low + 3}).")
+                return
+            self.default_format[attr] = uset_slice
+            self.default_format[other] = None
+            self._set_or_reset('all', attr, uset_slice)
+            return
+
+        if self._var_targets(uset_slice) is not None:
+            print(f"{attr} is a per-dataset setting, not a per-variable one. "
+                  f"Use nb.{attr}(<sets>, n) or nb.{attr}(n) for all sets.")
+            return
+        if isinstance(value, str) and value == 'reset':
+            _reset(uset_slice)
+            return
+        if not _valid(value):
+            return
+        self._set_or_reset(uset_slice, attr, value)
+
+    def sig_figs(self, uset_slice=None, figs_val=None):
+        """
+        Set how many significant figures displayed values are rounded to.
+
+        Applies wherever unichart *shows* a number rather than stores it: the
+        cells of :meth:`table`, the statistics in :meth:`summary`, and the
+        hover readouts of the plots (x/y/z values and the ``display_parms``
+        lines). The data itself is never touched — ``table(output='df')`` and
+        ``summary(output='df')`` still return full precision, as does
+        ``ds.df``.
+
+        Two forms, told apart by how many arguments you pass:
+
+        * ``nb.sig_figs(3)`` — one value: the notebook-wide setting. It becomes
+          the default for datasets loaded later *and* is applied to every set
+          already loaded.
+        * ``nb.sig_figs(2, 3)`` — a dataset selector then a value: only those
+          sets, exactly like :meth:`markersize` and friends. Use this form
+          (``nb.sig_figs(3, 4)``) when the number you mean is a set index.
+
+        ``nb.sig_figs()`` reports the current precision and returns the
+        notebook-wide value. ``'reset'`` in place of a value restores the
+        built-in precision — for the named sets, or (one-argument form) for
+        the notebook and every set.
+
+        :meth:`decimals` is the same knob counting places after the point
+        instead; a value either rounds to significant figures or to decimals,
+        so setting one clears the other.
+
+        Unlike the styling setters this is per *dataset* only; a variable name
+        as the target is rejected rather than routed to :meth:`var_format`.
+
+        Args:
+            uset_slice (int, list, 'all', Dataset, or int): Dataset selector,
+                or — alone — the notebook-wide number of significant figures.
+            figs_val (int or 'reset'): Significant figures (>= 1), or 'reset'.
+
+        Examples:
+            nb.sig_figs(4)          # 4 sig figs everywhere
+            nb.sig_figs(0, 6)       # set 0 shows 6, the rest keep the default
+            nb.sig_figs(0, 'reset') # set 0 back to the notebook default
+            nb.sig_figs('reset')    # built-in precision everywhere
+        """
+        return self._set_precision('sig_figs', uset_slice, figs_val)
+
+    def decimals(self, uset_slice=None, dec_val=None):
+        """
+        Set how many decimal places displayed values are rounded to.
+
+        The fixed-places sister of :meth:`sig_figs`, with the same reach (the
+        cells of :meth:`table`, the statistics in :meth:`summary`, and the
+        plots' hover readouts), the same two forms, and the same promise that
+        only the *display* changes — ``output='df'`` and ``ds.df`` keep full
+        precision. Trailing zeros are kept, so ``decimals=2`` shows ``1.5`` as
+        ``1.50``, and ``decimals=0`` gives whole numbers.
+
+        * ``nb.decimals(2)`` — one value: the notebook-wide setting, applied to
+          the sets already loaded and inherited by those loaded later.
+        * ``nb.decimals(1, 2)`` — a dataset selector then a value. Use this
+          form when the number you mean is a set index.
+
+        ``nb.decimals()`` reports the current precision. ``'reset'`` restores
+        the built-in precision, for the named sets or (one argument) for the
+        notebook and every set. Since a value is rounded either to significant
+        figures or to decimal places, setting this clears :attr:`sig_figs`.
+
+        Note that the Markdown output of ``table``/``summary`` re-renders plain
+        numeric columns without the trailing zeros; the HTML table, the
+        ``'fig'`` table and the hover readouts keep them.
+
+        Args:
+            uset_slice (int, list, 'all', Dataset, or int): Dataset selector,
+                or — alone — the notebook-wide number of decimal places.
+            dec_val (int or 'reset'): Decimal places (>= 0), or 'reset'.
+
+        Examples:
+            nb.decimals(2)          # two places everywhere
+            nb.decimals(0, 3)       # set 0 shows three, the rest the default
+            nb.decimals(0)          # whole numbers everywhere (one value form)
+            nb.decimals('reset')    # built-in precision everywhere
+        """
+        return self._set_precision('decimals', uset_slice, dec_val)
+
     def zorder(self, uset_slice=None, z_val=None):
         """
         Set the draw order (z-order) for the specified dataset(s).
@@ -6543,8 +6800,8 @@ class UnichartNotebook:
 
         Copies the full styling bundle — color, marker, linestyle, markersize,
         linewidth, edgewidth, alpha, edge_color, fill, hue, hue_palette,
-        hue_order, style, and display_parms — so the targets read as visual
-        twins of the source. Nothing analytical or identifying carries over:
+        hue_order, style, display_parms, sig_figs and decimals — so the
+        targets read as visual twins of the source. Nothing analytical or identifying carries over:
         titles, queries, the select flag, ``plot_type`` and ``reg_order`` all
         stay the target's own. Column-dependent attributes (``hue``,
         ``display_parms``) only copy where the target actually has those
@@ -6726,6 +6983,8 @@ class UnichartNotebook:
             'hue_order':   lambda: None,
             'reg_order':   lambda: None,
             'zorder':      lambda: 0,
+            'sig_figs':    lambda: fmt.get('sig_figs', None),
+            'decimals':    lambda: fmt.get('decimals', None),
             'plot_type':   lambda: 'scatter',
         }
         if attrs is None:
@@ -6985,7 +7244,8 @@ class UnichartNotebook:
 
     def set_default_format(self, markersize=None, linestyle=None, linewidth=None,
                            edgewidth=None, edge_color=None, alpha=None, fill=None,
-                           marker=_UNSET, hue_palette=None, alpha_marker=_UNSET,
+                           marker=_UNSET, hue_palette=None, sig_figs=None,
+                           decimals=None, alpha_marker=_UNSET,
                            alpha_line=_UNSET, figsize=None, legend=None,
                            suppress_legends=None, ncols=None, nrows=None,
                            hspace=None, vspace=None,
@@ -7004,7 +7264,8 @@ class UnichartNotebook:
         hspace, vspace, barmode, agg, histfunc, histnorm, points, boxmode) seed the matching argument of the
         plot methods whenever a call doesn't pass its own value; an explicit
         per-call argument always wins. Only the values you pass change; others
-        persist. Color remains controlled by ``color_map``.
+        persist — except ``sig_figs`` and ``decimals``, two spellings of one
+        knob, which clear each other. Color remains controlled by ``color_map``.
 
         ``reset=True`` restores *all* of the above — per-dataset styles, figsize,
         and the per-call defaults — to their built-ins, and ignores other args
@@ -7020,6 +7281,14 @@ class UnichartNotebook:
             Default marker-only / line-only opacity for future datasets
             (see :meth:`alpha_marker`, :meth:`alpha_line`). ``None`` means
             "same as alpha".
+        sig_figs : int (>= 1)
+            Default significant figures for *displayed* values (table cells,
+            summary statistics, hover readouts) of future datasets — see
+            :meth:`sig_figs`, which also restyles the sets already loaded.
+        decimals : int (>= 0)
+            The fixed-decimal-places spelling of ``sig_figs`` (see
+            :meth:`decimals`). The two are alternatives: passing one clears the
+            other, and passing both raises.
         linestyle : matplotlib/Plotly dash name (e.g. '--', 'dash') or None
         edge_color : color string (named, hex, or rgb)
         fill : bool (or truthy/falsy string) — filled vs. hollow markers
@@ -7130,6 +7399,18 @@ class UnichartNotebook:
                 raise TypeError("hue_palette must be a Plotly colorscale name "
                                 f"(e.g. 'Viridis'), got {type(hue_palette).__name__}")
             updates['hue_palette'] = hue_palette
+        if sig_figs is not None and decimals is not None:
+            raise ValueError("Pass either sig_figs or decimals, not both.")
+        if sig_figs is not None:
+            if isinstance(sig_figs, bool) or not isinstance(sig_figs, int) or sig_figs < 1:
+                raise ValueError(f"sig_figs must be a positive integer, got {sig_figs!r}")
+            updates['sig_figs'] = sig_figs
+            updates['decimals'] = None        # the two are alternatives
+        if decimals is not None:
+            if isinstance(decimals, bool) or not isinstance(decimals, int) or decimals < 0:
+                raise ValueError(f"decimals must be a non-negative integer, got {decimals!r}")
+            updates['decimals'] = decimals
+            updates['sig_figs'] = None
         if fill is not None:
             s = str(fill).lower()
             if s in ('true', '1', 't', 'on'):
@@ -10357,7 +10638,10 @@ class UnichartNotebook:
             display, keeping ordinary decimal notation (no scientific notation).
             Affects the rendered HTML table and Markdown output only; the
             ``output='df'`` DataFrame keeps its full-precision numeric values.
-            Mutually exclusive with ``decimals``.
+            Mutually exclusive with ``decimals``. Left out, each set's own
+            ``sig_figs`` / ``decimals`` (see :meth:`sig_figs`,
+            :meth:`decimals`) formats its rows, and a set carrying neither
+            keeps the built-in ``.5g`` display.
         decimals : int, optional
             The fixed-decimal-places alternative to ``sig_figs``: round every
             float column to this many places after the point, keeping trailing
@@ -10604,11 +10888,21 @@ class UnichartNotebook:
 
         final_df = pd.concat(combined_dfs, ignore_index=True)
 
+        # With neither argument given, each set's own ``sig_figs`` /
+        # ``decimals`` (see :meth:`sig_figs`, :meth:`decimals`) decides its
+        # rows' precision, so the format can vary row by row — the 'Set' column
+        # says which set a row came from.
+        set_fmt = ({ds.index: self._set_display_fmt(ds.sig_figs, ds.decimals)
+                    for ds in self.sets}
+                   if sig_figs is None and decimals is None else {})
+        per_set_sig = any(f is not None for f in set_fmt.values())
+
         # Capture float columns before fillna (which can turn columns
         # containing NaN into object dtype) so the sig_figs / decimals
         # formatting below knows which columns to round.
         float_cols = (list(final_df.select_dtypes(include='float').columns)
-                      if sig_figs is not None or decimals is not None else [])
+                      if sig_figs is not None or decimals is not None or per_set_sig
+                      else [])
 
         final_df = final_df.fillna('-')
 
@@ -10621,6 +10915,11 @@ class UnichartNotebook:
                    else (lambda v: self._decimals_str(v, decimals)))
             for c in float_cols:
                 final_df[c] = final_df[c].map(fmt)
+        elif per_set_sig:
+            row_fmt = [set_fmt.get(i) for i in final_df['Set']]
+            for c in float_cols:
+                final_df[c] = [f(v) if f else v
+                               for v, f in zip(final_df[c], row_fmt)]
 
         if output == 'md':
             try:
@@ -10637,6 +10936,16 @@ class UnichartNotebook:
 
         self._display_html_table(self._format_table_display(final_df),
                                  title=title)
+
+    def _set_display_fmt(self, sig_figs, decimals):
+        """Formatter for one set's displayed values, from its ``sig_figs`` /
+        ``decimals`` attributes — or None when the set carries neither and the
+        caller's own built-in precision should stand."""
+        if sig_figs:
+            return lambda v: self._sig_fig_str(v, sig_figs)
+        if decimals is not None:
+            return lambda v: self._decimals_str(v, decimals)
+        return None
 
     @staticmethod
     def _sig_fig_str(v, sig_figs):
@@ -10669,15 +10978,17 @@ class UnichartNotebook:
     @staticmethod
     def _format_table_display(final_df, fmt='.5g'):
         """
-        Copy of ``final_df`` with float columns rendered for display. Columns
-        already turned into strings (by ``sig_figs``) are left alone.
+        Copy of ``final_df`` with float columns rendered for display. Values
+        already turned into strings (by ``sig_figs``/``decimals``) are left
+        alone — including in a column where only *some* rows were formatted,
+        which a per-set ``sig_figs`` produces and which pandas stores as an
+        object column.
         """
         display_df = final_df.copy()
         for col in display_df.columns:
-            if display_df[col].dtype in ['float64', 'float32']:
+            if display_df[col].dtype.kind in ('f', 'O'):
                 display_df[col] = display_df[col].apply(
-                    lambda x: f"{x:{fmt}}"
-                    if isinstance(x, (int, float)) and x != '-' else x)
+                    lambda x: f"{x:{fmt}}" if isinstance(x, float) else x)
         return display_df
 
     def _build_table_figure(self, final_df, title=None):
@@ -11587,8 +11898,11 @@ class UnichartNotebook:
             keeping ordinary decimal notation (no scientific notation). Affects
             the rendered HTML table, the Markdown output and the ``'fig'``
             table only; the ``output='df'`` DataFrame keeps its full-precision
-            numeric values. Without it (or ``decimals``), statistics display as
-            ``.4g``. Mutually exclusive with ``decimals``.
+            numeric values. Without it (or ``decimals``), each set's own
+            ``sig_figs`` / ``decimals`` (see :meth:`sig_figs`,
+            :meth:`decimals`) formats its rows, and a set carrying neither
+            displays its statistics as ``.4g``. Mutually exclusive with
+            ``decimals``.
         decimals : int, optional
             The fixed-decimal-places alternative to ``sig_figs``: round every
             statistic to this many places after the point, keeping trailing
@@ -11726,13 +12040,19 @@ class UnichartNotebook:
         final_df["Count"] = final_df["Count"].astype(int)
         final_df = final_df.fillna('-')
         if sig_figs is not None:
-            stat_fmt = lambda v: self._sig_fig_str(v, sig_figs)
+            stat_fmt = lambda v, f: self._sig_fig_str(v, sig_figs)
         elif decimals is not None:
-            stat_fmt = lambda v: self._decimals_str(v, decimals)
+            stat_fmt = lambda v, f: self._decimals_str(v, decimals)
         else:
-            stat_fmt = lambda v: f"{v:.4g}" if isinstance(v, float) else v
+            # No explicit argument: each set's own sig_figs / decimals (see
+            # :meth:`sig_figs`, :meth:`decimals`), falling back to .4g.
+            stat_fmt = lambda v, f: (f(v) if f else
+                                     (f"{v:.4g}" if isinstance(v, float) else v))
+        set_fmt = {ds.index: self._set_display_fmt(ds.sig_figs, ds.decimals)
+                   for ds in self.sets}
+        row_fmt = [set_fmt.get(i) for i in final_df["Set"]]
         for c in stat_cols:
-            final_df[c] = final_df[c].map(stat_fmt)
+            final_df[c] = [stat_fmt(v, f) for v, f in zip(final_df[c], row_fmt)]
 
         if output == 'md':
             try:
@@ -11773,6 +12093,7 @@ class UnichartNotebook:
                               'alpha_marker', 'alpha_line', 'fill',
                               'linestyle', 'linewidth', 'edgewidth', 'hue',
                               'hue_palette', 'reg_order', 'copy_format',
+                              'sig_figs', 'decimals',
                               'set_color_palette',
                               'var_format', 'clear_var_format', 'list_var_formats',
                               'set_display_parms', 'set_title', 'set_default_format',
@@ -12084,6 +12405,8 @@ def new_uc(
     alpha_line=_DATASET_FORMAT_DEFAULTS['alpha_line'],
     fill=_DATASET_FORMAT_DEFAULTS['fill'],
     hue_palette=AUTO,
+    sig_figs=_DATASET_FORMAT_DEFAULTS['sig_figs'],
+    decimals=_DATASET_FORMAT_DEFAULTS['decimals'],
     # ---- figure / per-call plot defaults -----------------------------
     figsize=(12, 8),
     legend='above',
@@ -12218,7 +12541,8 @@ def new_uc(
         'marker': marker, 'markersize': markersize, 'linestyle': linestyle,
         'linewidth': linewidth, 'edgewidth': edgewidth, 'edge_color': edge_color,
         'alpha': alpha, 'alpha_marker': alpha_marker, 'alpha_line': alpha_line,
-        'fill': fill, 'hue_palette': hue_palette,
+        'fill': fill, 'hue_palette': hue_palette, 'sig_figs': sig_figs,
+        'decimals': decimals,
         'figsize': figsize, 'legend': legend, 'suppress_legends': suppress_legends,
         'legend_scroll': legend_scroll, 'ncols': ncols, 'nrows': nrows,
         'hspace': hspace, 'vspace': vspace, 'barmode': barmode, 'agg': agg,

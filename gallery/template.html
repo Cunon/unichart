@@ -1,0 +1,461 @@
+<!--HEAD-->
+<title>Unichart Plot Gallery</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<!--PLOTLY-->
+<style>
+  :root {
+    color-scheme: light dark;
+    --ground:      #eceff3;
+    --surface:     #ffffff;
+    --ink:         #14181e;
+    --muted:       #5b6573;
+    --rule:        #d6dbe2;
+    --rule-soft:   #e4e8ee;
+    --accent:      #b04420;
+    --slab:        #f4f6f8;
+    --slab-ink:    #2b323b;
+    --slab-rule:   #e0e5eb;
+    --tok-comment: #8a94a2;
+    --tok-string:  #3f6b4a;
+    --tok-number:  #7a4b9c;
+    --tok-call:    #b04420;
+    --shadow:      0 1px 2px rgba(20, 24, 30, .06), 0 8px 24px -16px rgba(20, 24, 30, .3);
+
+    --step--1: 0.8125rem;
+    --step-0:  1rem;
+    --step-1:  1.1875rem;
+    --step-2:  1.5rem;
+    --step-3:  2.125rem;
+    --step-4:  3rem;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0d1014;
+      --surface:     #161b21;
+      --ink:         #e2e7ed;
+      --muted:       #98a2b0;
+      --rule:        #262d36;
+      --rule-soft:   #1e242b;
+      --accent:      #ef8355;
+      --slab:        #10151a;
+      --slab-ink:    #cdd5de;
+      --slab-rule:   #242b33;
+      --tok-comment: #6b7684;
+      --tok-string:  #8fbf9c;
+      --tok-number:  #c3a2e0;
+      --tok-call:    #ef8355;
+      --shadow:      0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -16px rgba(0, 0, 0, .8);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #0d1014;
+    --surface:     #161b21;
+    --ink:         #e2e7ed;
+    --muted:       #98a2b0;
+    --rule:        #262d36;
+    --rule-soft:   #1e242b;
+    --accent:      #ef8355;
+    --slab:        #10151a;
+    --slab-ink:    #cdd5de;
+    --slab-rule:   #242b33;
+    --tok-comment: #6b7684;
+    --tok-string:  #8fbf9c;
+    --tok-number:  #c3a2e0;
+    --tok-call:    #ef8355;
+    --shadow:      0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -16px rgba(0, 0, 0, .8);
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: var(--step-0);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  img { max-width: 100%; }
+
+  .wrap {
+    width: 100%;
+    max-width: 980px;
+    margin-inline: auto;
+    padding-inline: 20px;
+  }
+
+  /* ---------------- masthead ---------------- */
+
+  .masthead { padding-block: clamp(40px, 8vw, 78px) 30px; }
+
+  .marque {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: var(--step--1);
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 18px;
+  }
+  .marque b { color: var(--accent); font-weight: 600; letter-spacing: .09em; }
+
+  h1 {
+    font-size: var(--step-4);
+    line-height: 1.05;
+    letter-spacing: -.025em;
+    font-weight: 600;
+    margin: 0 0 18px;
+    text-wrap: balance;
+  }
+
+  .lede {
+    margin: 0;
+    max-width: 62ch;
+    font-size: var(--step-1);
+    color: var(--muted);
+  }
+  .lede code { color: var(--ink); }
+
+  /* ---------------- chart-kind atlas ---------------- */
+
+  .atlas { margin-block: 10px 6px; }
+  .atlas h2 {
+    font-size: var(--step-2);
+    letter-spacing: -.015em;
+    margin: 0 0 4px;
+    font-weight: 600;
+  }
+  .atlas > p { margin: 0 0 20px; color: var(--muted); font-size: var(--step--1); }
+
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+    gap: 12px;
+  }
+
+  .tile {
+    display: grid;
+    align-content: start;
+    gap: 2px;
+    padding: 8px 8px 10px;
+    text-decoration: none;
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    transition: border-color .12s ease, transform .12s ease;
+  }
+  .tile img {
+    display: block;
+    width: 100%;
+    height: auto;
+    margin-bottom: 7px;
+    border-radius: 3px;
+    background: #ffffff;
+  }
+  .tile-name { font-size: var(--step--1); font-weight: 600; line-height: 1.25; }
+  .tile-api {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11px;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+  }
+  .tile:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ---------------- sticky index ---------------- */
+
+  .index {
+    position: sticky;
+    top: env(safe-area-inset-top, 0px);
+    z-index: 10;
+    background: color-mix(in srgb, var(--ground) 88%, transparent);
+    backdrop-filter: blur(8px);
+    border-block: 1px solid var(--rule);
+    margin-block: 40px 0;
+  }
+  .index .wrap {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding-block: 9px;
+  }
+  .index .wrap::-webkit-scrollbar { display: none; }
+  .index a {
+    flex: none;
+    padding: 4px 11px;
+    border-radius: 999px;
+    color: var(--muted);
+    text-decoration: none;
+    font-size: var(--step--1);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .index a:hover { color: var(--ink); background: var(--rule-soft); }
+  .index a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ---------------- setup ---------------- */
+
+  .setup {
+    margin-block: 44px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+    gap: 30px;
+    align-items: start;
+  }
+  .setup h2 { font-size: var(--step-2); margin: 0 0 12px; letter-spacing: -.015em; }
+  .setup p { margin: 0 0 12px; color: var(--muted); }
+  .setup p:last-child { margin-bottom: 0; }
+  .setup dl {
+    margin: 18px 0 0;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 14px;
+    font-size: var(--step--1);
+    border-top: 1px solid var(--rule);
+    padding-top: 14px;
+  }
+  .setup dt {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    color: var(--accent);
+  }
+  .setup dd { margin: 0; color: var(--muted); }
+
+  /* ---------------- sections ---------------- */
+
+  .group { scroll-margin-top: 64px; padding-block: 26px 0; }
+
+  .group-head {
+    border-top: 2px solid var(--ink);
+    padding-top: 14px;
+    margin-bottom: 26px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 18px;
+  }
+  .group-head h2 {
+    font-size: var(--step-2);
+    letter-spacing: -.015em;
+    margin: 0;
+    font-weight: 600;
+  }
+  .group-head p { margin: 0; color: var(--muted); font-size: var(--step--1); }
+
+  /* ---------------- cards ---------------- */
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    box-shadow: var(--shadow);
+    margin-bottom: 26px;
+    overflow: hidden;
+    scroll-margin-top: 64px;
+  }
+
+  .card-head { padding: 22px 24px 18px; }
+
+  .api {
+    font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: var(--step--1);
+    color: var(--accent);
+    margin: 0 0 6px;
+  }
+  .card-head h3 {
+    margin: 0 0 8px;
+    font-size: var(--step-1);
+    font-weight: 600;
+    letter-spacing: -.01em;
+  }
+  .blurb { margin: 0; color: var(--muted); max-width: 64ch; font-size: var(--step--1); }
+
+  .plate {
+    margin: 0;
+    padding: 18px 24px;
+    border-top: 1px solid var(--rule-soft);
+    background: #ffffff;
+    text-align: center;
+  }
+  /* the figure closes the card, so its own bottom rule would double the border */
+  .card > .plate:last-child { border-bottom: none; }
+  .plate--dark { background: #000000; }
+  .plate img { height: auto; display: inline-block; }
+
+  .chart { width: 100%; }
+  .chart:empty::after {
+    content: "loading chart\2026";
+    display: grid;
+    place-items: center;
+    height: 100%;
+    font-size: var(--step--1);
+    color: var(--muted);
+  }
+  .plate--dark .chart:empty::after { color: #8a8a8a; }
+  .noplotly .chart:empty::after { content: "chart needs plotly.js"; }
+
+  .code { position: relative; background: var(--slab); border-top: 1px solid var(--slab-rule); }
+  .code pre {
+    margin: 0;
+    padding: 18px 24px;
+    overflow-x: auto;
+    font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: var(--step--1);
+    line-height: 1.65;
+    color: var(--slab-ink);
+    tab-size: 2;
+  }
+  .code .cm { color: var(--tok-comment); font-style: italic; }
+  .code .st { color: var(--tok-string); }
+  .code .nu { color: var(--tok-number); }
+  .code .fn { color: var(--tok-call); font-weight: 500; }
+
+  .copy {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    z-index: 2;
+    font: 500 12px/1 "IBM Plex Mono", ui-monospace, monospace;
+    letter-spacing: .04em;
+    color: var(--muted);
+    background: var(--surface);
+    border: 1px solid var(--slab-rule);
+    border-radius: 4px;
+    padding: 5px 9px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity .12s ease;
+  }
+  .card:hover .copy, .copy:focus-visible { opacity: 1; }
+  .copy:hover { color: var(--ink); border-color: var(--rule); }
+  .copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @media (hover: none) { .copy { opacity: 1; } }
+
+  /* ---------------- footer ---------------- */
+
+  footer {
+    margin-top: 50px;
+    border-top: 1px solid var(--rule);
+    padding-block: 26px 60px;
+    color: var(--muted);
+    font-size: var(--step--1);
+  }
+  footer p { margin: 0 0 6px; max-width: 62ch; }
+  footer code, .lede code, .setup code {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: .95em;
+  }
+
+  @media (max-width: 720px) {
+    .setup { grid-template-columns: minmax(0, 1fr); gap: 22px; }
+    .card-head, .plate, .code pre { padding-inline: 16px; }
+    .wrap { padding-inline: 16px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; scroll-behavior: auto !important; }
+  }
+</style>
+<!--/HEAD-->
+
+<header class="masthead">
+  <div class="wrap">
+    <p class="marque"><b>unichart</b> <span>example gallery</span></p>
+    <h1>Every plot, one call each.</h1>
+    <p class="lede">
+      <!--COUNT--> figures, each one produced by the few lines of code printed under it.
+      The data is the same four engine dyno runs throughout — load once, then choose what
+      to show. Every chart is live, exactly as it comes out of the notebook: hover a trace
+      for values, drag to zoom, double-click to reset.
+    </p>
+  </div>
+</header>
+
+<div class="wrap">
+<!--ATLAS-->
+</div>
+
+<nav class="index" aria-label="Sections">
+  <div class="wrap">
+    <!--NAV-->
+  </div>
+</nav>
+
+<main class="wrap">
+
+  <section class="setup" id="setup">
+    <div>
+      <h2>The data</h2>
+      <p>
+        Four runs of a piston engine on a test stand, 240 samples each at 2.5&nbsp;s,
+        sharing one schema — the shape <code>unichart</code> is built for.
+      </p>
+      <p>
+        Load it once and every example below starts from this state. No example
+        re-reads the file or touches Plotly directly.
+      </p>
+      <dl>
+        <dt>time_s</dt><dd>elapsed seconds, 0–600</dd>
+        <dt>rpm</dt><dd>crank speed, 650–3350</dd>
+        <dt>torque_nm</dt><dd>brake torque</dd>
+        <dt>power_kw</dt><dd>brake power</dd>
+        <dt>fuel_kgh</dt><dd>fuel flow</dd>
+        <dt>cht_c</dt><dd>cylinder head temp</dd>
+        <dt>egt_c</dt><dd>exhaust gas temp</dd>
+        <dt>eta_pct</dt><dd>brake thermal efficiency</dd>
+        <dt>phase</dt><dd>idle · cruise · climb · max</dd>
+        <dt>run_id</dt><dd>0–3, one dataset each</dd>
+      </dl>
+    </div>
+    <div class="code">
+      <button class="copy" type="button" data-copy="<!--SETUP_RAW-->">Copy</button>
+      <pre><code><!--SETUP--></code></pre>
+    </div>
+  </section>
+
+<!--CARDS-->
+
+</main>
+
+<footer class="wrap">
+  <p>
+    Built by <code>python gallery/make_gallery.py</code>, which executes every snippet
+    against a live <code>UnichartNotebook</code> and embeds the figure it returns — so the
+    code on a card is the code that drew the chart above it. <code>plotly.js</code> loads
+    from cdnjs; <code>--embed-js</code> inlines it for a page that needs no network, and
+    <code>--static</code> swaps the live charts for PNG stills.
+  </p>
+  <p>
+    The demo frame is written next to this page as <code>dyno_runs.csv</code>.
+    See <code>README.md</code> for the full API and <code>demo_notebooks/</code> for
+    runnable versions.
+  </p>
+</footer>
+
+<!--RUNTIME-->
+<script>
+  document.querySelectorAll('.copy').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var text = btn.getAttribute('data-copy');
+      var done = function () {
+        var was = btn.textContent;
+        btn.textContent = 'Copied';
+        setTimeout(function () { btn.textContent = was; }, 1400);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { btn.textContent = 'Press ⌘C'; });
+      } else {
+        btn.textContent = 'Select and copy';
+      }
+    });
+  });
+</script>

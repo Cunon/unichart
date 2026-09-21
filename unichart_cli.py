@@ -10,6 +10,7 @@ session::
     unichart a.csv b.csv --combine        # several files, merged into one set
     unichart runs.csv --info              # print what's in it and exit
     unichart runs.csv --html board.html   # write a static board instead of serving
+    unichart --gallery                    # open the example gallery and exit
 
 A FILE can also be a saved session — a ``.json`` from ``nb.save_session`` or a
 PNG from ``nb.save_png``, which carries its session in a metadata chunk. Those
@@ -47,6 +48,11 @@ import sys
 # Dash dependency is missing.
 
 __version__ = '0.1.0'
+
+# The example gallery is a built page in the source tree (gallery/index.html).
+# A pip install does not carry it — pyproject ships flat py-modules, no data
+# files — so --gallery falls back to pointing at the repository.
+GALLERY_URL = 'https://github.com/Cunon/unichart/tree/main/gallery'
 
 # One --panel is `method:x:y1,y2[:z]`. Everything the panel spec dict supports
 # beyond that (kwargs like nbins / barmode / overlay_sets, dataset pins) is
@@ -456,6 +462,44 @@ def _error_line(message):
     return f'{message}\n'
 
 
+def _gallery_paths():
+    """Where gallery/index.html would live, nearest layout first."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    return [os.path.join(here, 'gallery'),
+            os.path.join(os.path.dirname(here), 'gallery')]
+
+
+def _open_gallery(no_browser=False):
+    """Open the example gallery, or say where to get it. Returns an exit code."""
+    for folder in _gallery_paths():
+        page = os.path.join(folder, 'index.html')
+        if os.path.isfile(page):
+            if no_browser:
+                print(page)                     # script-friendly: the path alone
+                return 0
+            import webbrowser
+            from pathlib import Path
+            print(f'Opening {page}')
+            webbrowser.open(Path(page).as_uri())
+            return 0
+
+    # A checkout that simply hasn't built the page yet can build it; an
+    # installed copy has no gallery directory at all, so point at the repo.
+    for folder in _gallery_paths():
+        builder = os.path.join(folder, 'make_gallery.py')
+        if os.path.isfile(builder):
+            sys.stderr.write(_error_line(
+                'unichart: the gallery has not been built yet. Build it with:\n'
+                f'    python {builder}'))
+            return 1
+
+    sys.stderr.write(_error_line(
+        'unichart: the example gallery ships in the source tree, which this '
+        'install does not carry. Browse it at:\n'
+        f'    {GALLERY_URL}'))
+    return 1
+
+
 def build_parser():
     p = ColorHelpParser(
         prog='unichart',
@@ -471,6 +515,10 @@ def build_parser():
                         '.json .parquet. Omit to open an empty explorer.')
     p.add_argument('--version', action='version',
                    version=f'unichart {__version__}')
+    p.add_argument('--gallery', action='store_true',
+                   help='open the example gallery — every plot type on one '
+                        'page, each with the code that drew it — and exit. '
+                        'With --no-browser, print its path instead')
 
     load = p.add_argument_group('loading')
     load.add_argument('--combine', action='store_true',
@@ -704,6 +752,11 @@ def main(argv=None):
     if args.completion:
         print(COMPLETION_SCRIPTS[args.completion], end='')
         return 0
+
+    # Before the unichart/Dash imports: the gallery is a static page and has
+    # no reason to need the optional dashboard extra installed.
+    if args.gallery:
+        return _open_gallery(no_browser=args.no_browser)
 
     try:
         from unichart import UnichartNotebook
