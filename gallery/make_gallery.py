@@ -208,7 +208,8 @@ EXAMPLES = [
         blurb="Same data, transposed: one panel per dataset with every variable in it. "
               "ncols sets the grid; hspace and vspace set the gaps between panels, "
               "in pixels.",
-        code="nb.plot(x='time_s', y=['cht_c', 'egt_c'], by='sets', ncols=2, vspace=110)",
+        code="nb.select([0,3])\n"
+             "nb.plot(x='time_s', y=['cht_c', 'egt_c'], by='sets', vspace=110)",
     ),
     dict(
         section="start", id="ymult", thumb="Multi-axis", api="nb.plot_ymult",
@@ -290,6 +291,8 @@ EXAMPLES = [
               "the runs happened to visit, with one run's track drawn over it.",
         code="nb.combine_sets('all', title='all runs')\n"
              "nb.select(4)\n"
+             "nb.color(0, 'black')\n"
+             "nb.linestyle(0, '--')\n"
              "nb.contour(x='rpm', y='torque_nm', z='eta_pct', overlay_sets=0)",
     ),
     dict(
