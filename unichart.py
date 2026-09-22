@@ -1049,6 +1049,24 @@ def _line_label_annotation(line_spec, orientation, default_size=None):
     return anns
 
 
+# legendgroup prefix for reference lines added to the legend (``line(legend=...)``).
+_LINE_LEGEND_GROUP = '_uc_line'
+_LINE_LEGEND_RANK = 10000
+
+
+def _legend_entries(fig):
+    """Objects that can put an entry in ``fig``'s legend: the traces not
+    opted out with ``showlegend=False``, then the shapes opted in with
+    ``showlegend=True`` (shapes default to off). Plotly lists shape entries
+    after the trace entries."""
+    for tr in fig.data:
+        if getattr(tr, 'showlegend', None) is not False:
+            yield tr
+    for shp in fig.layout.shapes:
+        if shp.showlegend:
+            yield shp
+
+
 def _prefix_annotation(annotation):
     """Turn ``_line_label_annotation`` output into ``annotation_*`` kwargs for
     ``add_vline``/``add_hline``. Empty dict when there is no label.
@@ -1606,6 +1624,7 @@ class Dataset:
         self._plot_type = 'scatter'
         self._order = None
         self._zorder = 0
+        self._show_legend = True
 
     def _mark_source_modified(self):
         """Record that a column this set loaded from its source has since been
@@ -1806,6 +1825,21 @@ class Dataset:
             raise ValueError(f"Invalid value for fill: {value}")
 
     @property
+    def show_legend(self):
+        """Whether this set gets entries in plot legends (its data is drawn
+        either way). See :meth:`UnichartNotebook.legend`."""
+        return self._show_legend
+
+    @show_legend.setter
+    def show_legend(self, value):
+        if str(value).lower() in ['true', '1', 't', 'on']:
+            self._show_legend = True
+        elif str(value).lower() in ['false', '0', 'f', 'off']:
+            self._show_legend = False
+        else:
+            raise ValueError(f"Invalid value for show_legend: {value}")
+
+    @property
     def plot_type(self): return self._plot_type
 
     @plot_type.setter
@@ -1912,6 +1946,7 @@ class Dataset:
             'hue_order': self.hue_order,
             'reg_order': self.reg_order,
             'zorder': self.zorder,
+            'show_legend': self.show_legend,
             'index': self.index,
             'style': self.style,
             'display_parms': self.display_parms,
@@ -5385,7 +5420,7 @@ class UnichartNotebook:
         'color', 'marker', 'linestyle', 'markersize', 'linewidth', 'edgewidth',
         'alpha', 'alpha_marker', 'alpha_line', 'edge_color', 'fill', 'hue',
         'hue_palette', 'hue_order', 'reg_order', 'style', 'zorder',
-        'plot_type', 'set_type', 'data_type', 'display_parms', 'delta_sets',
+        'show_legend', 'plot_type', 'set_type', 'data_type', 'display_parms', 'delta_sets',
         'sig_figs', 'decimals',
     )
 
@@ -6618,6 +6653,24 @@ class UnichartNotebook:
         """
         self._set_or_reset(uset_slice, 'zorder', z_val)
 
+    def legend(self, uset_slice, show_val):
+        """
+        Show or hide the specified dataset(s) in plot legends. A hidden set's
+        data is still plotted; only its legend entries are dropped (in
+        ``plot_ymult`` with ``legend_group_by='sets'``, its whole group).
+
+        Args:
+            uset_slice (int, list, 'all', or Dataset): Dataset selector.
+            show_val (bool or str): True/False (or 'on'/'off', '1'/'0',
+                't'/'f'), or 'reset' for the default (shown).
+
+        Examples:
+            nb.legend(2, False)          # plot set 2 without a legend entry
+            nb.legend([3, 4], 'off')
+            nb.legend('all', 'reset')    # every set back in the legend
+        """
+        self._set_or_reset(uset_slice, 'show_legend', show_val)
+
     def edgewidth(self, uset_slice, width_val):
         """
         Set the marker edge width (outline thickness) for the specified dataset(s).
@@ -6983,6 +7036,7 @@ class UnichartNotebook:
             'hue_order':   lambda: None,
             'reg_order':   lambda: None,
             'zorder':      lambda: 0,
+            'show_legend': lambda: True,
             'sig_figs':    lambda: fmt.get('sig_figs', None),
             'decimals':    lambda: fmt.get('decimals', None),
             'plot_type':   lambda: 'scatter',
@@ -8182,7 +8236,8 @@ class UnichartNotebook:
     # Axes Based Decorations (Lines/Highlights/Scale)
     # ------------------------------------------------------------------
     def line(self, column, level, color='red', linestyle=None, dash=None,
-             label=None, label_size=None, label_position=None, label_color=None):
+             label=None, label_size=None, label_position=None, label_color=None,
+             legend=False):
         """Add a vertical or horizontal line to the next plot.
 
         Args:
@@ -8213,6 +8268,10 @@ class UnichartNotebook:
                 Defaults to the far end of the line ('top right' for a vertical
                 line, 'right' and above the line for a horizontal one).
             label_color (str, optional): Label text color. Defaults to ``color``.
+            legend (bool or str, optional): Add the line to the plot's legend.
+                ``True`` names the entry after ``label`` (or ``'<column> = <level>'``
+                when there is no label); a string names it explicitly. Clicking
+                the entry toggles the line. Defaults to False.
 
         On a subplot grid the label is repeated on every subplot the line is
         drawn on, matching how the line itself repeats.
@@ -8222,6 +8281,7 @@ class UnichartNotebook:
             nb.line('cht', 400, color='orange', label='limit',
                     label_size='lg', label_position='left')
             nb.line('time', 12.5, label='event', label_position=0.25)
+            nb.line('egt', 900, color='orange', legend='EGT limit')
         """
         if level in ('clear', 'reset'):
             if column == 'all':
@@ -8259,12 +8319,22 @@ class UnichartNotebook:
                 raise ValueError("label_position fraction must be between 0 and 1, "
                                  f"got {label_position}")
 
+        if legend is True:
+            legend = str(label) if label is not None else f"{column} = {level}"
+        elif legend is False or legend is None:
+            legend = None
+        elif isinstance(legend, str):
+            if not legend:
+                raise ValueError("legend name must be a non-empty string")
+        else:
+            raise TypeError(f"legend must be a bool or a string, got {type(legend).__name__}")
+
         if column not in self.lines: self.lines[column] = []
         plotly_dash = LINESTYLE_MAP_MPL_TO_PLOTLY.get(style, style)
         self.lines[column].append({'level': level, 'color': color, 'dash': plotly_dash,
                                    'label': label, 'label_size': label_size,
                                    'label_position': label_position,
-                                   'label_color': label_color})
+                                   'label_color': label_color, 'legend': legend})
 
     def highlight(self, column, range_tuple, color='yellow', alpha=0.2, opacity=None):
         """Add a highlighted region to the next plot.
@@ -8578,9 +8648,7 @@ class UnichartNotebook:
         the pinned plot area.
         """
         groups, plain = {}, []
-        for tr in fig.data:
-            if getattr(tr, 'showlegend', None) is False:
-                continue
+        for tr in _legend_entries(fig):
             name = getattr(tr, 'name', None)
             if not name:
                 continue
@@ -8660,12 +8728,11 @@ class UnichartNotebook:
 
     @staticmethod
     def _legend_items(fig):
-        """The entries Plotly draws in ``fig``'s legend, in trace order, as
+        """The entries Plotly draws in ``fig``'s legend, in trace order (then
+        legend shapes, e.g. ``line(legend=...)``), as
         ``(legendgroup, group title, name)`` with repeats dropped."""
         items, seen = [], set()
-        for tr in fig.data:
-            if getattr(tr, 'showlegend', None) is False:
-                continue
+        for tr in _legend_entries(fig):
             name = getattr(tr, 'name', None)
             if not name:
                 continue
@@ -9335,6 +9402,31 @@ class UnichartNotebook:
 
         return fig
 
+    # legendgroup prefixes the plot builders tag a dataset's traces with.
+    _SET_LEGEND_GROUPS = ('group_', 'set_', 'overlay_')
+
+    def _hide_legend_sets(self, fig):
+        """Drop the legend entries of sets hidden with :meth:`legend`, leaving
+        their traces drawn. Returns the traces it changed.
+
+        A dataset's traces are recognised by their per-set ``legendgroup`` tag,
+        or by the ``'<index>: <title>'`` name (optionally with a
+        ``' — <column>'`` suffix) the builders give them where the group is
+        keyed by variable instead (``plot_ymult`` grouped by vars)."""
+        hidden = [ds for ds in self.sets if not getattr(ds, 'show_legend', True)]
+        if fig is None or not hidden:
+            return []
+        groups = {f'{p}{ds.index}' for ds in hidden for p in self._SET_LEGEND_GROUPS}
+        names = {f'{ds.index}: {ds.title}' for ds in hidden}
+        changed = []
+        for tr in fig.data:
+            name = getattr(tr, 'name', None) or ''
+            if (getattr(tr, 'legendgroup', None) in groups or name in names
+                    or name.split(' — ')[0] in names):
+                tr.showlegend = False
+                changed.append(tr)
+        return changed
+
     def _finalize(self, fig, suppress_legends, footer=None):
         """Shared tail for every plotting method: apply the plot style and font
         sizes, add the optional footer, optionally collapse traces to
@@ -9360,10 +9452,14 @@ class UnichartNotebook:
         fig = self._apply_footer(fig, footer)
         fig = self._apply_watermark(fig)
         fig = self._enforce_plot_size(fig)
+        unlisted = self._hide_legend_sets(fig)
         if not self._apply_default('legend_scroll', None, True):
             fig = self._fit_full_legend(fig)
         if fig is not None and suppress_legends:
             fig.update_traces(visible='legendonly')
+            # A set with no legend entry would have no way to be shown again.
+            for tr in unlisted:
+                tr.visible = True
         self.last_fig = fig
         if self.static_images and fig is not None:
             # An image can't scroll: always render the whole legend.
@@ -9854,6 +9950,7 @@ class UnichartNotebook:
         # Vertical lines on x span all axes; horizontal lines on a y-var
         # are drawn on the y-axis assigned to that variable.
         yref_for = {yi: ('y' if i == 0 else f'y{i+1}') for i, yi in enumerate(y_list)}
+        legend_kw = self._line_legend_kwargs()
 
         for col, lines in self.lines.items():
             if col == x:
@@ -9861,14 +9958,16 @@ class UnichartNotebook:
                     fig.add_vline(x=l['level'],
                                   line_dash=l['dash'] or 'solid',
                                   line_color=l['color'],
-                                  **_prefix_annotation(self._line_label(l, 'vertical')))
+                                  **_prefix_annotation(self._line_label(l, 'vertical')),
+                                  **legend_kw(l))
             elif col in yref_for:
                 yref = yref_for[col]
                 for l in lines:
                     fig.add_shape(type='line', x0=0, x1=1,
                                   y0=l['level'], y1=l['level'],
                                   xref='paper', yref=yref,
-                                  line=dict(color=l['color'], dash=l['dash'] or 'solid'))
+                                  line=dict(color=l['color'], dash=l['dash'] or 'solid'),
+                                  **legend_kw(l))
                     # The shape spans paper so it reaches across the stacked
                     # y-axes; the label is placed against the x-axis domain
                     # instead, so it lands inside the plot area, not a margin.
@@ -12267,6 +12366,34 @@ class UnichartNotebook:
         return _line_label_annotation(line_spec, orientation,
                                       getattr(self, 'axes_tick_size', None))
 
+    @staticmethod
+    def _line_legend_kwargs():
+        """Per-figure factory for the legend kwargs of a reference line's shape.
+
+        A line with a ``legend`` name gets a legend entry on the first shape
+        drawn for it. Pass ``repeated=True`` where the line is copied onto
+        several subplots: the copies then share a ``legendgroup`` so clicking
+        the entry toggles them all. A single shape gets no group, since any
+        legendgroup switches Plotly to a grouped legend, which spaces out every
+        ungrouped trace entry. Lines without a name get no kwargs."""
+        seen = set()
+
+        def legend_kw(line_spec, repeated=False):
+            name = line_spec.get('legend')
+            if not name:
+                return {}
+            key = id(line_spec)
+            # legendrank past the trace default (1000) keeps the line entries
+            # after the data entries; grouped legends otherwise interleave them.
+            kw = dict(name=name, showlegend=key not in seen,
+                      legendrank=_LINE_LEGEND_RANK)
+            seen.add(key)
+            if repeated:
+                kw['legendgroup'] = f'{_LINE_LEGEND_GROUP}{key}'
+            return kw
+
+        return legend_kw
+
     def _apply_decorations(self, fig, x_vars, y_vars, mode, calc_ncols, plot_items=None,
                            highlight_layer='below', refs=None):
         """
@@ -12292,6 +12419,7 @@ class UnichartNotebook:
             r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
             return _subplot_refs(r, c, calc_ncols)
 
+        legend_kw = self._line_legend_kwargs()
         for col_name, col_lines in self.lines.items():
             if col_name in x_list:
                 if mode == 'vars' and plot_items:
@@ -12302,7 +12430,8 @@ class UnichartNotebook:
                                 fig.add_shape(
                                     type='line', x0=l['level'], x1=l['level'], y0=0, y1=1,
                                     xref=xref, yref=f'{yref} domain',
-                                    line=dict(color=l['color'], dash=l['dash'] or 'solid')
+                                    line=dict(color=l['color'], dash=l['dash'] or 'solid'),
+                                    **legend_kw(l, repeated=True)
                                 )
                                 ann = self._line_label(l, 'vertical')
                                 if ann:
@@ -12310,7 +12439,8 @@ class UnichartNotebook:
                 else:
                     for l in col_lines:
                         fig.add_vline(x=l['level'], line_dash=l['dash'] or 'solid', line_color=l['color'],
-                                      **_prefix_annotation(self._line_label(l, 'vertical')))
+                                      **_prefix_annotation(self._line_label(l, 'vertical')),
+                                      **legend_kw(l))
 
             if col_name in y_list:
                 if mode == 'vars' and plot_items:
@@ -12321,7 +12451,8 @@ class UnichartNotebook:
                                 fig.add_shape(
                                     type='line', x0=0, x1=1, y0=l['level'], y1=l['level'],
                                     xref=f'{xref} domain', yref=yref,
-                                    line=dict(color=l['color'], dash=l['dash'] or 'solid')
+                                    line=dict(color=l['color'], dash=l['dash'] or 'solid'),
+                                    **legend_kw(l, repeated=True)
                                 )
                                 ann = self._line_label(l, 'horizontal')
                                 if ann:
@@ -12329,7 +12460,8 @@ class UnichartNotebook:
                 else:
                     for l in col_lines:
                         fig.add_hline(y=l['level'], line_dash=l['dash'] or 'solid', line_color=l['color'],
-                                      **_prefix_annotation(self._line_label(l, 'horizontal')))
+                                      **_prefix_annotation(self._line_label(l, 'horizontal')),
+                                      **legend_kw(l))
 
         for col_name, hls in self.highlights.items():
             if col_name in x_list:

@@ -184,6 +184,7 @@ nb.markersize(0, 12); nb.alpha('selected', 0.5); nb.fill(1, True)
 nb.linewidth(0, 3); nb.edgewidth(0, 1); nb.hue(0, 'category')
 nb.alpha_marker(0, 0.3); nb.alpha_line(1, 0.2)   # opacity of just the markers / just the line
 nb.zorder(2, 1)       # draw set 2 on top of the rest (higher = later = on top)
+nb.legend(3, False)   # still plot set 3, but leave it out of the legend
 nb.sig_figs(0, 4)     # set 0's values display to 4 significant figures
 nb.decimals(1, 2)     # set 1's to two decimal places instead
 ```
@@ -314,6 +315,10 @@ nb.line('cht', 350, label='target', label_position='center below', label_color='
   `'left'`/`'right'`; a horizontal line slides with `'left'`/`'center'`/`'right'`
   and picks its side with `'above'`/`'below'` (`'top'`/`'bottom'`).
 - `label_color` — defaults to the line's `color`.
+- `legend` — add the line to the legend: `True` names the entry after `label`
+  (or `'<column> = <level>'` without one), a string names it explicitly, e.g.
+  `nb.line('egt', 900, color='orange', legend='EGT limit')`. Line entries sit
+  after the data entries, and clicking one toggles the line.
 
 ### Fixed plot size / aspect ratio
 
