@@ -9451,8 +9451,8 @@ class UnichartNotebook:
         fig = self._apply_fonts(fig)
         fig = self._apply_footer(fig, footer)
         fig = self._apply_watermark(fig)
-        fig = self._enforce_plot_size(fig)
         unlisted = self._hide_legend_sets(fig)
+        fig = self._enforce_plot_size(fig)
         if not self._apply_default('legend_scroll', None, True):
             fig = self._fit_full_legend(fig)
         if fig is not None and suppress_legends:
@@ -12420,6 +12420,23 @@ class UnichartNotebook:
             return _subplot_refs(r, c, calc_ncols)
 
         legend_kw = self._line_legend_kwargs()
+
+        def _add_spanning_line(add, l, orientation, **pos):
+            # add_vline/add_hline copy one set of kwargs onto every subplot, so
+            # on a grid each copy would get its own legend entry. Group the
+            # copies afterwards and keep the entry on the first one only.
+            n0 = len(fig.layout.shapes)
+            kw = legend_kw(l)
+            add(**pos, line_dash=l['dash'] or 'solid', line_color=l['color'],
+                **_prefix_annotation(self._line_label(l, orientation)), **kw)
+            copies = fig.layout.shapes[n0:]
+            if kw and len(copies) > 1:
+                group = legend_kw(l, repeated=True)['legendgroup']
+                for i, shape in enumerate(copies):
+                    shape.legendgroup = group
+                    if i:
+                        shape.showlegend = False
+
         for col_name, col_lines in self.lines.items():
             if col_name in x_list:
                 if mode == 'vars' and plot_items:
@@ -12438,9 +12455,7 @@ class UnichartNotebook:
                                     fig.add_annotation(xref=xref, yref=f'{yref} domain', **ann)
                 else:
                     for l in col_lines:
-                        fig.add_vline(x=l['level'], line_dash=l['dash'] or 'solid', line_color=l['color'],
-                                      **_prefix_annotation(self._line_label(l, 'vertical')),
-                                      **legend_kw(l))
+                        _add_spanning_line(fig.add_vline, l, 'vertical', x=l['level'])
 
             if col_name in y_list:
                 if mode == 'vars' and plot_items:
@@ -12459,9 +12474,7 @@ class UnichartNotebook:
                                     fig.add_annotation(xref=f'{xref} domain', yref=yref, **ann)
                 else:
                     for l in col_lines:
-                        fig.add_hline(y=l['level'], line_dash=l['dash'] or 'solid', line_color=l['color'],
-                                      **_prefix_annotation(self._line_label(l, 'horizontal')),
-                                      **legend_kw(l))
+                        _add_spanning_line(fig.add_hline, l, 'horizontal', y=l['level'])
 
         for col_name, hls in self.highlights.items():
             if col_name in x_list:
