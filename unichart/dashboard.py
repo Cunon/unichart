@@ -1,6 +1,6 @@
 """On-the-fly Dash dashboards that combine multiple unichart figures.
 
-`unichart.py` plotting methods each return a Plotly ``go.Figure`` and cache the
+`UnichartNotebook` plotting methods each return a Plotly ``go.Figure`` and cache the
 most recent one in ``nb.last_fig``. This module wires those figures into an
 interactive Dash board with one shared data context: a header bar owns the
 dataset selection and the light/dark theme for *every* panel, and each panel
@@ -9,7 +9,7 @@ variables, title, legend position).
 
 Typical use, inline in a Jupyter notebook::
 
-    from unichart_dashboard import dashboard
+    from unichart.dashboard import dashboard
 
     dashboard(nb, panels=[
         {'method': 'plot', 'x': 'time', 'y': 'temp'},
@@ -57,11 +57,12 @@ _RENDER_LOCK = threading.Lock()
 # contour panel with no z renders a graceful in-panel error. table renders a
 # go.Table of the selected columns (the y control picks the columns); it has a
 # different signature, so render_panel dispatches it through a dedicated branch.
-PLOT_METHODS = ['plot', 'plot_ymult', 'bar', 'box', 'histogram', 'contour', 'table']
+PLOT_METHODS = ['plot', 'plot_ymult', 'plot_marginal', 'bar', 'box', 'histogram',
+                'contour', 'table']
 
 # Methods whose signature accepts a `legend=` argument (above/right/off). The
 # legend control is only shown — and only passed through — for these.
-_LEGEND_METHODS = {'plot', 'plot_ymult'}
+_LEGEND_METHODS = {'plot', 'plot_ymult', 'plot_marginal'}
 
 # Methods that take a `z=` column (mapped to color). The z dropdown is only
 # shown — and only passed through — for these.
@@ -290,8 +291,8 @@ def _require_dash():
                           Input, Output, State, MATCH, ALL)
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise ImportError(
-            "unichart_dashboard requires Dash. Install it with "
-            "`pip install dash` (or add it to requirements.txt)."
+            "unichart.dashboard requires Dash, which is missing from this "
+            "environment. Reinstall it with `pip install \"dash>=4\"`."
         ) from exc
     return (Dash, dcc, html, dash_table, no_update,
             Input, Output, State, MATCH, ALL)
@@ -386,6 +387,10 @@ def render_panel(nb, method, x, y, dataset_indices, suptitle=None, legend='above
         # notebook is untouched after the board runs.
         select_snapshot = [(ds, ds.select) for ds in nb.sets]
         darkmode_snapshot = nb.darkmode
+        # Panels are fixed-size cards (_stamp overwrites width/height), so a
+        # figure grown to fit its whole legend would crush its plot area: keep
+        # the scrolling legend here whatever legend_scroll says.
+        fit_snapshot = getattr(nb, '_legend_fit_enabled', True)
         state_snapshot = {k: getattr(nb, k) for k in vars(nb)
                           if k.startswith('last_')}
         try:
@@ -396,6 +401,7 @@ def render_panel(nb, method, x, y, dataset_indices, suptitle=None, legend='above
             # Null last_fig first so the method's _clear_last_fig doesn't empty
             # (data=[], layout={}) the figure the user had cached before the board.
             nb.last_fig = None
+            nb._legend_fit_enabled = False
 
             # The y control is multi-select (a list), but some methods (e.g.
             # histogram) require a scalar y. Unwrap a single selection so every
@@ -461,6 +467,7 @@ def render_panel(nb, method, x, y, dataset_indices, suptitle=None, legend='above
             for ds, was in select_snapshot:
                 ds.select = was
             nb.darkmode = darkmode_snapshot
+            nb._legend_fit_enabled = fit_snapshot
             # Drop any last_* attribute the render created (e.g. contour's
             # last_z on a notebook that had never plotted a contour), then
             # restore the snapshotted values.
@@ -670,16 +677,17 @@ def _numish(v):
         return False
 
 
-def _table_records(trace, sig_figs=None):
+def _table_records(trace, sig_figs=None, decimals=None):
     """DataTable ``(data, columns)`` for a live-board table panel.
 
     Built from the same ``go.Table`` trace the panel used to display, so the
     content matches ``table()`` exactly. Numeric-looking columns are converted
-    to real numbers and typed ``'numeric'`` — with ``sig_figs`` applied the
-    trace's cells are pre-formatted *strings*, which DataTable's native sort
-    would order lexically ("9.5" > "10.2"). The d3 ``r`` (significant-digit
-    decimal) format re-applies the same rounding for display. ``'-'`` (the
-    table's NaN fill) stays text and shows as-is.
+    to real numbers and typed ``'numeric'`` — with ``sig_figs``/``decimals``
+    applied the trace's cells are pre-formatted *strings*, which DataTable's
+    native sort would order lexically ("9.5" > "10.2"). The d3 ``r``
+    (significant-digit decimal) / ``f`` (fixed decimal places) format
+    re-applies the same rounding for display. ``'-'`` (the table's NaN fill)
+    stays text and shows as-is.
     """
     from dash.dash_table.Format import Format, Scheme
 
@@ -689,13 +697,16 @@ def _table_records(trace, sig_figs=None):
         spec = {'name': h, 'id': h}
         if col and all(_numish(v) for v in col):
             spec['type'] = 'numeric'
-            # table() applies sig_figs to float columns only (ints pass
-            # through untouched), so only re-apply the display rounding where
-            # it did: a pure-int column keeps its plain rendering.
-            if sig_figs and not all(isinstance(v, (int, np.integer))
-                                    for v in col):
-                spec['format'] = Format(precision=sig_figs,
-                                        scheme=Scheme.decimal)
+            # table() applies sig_figs / decimals to float columns only
+            # (ints pass through untouched), so only re-apply the display
+            # rounding where it did: a pure-int column keeps its plain
+            # rendering.
+            if ((sig_figs or decimals is not None)
+                    and not all(isinstance(v, (int, np.integer)) for v in col)):
+                spec['format'] = (Format(precision=sig_figs,
+                                         scheme=Scheme.decimal) if sig_figs
+                                  else Format(precision=decimals,
+                                              scheme=Scheme.fixed))
             col = [float(v) if isinstance(v, str) and v.strip() not in ('', '-')
                    else v for v in col]
         specs.append(spec)
@@ -851,7 +862,8 @@ def _register_board_callbacks(app, nb, size):
         if (method in _TABLE_METHODS and fig.data
                 and fig.data[0].type == 'table'):
             data, columns = _table_records(
-                fig.data[0], sig_figs=(extra or {}).get('sig_figs'))
+                fig.data[0], sig_figs=(extra or {}).get('sig_figs'),
+                decimals=(extra or {}).get('decimals'))
             return no_update, data, columns, 'hidden', ''
         # Non-table methods — and a table render that *failed* (render_panel
         # returns an error figure, not a table trace) — paint the graph.
@@ -877,8 +889,8 @@ def _register_board_callbacks(app, nb, size):
         Input({'type': 'panel-method', 'index': MATCH}, 'value'),
     )
     app.clientside_callback(
-        "function(method){ return (method === 'plot' || method === 'plot_ymult')"
-        " ? 'control' : 'control hidden'; }",
+        "function(method){ return (method === 'plot' || method === 'plot_ymult'"
+        " || method === 'plot_marginal') ? 'control' : 'control hidden'; }",
         Output({'type': 'panel-legend-wrap', 'index': MATCH}, 'className'),
         Input({'type': 'panel-method', 'index': MATCH}, 'value'),
     )
@@ -1233,12 +1245,22 @@ _UPLOAD_READERS = {
 }
 
 
+def _upload_bytes(contents):
+    """The raw bytes behind one ``dcc.Upload`` payload.
+
+    Upload hands back a ``data:<mime>;base64,<payload>`` string rather than a
+    path. Split out from :func:`_df_from_upload` because a drop is not always a
+    data frame — the explorer sniffs these bytes for a saved session first.
+    """
+    _, _, payload = contents.partition(',')
+    return base64.b64decode(payload)
+
+
 def _df_from_upload(contents, filename):
     """Decode one ``dcc.Upload`` payload into a DataFrame.
 
-    Upload hands back a ``data:<mime>;base64,<payload>`` string rather than a
-    path, so the bytes are read in memory instead of through ``nb.load``. The
-    reader is picked from the original filename's extension.
+    The bytes are read in memory instead of through ``nb.load``, with the
+    reader picked from the original filename's extension.
     """
     suffix = Path(filename).suffix.lower()
     reader = _UPLOAD_READERS.get(suffix)
@@ -1246,8 +1268,7 @@ def _df_from_upload(contents, filename):
         raise ValueError(
             f"Can't read {filename!r} — supported: "
             f"{', '.join(sorted(_UPLOAD_READERS))}")
-    _, _, payload = contents.partition(',')
-    return reader(io.BytesIO(base64.b64decode(payload)), {})
+    return reader(io.BytesIO(_upload_bytes(contents)), {})
 
 
 # Columns that are row labels rather than measurements. They are still
@@ -1290,8 +1311,9 @@ def _default_panel_spec(nb):
     return {'method': 'plot', 'x': ranked[0], 'y': [ranked[1]]}
 
 
-def explore(nb=None, data=None, panels=None, title=None, port=8050,
-            debug=False, open_browser=None, jupyter_mode=None, **run_kwargs):
+def explore(nb=None, data=None, sessions=None, panels=None, title=None,
+            port=8050, debug=False, open_browser=None, app_window=False,
+            jupyter_mode=None, dark=None, **run_kwargs):
     """Launch the terminal explorer — a GUI for plotting on the fly.
 
     Where :func:`dashboard` renders a board you specified in code, this opens a
@@ -1311,6 +1333,15 @@ def explore(nb=None, data=None, panels=None, title=None, port=8050,
         board unless the notebook is already in it.
     data : str | DataFrame | list, optional
         Loaded before the board opens, via ``nb.load``.
+    sessions : str | Path | list, optional
+        Session files (``.json``, or a PNG from ``save_png``) restored at
+        startup, as visible ``nb.load_session(...)`` commands — so the board
+        opens on the plot the session recorded, in the theme it was saved in.
+        Restored after ``data``, and before ``panels``.
+    dark : bool, optional
+        Force the plot theme, overriding whatever a restored session carries.
+        None (default) lets the session decide; with no session the board's
+        usual "switch to dark to match" applies either way.
     panels : list[dict], optional
         Dashboard-style panel specs, replayed as terminal commands at startup
         so they appear in the transcript. Mostly here so the ``unichart``
@@ -1321,6 +1352,20 @@ def explore(nb=None, data=None, panels=None, title=None, port=8050,
         Preferred port; a free one is chosen if it is taken.
     open_browser : bool, optional
         Defaults to True outside a Jupyter kernel, False inside one.
+    app_window : bool
+        Open the board as a standalone desktop window — no tabs, no address
+        bar, its own taskbar entry — instead of a browser tab. Needs a
+        Chromium-family browser (Chrome, Chromium, Brave, Edge), whose
+        ``--app`` mode does the work; with none installed the board opens in an
+        ordinary tab and says so. Set ``UNICHART_APP_BROWSER`` to name one the
+        search misses. The board's icon lands in the window and the tab; the
+        taskbar icon is the desktop's business (it follows on X11 and Windows,
+        while Wayland wants the board installed — the served web app manifest
+        is what makes Chrome's "Install page as app" offer a real launcher
+        entry). From a kernel this implies the external board, since an app
+        window is not an inline iframe; ``open_browser=False`` still wins, and
+        closing the window does not stop the server — the board's ✕ close
+        button does, or Ctrl-C.
     jupyter_mode : str, optional
         ``'inline'`` (default in a kernel) / ``'external'`` / ``'tab'``.
     debug, **run_kwargs
@@ -1337,17 +1382,24 @@ def explore(nb=None, data=None, panels=None, title=None, port=8050,
     127.0.0.1. It can do anything you could do at a Python prompt; it is not a
     sandbox and must not be exposed to a network.
 
+    That is also why the board can close itself: outside a Jupyter kernel the
+    process exists to serve it, so the top bar's ✕ (and ``exit()`` in the
+    terminal pane) stops the server and ends the process, after asking. In a
+    kernel the process is the kernel, so neither is offered.
+
     Examples
     --------
-    >>> from unichart_dashboard import explore
+    >>> from unichart.dashboard import explore
     >>> explore(data='runs.csv')      # standalone
     >>> explore(nb)                   # on a notebook you already have
+    >>> explore(nb, app_window=True)  # in its own desktop window
     """
-    from unichart_terminal import terminal
+    from .terminal import terminal
 
-    return terminal(nb=nb, data=data, panels=panels, title=title, port=port,
-                    debug=debug, open_browser=open_browser,
-                    jupyter_mode=jupyter_mode, **run_kwargs)
+    return terminal(nb=nb, data=data, sessions=sessions, panels=panels,
+                    title=title, port=port, debug=debug,
+                    open_browser=open_browser, app_window=app_window,
+                    jupyter_mode=jupyter_mode, dark=dark, **run_kwargs)
 
 
 def _in_notebook():
@@ -1392,7 +1444,7 @@ def dashboard(nb, panels, ncols=2, width=600, height=420, title=None,
         is the interpolation x-axis (used only with ``x_in``), and the panel
         title is the table title. Table panels display as a DataTable with
         native sorting — click a column header to sort (numeric columns sort
-        numerically, including under ``sig_figs`` formatting).
+        numerically, including under ``sig_figs`` / ``decimals`` formatting).
     ncols : int
         Number of columns in the panel grid.
     width, height : int

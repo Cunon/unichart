@@ -7,53 +7,56 @@ built on [Plotly](https://plotly.com/python/).
 datasets** (test runs, simulation cases, measurement series) that share the same
 schema. Instead of hand-assembling Plotly traces, you load your data once,
 choose what to show, and get publication-ready interactive figures with a short,
-memory-ful API. A companion module, `unichart_dashboard`, wires those same
+memory-ful API. A companion module, `unichart.dashboard`, wires those same
 figures into interactive Dash boards or self-contained HTML files.
 
 - **`unichart`** — the `UnichartNotebook` plotting environment (core).
-- **`unichart_dashboard`** — optional Dash dashboards built from notebook panels.
-- **`unichart_terminal`** — the `explore()` GUI: a sidebar, a chart pane and a
+- **`unichart.dashboard`** — Dash dashboards built from notebook panels.
+- **`unichart.terminal`** — the `explore()` GUI: a sidebar, a chart pane and a
   Python terminal for plotting on the fly.
-- **`unichart_cli`** — the `unichart` command: open that GUI on a data file
+- **`unichart.cli`** — the `unichart` command: open that GUI on a data file
   straight from a terminal.
 
 ---
 
 ## Installation
 
-Install directly from GitHub with pip:
-
 ```bash
-pip install git+https://github.com/Cunon/unichart.git
+pip install unichart
 ```
 
 Optional extras:
 
 ```bash
 # Trend lines / regressions (LOWESS smoothing via statsmodels)
-pip install "unichart[trend] @ git+https://github.com/Cunon/unichart.git"
+pip install "unichart[trend]"
 
-# Interactive web dashboards (Dash)
-pip install "unichart[dashboard] @ git+https://github.com/Cunon/unichart.git"
+# High-resolution PNG export (kaleido)
+pip install "unichart[png]"
 
 # Everything
-pip install "unichart[all] @ git+https://github.com/Cunon/unichart.git"
+pip install "unichart[all]"
 ```
 
-The `unichart` command comes with the package. Its GUI needs the `dashboard`
-extra (`--info` and `--html` work without it):
+The `unichart` command comes with the package:
 
 ```bash
-pip install "unichart[dashboard] @ git+https://github.com/Cunon/unichart.git"
 unichart runs.csv
+```
+
+For the latest development version, install from GitHub:
+
+```bash
+pip install "unichart[all] @ git+https://github.com/Cunon/unichart.git"
 ```
 
 ### Requirements
 
-- Python >= 3.9
-- `pandas`, `numpy`, `plotly`, `scipy`, `ipywidgets`, `ipython` (installed automatically)
-- Optional: `statsmodels` for trend lines, `dash` for dashboards and the
-  `unichart` command's GUI, `kaleido` for static-image / PNG export
+- Python >= 3.10
+- `pandas`, `numpy`, `plotly`, `scipy`, `ipywidgets`, `ipython` and `dash` (installed automatically)
+- Optional: `statsmodels` for trend lines, `kaleido` for static-image / PNG export.
+  The `png` extra installs kaleido 1.x, which renders through Chrome; if none is
+  installed, run `plotly_get_chrome` once.
 
 ---
 
@@ -237,7 +240,7 @@ nb.var_format(['CHT1', 'CHT2'], reset=True)           # drop all their overrides
   opacity, position and size (see below).
 - `set_static_images(True)` / `save_png(...)` — render flat PNGs inline (keeps
   notebook file size down) or export a high-resolution PNG (needs `kaleido`:
-  `pip install unichart[png]`).
+  `pip install "unichart[png]"`).
   Every saved PNG also carries the full plotting session (data, queries,
   formatting and the plot call) in a metadata chunk, so
   `UnichartNotebook.from_session('plot.png')` or `nb.load_session('plot.png')`
@@ -473,7 +476,7 @@ Two consistent rules cover every reset:
 
 ---
 
-## Dashboards (`unichart_dashboard`)
+## Dashboards (`unichart.dashboard`)
 
 The same figures compose into an interactive **Dash** board with one shared data
 context: a header bar owns the dataset selection and the light/dark theme for
@@ -519,7 +522,7 @@ datasets and a clickable cheat sheet; a chart pane showing the latest figure;
 and a Python terminal underneath.
 
 ```python
-from unichart_dashboard import explore
+from unichart.dashboard import explore
 
 explore(data='runs.csv')   # standalone — serves the board and opens your browser
 explore()                  # empty; drop a file on the sidebar, or hit "Load demo data"
@@ -683,7 +686,7 @@ would be. A missing file or malformed `--panel` prints one line and exits
 non-zero rather than raising.
 
 If `unichart` isn't found after installing, the module is runnable directly:
-`python -m unichart_cli runs.csv`.
+`python -m unichart runs.csv`.
 
 #### Tab completion
 
@@ -751,9 +754,9 @@ Dash is imported lazily, so the core toolkit never requires it.
 ## Learning more
 
 - **`nb.help()`** — live, categorized API reference inside the notebook.
-- **[`PLOTTING_STYLE_GUIDE.md`](PLOTTING_STYLE_GUIDE.md)** — conventions for
+- **[`PLOTTING_STYLE_GUIDE.md`](https://github.com/Cunon/unichart/blob/main/PLOTTING_STYLE_GUIDE.md)** — conventions for
   producing clean, consistent figures.
-- **[`demo_notebooks/`](demo_notebooks/)** — runnable examples covering the main
+- **[`demo_notebooks/`](https://github.com/Cunon/unichart/tree/main/demo_notebooks)** — runnable examples covering the main
   features:
   - `UnichartNotebook_Tutorial.ipynb`, `unichart_data_model_tutorial.ipynb` — start here.
   - `dashboard_demo.ipynb`, `dashboard_contour_demo.ipynb`,
@@ -764,12 +767,3 @@ Dash is imported lazily, so the core toolkit never requires it.
   - `plot_style_demo.ipynb` — the Matplotlib look (`set_plot_style`).
   - `contour_overlay_demo.ipynb`, `static_images_demo.ipynb`,
     `large_data_showcase.ipynb` — specialized plotting.
-
-## Usage
-
-```python
-from unichart import UnichartNotebook
-from unichart_dashboard import dashboard, explore   # optional, needs `dash`
-
-nb = UnichartNotebook()
-```

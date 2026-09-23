@@ -1,11 +1,11 @@
 # `unichart` Plotting API — Style Guide
 
-How to add a new plotting capability to `unichart.py` so its inputs and behavior
+How to add a new plotting capability to `unichart/_core.py` so its inputs and behavior
 match every existing plot. Read this before copy-pasting an existing method:
 the existing methods have drifted in a few places, and copying the wrong one
 propagates the drift. Known drift is catalogued in [§7](#7-standardization-recommendations).
 
-All line references are to `unichart.py` as of this writing — treat them as
+All line references are to `unichart/_core.py` as of this writing — treat them as
 "look near here," not exact addresses, since the file changes.
 
 ---

@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: python -m pip install -e ".[all]" pytest
+      - run: python -m pytest -q
+
+  # The dependency floors in pyproject.toml are exactly what this job installs:
+  # --resolution lowest-direct picks the oldest version each floor allows.
+  oldest-deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: false   # no uv.lock to key a cache on
+      - run: uv venv -p 3.10
+      # unichart's own dependencies at their floors, then the test/gallery
+      # tools at normal versions (lowest-direct would drag those down too).
+      # kaleido 0.2.1 is the one plotly 5.x renders with; it needs no Chrome.
+      - run: uv pip install --resolution lowest-direct .
+      - run: uv pip install pytest "kaleido==0.2.1" pillow
+      - run: uv pip list
+      - run: .venv/bin/python -m pytest -q
+      - run: .venv/bin/python gallery/make_gallery.py
+
+  # The broadest smoke test: every gallery card, rendered to PNG through kaleido.
+  gallery:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: python -m pip install ".[all]" pillow
+      - run: plotly_get_chrome -y
+      - run: python gallery/make_gallery.py
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gallery
+          path: gallery/index.html
+
+  # Build the sdist and wheel, then test the *installed* wheel rather than the
+  # source tree, from a directory that has no unichart/ in it.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build twine
+      - run: python -m build
+      - run: python -m twine check --strict dist/*
+      - name: Wheel holds only the unichart package
+        run: |
+          unzip -Z1 dist/*.whl | grep -v -e '^unichart/' -e '^unichart-[^/]*\.dist-info/' && exit 1 || true
+      # The tests (and the data they read) come from the sdist, so this also
+      # checks the sdist carries what its own tests need; the code they import
+      # is the installed wheel, since the work dir has no unichart/ in it.
+      - name: Install the wheel into a fresh venv and test it
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          . "$RUNNER_TEMP/venv/bin/activate"
+          pip install "$(ls dist/*.whl)" pytest
+          tar xzf dist/*.tar.gz -C "$RUNNER_TEMP"
+          mkdir "$RUNNER_TEMP/wt"
+          cp -r "$RUNNER_TEMP"/unichart-*/tests "$RUNNER_TEMP"/unichart-*/gallery "$RUNNER_TEMP/wt/"
+          cd "$RUNNER_TEMP/wt"
+          unichart --version
+          python -m unichart gallery/dyno_runs.csv --info
+          python -c "import unichart; assert unichart.__file__.startswith('$RUNNER_TEMP/venv'), unichart.__file__"
+          python -m pytest -q tests

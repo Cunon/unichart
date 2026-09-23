@@ -19,8 +19,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import unichart_cli
-import unichart_terminal
+from unichart import cli
+from unichart import terminal
 from unichart import UnichartNotebook
 
 warnings.filterwarnings('ignore')
@@ -39,7 +39,7 @@ def _terminal(in_notebook=False, **kwargs):
     The launcher is captured rather than called — the point of these tests is
     the argv, and actually starting a browser would open windows on whoever is
     running the suite. ``in_notebook`` fakes a Jupyter kernel, which
-    ``terminal`` asks about through ``unichart_dashboard._in_notebook``.
+    ``terminal`` asks about through ``dashboard._in_notebook``.
     """
     captured = {'launched': None, 'timer': False}
 
@@ -64,23 +64,23 @@ def _terminal(in_notebook=False, **kwargs):
         captured['allow_quit'] = allow_quit
         return _StubApp()
 
-    import unichart_dashboard
-    originals = (unichart_terminal.build_terminal_app,
-                 unichart_terminal._browser_launcher,
-                 unichart_terminal.threading.Timer,
-                 unichart_dashboard._in_notebook)
-    unichart_terminal.build_terminal_app = fake_build
-    unichart_terminal._browser_launcher = fake_launcher
-    unichart_terminal.threading.Timer = _FakeTimer
-    unichart_dashboard._in_notebook = lambda: in_notebook
+    from unichart import dashboard
+    originals = (terminal.build_terminal_app,
+                 terminal._browser_launcher,
+                 terminal.threading.Timer,
+                 dashboard._in_notebook)
+    terminal.build_terminal_app = fake_build
+    terminal._browser_launcher = fake_launcher
+    terminal.threading.Timer = _FakeTimer
+    dashboard._in_notebook = lambda: in_notebook
     try:
         with redirect_stdout(io.StringIO()):
-            unichart_terminal.terminal(nb=UnichartNotebook(), **kwargs)
+            terminal.terminal(nb=UnichartNotebook(), **kwargs)
     finally:
-        (unichart_terminal.build_terminal_app,
-         unichart_terminal._browser_launcher,
-         unichart_terminal.threading.Timer,
-         unichart_dashboard._in_notebook) = originals
+        (terminal.build_terminal_app,
+         terminal._browser_launcher,
+         terminal.threading.Timer,
+         dashboard._in_notebook) = originals
     return captured
 
 
@@ -90,26 +90,26 @@ def _terminal(in_notebook=False, **kwargs):
 
 def test_app_flag_reaches_explore(tmp_path):
     """--app is a board option: it has to survive the trip through the CLI."""
-    import unichart_dashboard
+    from unichart import dashboard
 
     csv = tmp_path / 'runs.csv'
     csv.write_text('t,temp\n0,20\n1,21\n')
 
     seen = {}
-    original = unichart_dashboard.explore
-    unichart_dashboard.explore = lambda notebook=None, **kw: seen.update(kw)
+    original = dashboard.explore
+    dashboard.explore = lambda notebook=None, **kw: seen.update(kw)
     try:
         with redirect_stdout(io.StringIO()):
-            assert unichart_cli.main([str(csv), '--app']) == 0
+            assert cli.main([str(csv), '--app']) == 0
         assert seen['app_window'] is True
         assert seen['open_browser'] is True
 
         seen.clear()
         with redirect_stdout(io.StringIO()):
-            assert unichart_cli.main([str(csv)]) == 0
+            assert cli.main([str(csv)]) == 0
         assert seen['app_window'] is False, 'a tab stays the default'
     finally:
-        unichart_dashboard.explore = original
+        dashboard.explore = original
 
 
 def test_no_browser_wins_over_app(tmp_path):
@@ -132,16 +132,16 @@ def test_app_window_opens_one(tmp_path):
 def test_launcher_builds_an_app_mode_command(tmp_path):
     """``--app=URL`` is what makes the window chrome-less; the size is ours."""
     spawned = {}
-    originals = (unichart_terminal._app_browser, unichart_terminal._spawn)
-    unichart_terminal._app_browser = lambda: '/usr/bin/chromium'
-    unichart_terminal._spawn = lambda argv, url: spawned.update(argv=argv)
+    originals = (terminal._app_browser, terminal._spawn)
+    terminal._app_browser = lambda: '/usr/bin/chromium'
+    terminal._spawn = lambda argv, url: spawned.update(argv=argv)
     try:
         with redirect_stdout(io.StringIO()) as out:
-            unichart_terminal._browser_launcher('http://127.0.0.1:8050/', True)()
+            terminal._browser_launcher('http://127.0.0.1:8050/', True)()
     finally:
-        (unichart_terminal._app_browser, unichart_terminal._spawn) = originals
+        (terminal._app_browser, terminal._spawn) = originals
 
-    width, height = unichart_terminal.APP_WINDOW_SIZE
+    width, height = terminal.APP_WINDOW_SIZE
     assert spawned['argv'] == ['/usr/bin/chromium',
                               '--app=http://127.0.0.1:8050/',
                               f'--window-size={width},{height}']
@@ -151,17 +151,17 @@ def test_launcher_builds_an_app_mode_command(tmp_path):
 def test_launcher_falls_back_to_a_tab_and_says_so(tmp_path):
     """A Firefox-only machine still gets a board, plus a line explaining why."""
     opened = {}
-    originals = (unichart_terminal._app_browser,
-                 unichart_terminal.webbrowser.open)
-    unichart_terminal._app_browser = lambda: None
-    unichart_terminal.webbrowser.open = lambda url: opened.update(url=url)
+    originals = (terminal._app_browser,
+                 terminal.webbrowser.open)
+    terminal._app_browser = lambda: None
+    terminal.webbrowser.open = lambda url: opened.update(url=url)
     try:
         out = io.StringIO()
         with redirect_stdout(out):
-            unichart_terminal._browser_launcher('http://127.0.0.1:8050/', True)()
+            terminal._browser_launcher('http://127.0.0.1:8050/', True)()
     finally:
-        (unichart_terminal._app_browser,
-         unichart_terminal.webbrowser.open) = originals
+        (terminal._app_browser,
+         terminal.webbrowser.open) = originals
 
     assert opened['url'] == 'http://127.0.0.1:8050/'
     assert 'UNICHART_APP_BROWSER' in out.getvalue()
@@ -174,9 +174,9 @@ def test_app_browser_env_override(tmp_path):
     original = os.environ.get('UNICHART_APP_BROWSER')
     os.environ['UNICHART_APP_BROWSER'] = str(exe)
     try:
-        assert unichart_terminal._app_browser() == str(exe)
+        assert terminal._app_browser() == str(exe)
         os.environ['UNICHART_APP_BROWSER'] = str(tmp_path / 'nope')
-        assert unichart_terminal._app_browser() is None, \
+        assert terminal._app_browser() is None, \
             'a bad override is an error to see, not a silent fallback'
     finally:
         if original is None:
@@ -190,14 +190,14 @@ def test_a_bad_override_is_named_back(tmp_path):
     original = os.environ.get('UNICHART_APP_BROWSER')
     os.environ['UNICHART_APP_BROWSER'] = str(tmp_path / 'nope')
     opened = {}
-    open_original = unichart_terminal.webbrowser.open
-    unichart_terminal.webbrowser.open = lambda url: opened.update(url=url)
+    open_original = terminal.webbrowser.open
+    terminal.webbrowser.open = lambda url: opened.update(url=url)
     try:
         out = io.StringIO()
         with redirect_stdout(out):
-            unichart_terminal._browser_launcher('http://127.0.0.1:8050/', True)()
+            terminal._browser_launcher('http://127.0.0.1:8050/', True)()
     finally:
-        unichart_terminal.webbrowser.open = open_original
+        terminal.webbrowser.open = open_original
         if original is None:
             del os.environ['UNICHART_APP_BROWSER']
         else:
@@ -241,7 +241,7 @@ def test_a_kernel_without_the_flag_is_unchanged(tmp_path):
 def test_the_board_serves_its_own_icon_and_manifest(tmp_path):
     """What gives the standalone window a face instead of Dash's plotly mark."""
     with redirect_stdout(io.StringIO()):
-        app = unichart_terminal.build_terminal_app(
+        app = terminal.build_terminal_app(
             UnichartNotebook(), title='Runs', banner=False)
     client = app.server.test_client()
 
