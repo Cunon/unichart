@@ -51,8 +51,8 @@ from . import __version__
 
 # The example gallery is a built page in the source tree (gallery/index.html).
 # A pip install does not carry it — the wheel ships no data files — so
-# --gallery falls back to pointing at the repository.
-GALLERY_URL = 'https://github.com/Cunon/unichart/tree/main/gallery'
+# --gallery falls back to the copy on GitHub Pages (.github/workflows/pages.yml).
+GALLERY_URL = 'https://cunon.github.io/unichart/'
 
 # One --panel is `method:x:y1,y2[:z]`. Everything the panel spec dict supports
 # beyond that (kwargs like nbins / barmode / overlay_sets, dataset pins) is
@@ -495,7 +495,7 @@ def _open_gallery(no_browser=False):
 
     sys.stderr.write(_error_line(
         'unichart: the example gallery ships in the source tree, which this '
-        'install does not carry. Browse it at:\n'
+        'install does not carry. Browse it online at:\n'
         f'    {GALLERY_URL}'))
     return 1
 

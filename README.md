@@ -17,6 +17,9 @@ figures into interactive Dash boards or self-contained HTML files.
 - **`unichart.cli`** — the `unichart` command: open that GUI on a data file
   straight from a terminal.
 
+See every plot type, with the code that made it, in the
+**[example gallery](https://cunon.github.io/unichart/)**.
+
 ---
 
 ## Installation
