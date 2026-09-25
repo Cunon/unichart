@@ -512,7 +512,7 @@ _GALLERY_PATH = '_unichart/gallery.html'
 
 # Mirrors unichart.cli.GALLERY_URL, kept separate so neither module has to
 # import the other. Used when the built page isn't in this install.
-GALLERY_URL = 'https://github.com/Cunon/unichart/tree/main/gallery'
+GALLERY_URL = 'https://cunon.github.io/unichart/'
 
 
 def _gallery_file():

@@ -1,0 +1,51 @@
+name: Gallery
+
+# Builds the example gallery from main and publishes it to GitHub Pages at
+# https://cunon.github.io/unichart/ — the URL `unichart --gallery` and the
+# explorer's Gallery link fall back to when the install has no built page.
+# Needs Settings → Pages → Source set to "GitHub Actions".
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deploy at a time, and never cancel one halfway through.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: python -m pip install ".[all]" pillow
+      - run: plotly_get_chrome -y
+      - run: python gallery/make_gallery.py
+      # Only the page itself: it is self-contained, and the rest of gallery/
+      # (the builder, template and data) has no business being served.
+      - run: mkdir _site && cp gallery/index.html _site/
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

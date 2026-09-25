@@ -85,9 +85,13 @@ Existing editable installs need `pip install -e .` re-run, since the old
 - [x] Fix the Dash error message. It says "add it to requirements.txt"; it should say
       `pip install "unichart[dashboard]"`. It is printed twice by the CLI
       (`unichart_cli.py:828` plus the `_require_dash` text).
-- [ ] `--gallery` points at `github.com/.../tree/main/gallery`, which shows the HTML
-      source rather than the page. Host the gallery on GitHub Pages and point there
-      (or ship it as package data under the package layout).
+- [x] `--gallery` and the explorer's Gallery link fell back to
+      `github.com/.../tree/main/gallery`, which shows the HTML source rather than the
+      page. Now they point at GitHub Pages, `https://cunon.github.io/unichart/`, and
+      the README links there too (2026-09-24). `.github/workflows/pages.yml` builds the
+      gallery on every push to `main` and deploys it.
+      **Before tagging:** set Settings → Pages → Source to "GitHub Actions". After
+      the merge, check that the URL loads, because 0.1.0 ships pointing at it.
 - [x] Add `CHANGELOG.md` with a 0.1.0 entry.
 
 ## Phase 4 — CI and testing
