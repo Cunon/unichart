@@ -1,6 +1,6 @@
 # Publishing unichart to PyPI — plan
 
-Status as of 2026-09-22. Work top to bottom; phase 0 is a decision gate because
+Status as of 2026-09-24. Work top to bottom; phase 0 is a decision gate because
 it fixes the public import API for good once 0.1.0 is on PyPI.
 
 ## Layout change (2026-09-22)
@@ -59,12 +59,10 @@ Existing editable installs need `pip install -e .` re-run, since the old
 
 ## Phase 2 — repo hygiene (the repo is public)
 
-- [~] `.gitignore` updated and local `build/`, `*.egg-info`, `__pycache__` deleted (2026-09-22);
-      still to do with git: untrack build output (`git rm -r --cached`) and add each path to `.gitignore`:
-      `__pycache__/` (7 tracked `.pyc` files), `build/` (`build/lib/unichart.py`
-      is a **stale** 443 KB copy of the 601 KB source), `*.egg-info/`, `dist/`,
-      and `.claude/` at any depth (`demo_notebooks/.claude/settings.local.json`
-      is tracked; `.gitignore` only covers the repo root).
+- [~] Build output is untracked and ignored (checked on GitHub's `pypi` tree
+      2026-09-24: no `__pycache__/`, `build/`, `*.egg-info`). `.gitignore`'s `.claude/`
+      already matches at any depth, but `demo_notebooks/.claude/settings.local.json`
+      is still tracked: `git rm --cached` it.
 - [ ] Remove the unrelated `demo_notebooks/space_invaders_*.html` files.
 - [ ] Consider stripping notebook outputs or moving the heavy files out:
       `large_data_showcase.ipynb` is 11 MB, `dashboard_progression_demo.html` is 5 MB,
@@ -119,15 +117,39 @@ Existing editable installs need `pip install -e .` re-run, since the old
 
 ## Phase 5 — release
 
-- [ ] Create a PyPI account (with 2FA) and a TestPyPI account.
-- [ ] Configure **Trusted Publishing** (GitHub OIDC) on both indexes for the repo
-      and a `release.yml` workflow. That means no stored API tokens.
-- [ ] `release.yml`: runs on a `v*` tag. It runs `python -m build` and
-      `twine check --strict`, uploads to TestPyPI, and then, gated on a
-      `pypi` environment approval, uploads to PyPI.
-- [ ] Rehearse on TestPyPI: in a fresh venv,
+- [ ] **Run CI first — it has never run.** `ci.yml` triggers on pushes to `main`
+      and on PRs, and `workflow_dispatch` only works from the default branch, so
+      the `pypi` branch has no runs (checked 2026-09-24). Open a PR `pypi` → `main`,
+      get all four jobs green (macOS/Windows are untried), and merge. `release.yml`
+      goes in the same merge: a tag runs the workflow file at the tagged commit.
+- [ ] Create a PyPI account (with 2FA) and a separate TestPyPI account.
+- [ ] Add a **pending** Trusted Publisher on each index (Account → Publishing,
+      since the project doesn't exist yet). The names must match exactly, or the
+      upload fails with `invalid-publisher`:
+
+      | field       | PyPI       | TestPyPI   |
+      |-------------|------------|------------|
+      | PyPI project name | `unichart` | `unichart` |
+      | Owner       | `Cunon`    | `Cunon`    |
+      | Repository  | `unichart` | `unichart` |
+      | Workflow    | `release.yml` | `release.yml` |
+      | Environment | `pypi`     | `testpypi` |
+- [ ] GitHub → Settings → Environments: create `testpypi` and `pypi`. On `pypi`,
+      add yourself as a required reviewer and restrict deployments to tags `v*`.
+- [x] `.github/workflows/release.yml` (2026-09-24). It runs on a `v*` tag. The `build`
+      job runs `python -m build` and `twine check --strict`, fails unless the tag is
+      `v` + the `pyproject.toml` version, and uploads `dist/`. `testpypi` publishes
+      to TestPyPI (`skip-existing`, so re-runs pass). `pypi` waits for approval on
+      the `pypi` environment, then publishes the same files. Only the publish jobs get
+      `id-token: write`. The YAML parses, and build + `twine check` + the tag check
+      were run locally.
+- [ ] Tag `v0.1.0` on `main` after the merge and push the tag. While the `pypi`
+      job waits for approval, rehearse from TestPyPI in a fresh venv:
       `pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple "unichart[all]"`,
       then run `unichart gallery/dyno_runs.csv --info`, the explorer and the test suite
-      from that install. Check the rendered project page, including links and the license.
-- [ ] Tag `v0.1.0`, publish, and verify `pip install unichart` from real PyPI.
+      from that install. Check that `pip list` shows sane pandas/plotly/dash versions,
+      because TestPyPI has junk uploads under popular names. If it doesn't, install
+      `unichart` from TestPyPI with `--no-deps` and the rest from PyPI. Check the
+      rendered project page, including links and the license. Then approve.
+- [ ] Verify `pip install unichart` from real PyPI.
 - [ ] Afterwards: create a GitHub Release from the tag and add PyPI/Python-version badges to the README.

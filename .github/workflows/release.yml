@@ -1,0 +1,73 @@
+name: Release
+
+# Pushing a v* tag builds once, uploads to TestPyPI, then waits for approval
+# on the `pypi` environment before uploading the same files to PyPI. Both
+# uploads use Trusted Publishing (OIDC), so no API tokens are stored anywhere;
+# the publisher on each index must name this file and the job's environment.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build twine
+      - run: python -m build
+      - run: python -m twine check --strict dist/*
+      # A tag that disagrees with pyproject.toml would publish the wrong
+      # version under a misleading tag, so v0.1.0 must build unichart-0.1.0.
+      - name: Tag matches the package version
+        run: |
+          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          echo "tag ${GITHUB_REF_NAME}, pyproject ${version}"
+          test "${GITHUB_REF_NAME}" = "v${version}"
+          ls dist/unichart-"${version}"-py3-none-any.whl dist/unichart-"${version}".tar.gz
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  testpypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/unichart/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      # skip-existing: re-running the workflow after a failed PyPI step
+      # shouldn't fail here because TestPyPI already has these files.
+      - uses: pypa/gh-action-pypi-publish@v1.14.2
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  # The `pypi` environment has a required reviewer: this job waits for that
+  # approval, which is the window to rehearse the install from TestPyPI.
+  pypi:
+    needs: testpypi
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/unichart/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@v1.14.2

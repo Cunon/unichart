@@ -1237,8 +1237,8 @@ def _resolve_var_format(dataset, variable, variable_formats=None):
     Per-attribute precedence: variable_formats wins, else dataset attr.
 
     Used by the multi-y-axis plot. Returns a flat dict containing the
-    final color/marker/linestyle/markersize/linewidth/alpha that should
-    be applied for a given (dataset, variable) pair.
+    final color/marker/linestyle/markersize/linewidth/alpha/edgewidth/fill
+    that should be applied for a given (dataset, variable) pair.
     """
     variable_formats = variable_formats or {}
     var_fmt = variable_formats.get(variable, {})
@@ -1252,8 +1252,8 @@ def _resolve_var_format(dataset, variable, variable_formats=None):
         'alpha_marker': var_fmt.get('alpha_marker', getattr(dataset, 'alpha_marker', None)),
         'alpha_line':    var_fmt.get('alpha_line',    getattr(dataset, 'alpha_line', None)),
         'edge_color': getattr(dataset, 'edge_color', 'black'),
-        'edgewidth':  getattr(dataset, 'edgewidth', 1),
-        'fill':       getattr(dataset, 'fill', True),
+        'edgewidth':  var_fmt.get('edgewidth',  getattr(dataset, 'edgewidth', 1)),
+        'fill':       var_fmt.get('fill',       getattr(dataset, 'fill', True)),
     }
 
 
@@ -1362,13 +1362,24 @@ def _whisker_stem_kw(x, values, bar_values, color, alpha, dash, width):
                 opacity=alpha, hoverinfo='skip', showlegend=False)
 
 
+# Added to a hollow (fill=False) marker's edgewidth: the outline is the whole
+# marker then, and the stored width reads as too thin on its own.
+_HOLLOW_EDGE_BOOST = 1
+
+
+def _hollow_edgewidth(edgewidth):
+    """Visible outline width for a hollow (fill=False) marker."""
+    return (edgewidth if edgewidth is not None else 1) + _HOLLOW_EDGE_BOOST
+
+
 def _fill_marker_kw(color, fill, edgewidth=1):
     """Marker color/outline keys honoring a fill toggle: a solid ``color`` fill
     when ``fill`` is True, or a hollow marker (transparent fill, ``color``
     outline) when False. Mirrors the hollow-marker handling in ``uniplot``."""
     if fill:
         return {'color': color}
-    return {'color': 'rgba(0,0,0,0)', 'line': dict(width=edgewidth, color=color)}
+    return {'color': 'rgba(0,0,0,0)',
+            'line': dict(width=_hollow_edgewidth(edgewidth), color=color)}
 
 
 def _union_ranges(ranges):
@@ -2349,7 +2360,8 @@ def _marker_line_style(fmt, color, marker, markersize, linewidth, linestyle,
     else:
         # No fill: hollow marker whose outline takes the set color.
         marker_dict['color'] = 'rgba(0,0,0,0)'
-        marker_dict['line'] = dict(width=fmt.get('edgewidth', 1), color=color)
+        marker_dict['line'] = dict(width=_hollow_edgewidth(fmt.get('edgewidth', 1)),
+                                   color=color)
     line_dict['color'] = color
     opacity = _split_alpha(fmt, color, marker_dict, line_dict)
     return marker_dict, line_dict, opacity
@@ -3718,7 +3730,7 @@ def _add_contour_overlays(fig, overlay_datasets, x, y, n_subplots, ncols, darkmo
             symbol=get_plotly_marker(ds.marker),
             size=ds.markersize,
             color=ds.color if ds.fill else 'rgba(0,0,0,0)',
-            line=dict(width=ds.edgewidth,
+            line=dict(width=ds.edgewidth if ds.fill else _hollow_edgewidth(ds.edgewidth),
                       color=ds.color if not ds.fill
                       else (ds.edge_color or edge_default)),
         )
@@ -4489,7 +4501,7 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
                 # No fill: hollow marker whose outline takes the set color.
                 marker_kw = dict(
                     color='rgba(0,0,0,0)',
-                    line=dict(width=fmt['edgewidth'], color=fmt['color']),
+                    line=dict(width=_hollow_edgewidth(fmt['edgewidth']), color=fmt['color']),
                 )
 
             fig.add_trace(_scatter_cls(len(df))(
@@ -6691,6 +6703,9 @@ class UnichartNotebook:
             fill_val (bool, int, or str): True/False (or 'on'/'off', '1'/'0', 't'/'f')
                                           to enable or disable marker fill, or
                                           'reset' for the default.
+
+        Hollow markers are drawn with their edgewidth + 1, since the outline is
+        then the whole marker.
         """
         self._set_or_reset(uset_slice, 'fill', fill_val)
 
@@ -6890,7 +6905,8 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     def var_format(self, variable, color=None, marker=None, linestyle=None,
                    markersize=None, linewidth=None, alpha=None, style=None,
-                   alpha_marker=None, alpha_line=None, reset=False):
+                   alpha_marker=None, alpha_line=None, fill=None, edgewidth=None,
+                   reset=False):
         """
         Set persistent per-variable formatting overrides.
 
@@ -6912,6 +6928,11 @@ class UnichartNotebook:
         just the line (see :meth:`alpha_marker`, :meth:`alpha_line`); the
         other part keeps `alpha`.
 
+        `fill` (bool, or 'on'/'off', '1'/'0', 't'/'f') makes the variable's
+        markers solid or hollow, and `edgewidth` (>= 0) sets their outline
+        width, as :meth:`fill` / :meth:`edgewidth` do for a whole set. Hollow
+        markers are drawn with edgewidth + 1.
+
         `style` only affects bar-plot overlay columns (the `markers=` argument
         of `nb.bar`): 'marker' (default symbol overlay), 'tick' (horizontal
         dash at the value), or 'whisker' (dash plus a stem down/up to the top
@@ -6926,6 +6947,7 @@ class UnichartNotebook:
         nb.var_format('Pressure', color='reset')             # remove just the color override
         nb.var_format('EGT_LIMIT', style='whisker', color='red')
         nb.var_format(['CHT1', 'CHT2'], marker='x')          # same style for both
+        nb.var_format('EGT', fill=False, edgewidth=2)        # hollow, heavier outline
         nb.var_format(['CHT1', 'CHT2'], marker='reset')      # clear it on both
         nb.var_format('Pressure', reset=True)                # drop all Pressure overrides
         nb.var_format(['CHT1', 'CHT2'], reset=True)          # ...on both
@@ -6943,11 +6965,23 @@ class UnichartNotebook:
             return {n: {} for n in self._var_names(variable)}
         if style is not None and style != 'reset' and style not in _OVERLAY_STYLES:
             raise ValueError(f"style must be one of {_OVERLAY_STYLES}, got {style!r}")
+        if fill is not None and fill != 'reset':
+            s = str(fill).lower()
+            if s in ('true', '1', 't', 'on'):
+                fill = True
+            elif s in ('false', '0', 'f', 'off'):
+                fill = False
+            else:
+                raise ValueError(f"Invalid value for fill: {fill}")
+        if edgewidth is not None and edgewidth != 'reset' and (
+                isinstance(edgewidth, bool) or not isinstance(edgewidth, (int, float))
+                or edgewidth < 0):
+            raise ValueError(f"Invalid edgewidth: {edgewidth}")
         names = self._var_names(variable)
         pairs = {'color': color, 'marker': marker, 'linestyle': linestyle,
                  'markersize': markersize, 'linewidth': linewidth, 'alpha': alpha,
                  'alpha_marker': alpha_marker, 'alpha_line': alpha_line,
-                 'style': style}
+                 'fill': fill, 'edgewidth': edgewidth, 'style': style}
         for name in names:
             fmt = self.variable_formats.setdefault(name, {})
             for k, v in pairs.items():
@@ -8241,8 +8275,10 @@ class UnichartNotebook:
         """Add a vertical or horizontal line to the next plot.
 
         Args:
-            column (str): The variable the line is keyed to (x-var -> vertical
-                line; y-var -> horizontal line). Use 'all' with level='reset'.
+            column (str or list/tuple of str): The variable the line is keyed
+                to (x-var -> vertical line; y-var -> horizontal line). A
+                list/tuple applies the same line to each name. Use 'all' with
+                level='reset'.
             level (float or 'reset'): The line position, or 'reset' (alias
                 'clear') to remove the line(s) for ``column`` ('all' removes
                 every line; also available as ``reset_format('lines')``).
@@ -8282,12 +8318,16 @@ class UnichartNotebook:
                     label_size='lg', label_position='left')
             nb.line('time', 12.5, label='event', label_position=0.25)
             nb.line('egt', 900, color='orange', legend='EGT limit')
+            nb.line(['cht1', 'cht2', 'cht3'], 400, label='limit')
         """
+        columns = list(column) if isinstance(column, (list, tuple)) else [column]
+
         if level in ('clear', 'reset'):
             if column == 'all':
                 self.lines.clear()
             else:
-                self.lines.pop(column, None)
+                for col in columns:
+                    self.lines.pop(col, None)
             return
 
         # linestyle is the preferred name; dash is the legacy alias. When
@@ -8319,25 +8359,31 @@ class UnichartNotebook:
                 raise ValueError("label_position fraction must be between 0 and 1, "
                                  f"got {label_position}")
 
-        if legend is True:
-            legend = str(label) if label is not None else f"{column} = {level}"
-        elif legend is False or legend is None:
+        if legend is False or legend is None:
             legend = None
         elif isinstance(legend, str):
             if not legend:
                 raise ValueError("legend name must be a non-empty string")
-        else:
+        elif legend is not True:
             raise TypeError(f"legend must be a bool or a string, got {type(legend).__name__}")
 
-        if column not in self.lines: self.lines[column] = []
         plotly_dash = LINESTYLE_MAP_MPL_TO_PLOTLY.get(style, style)
-        self.lines[column].append({'level': level, 'color': color, 'dash': plotly_dash,
-                                   'label': label, 'label_size': label_size,
-                                   'label_position': label_position,
-                                   'label_color': label_color, 'legend': legend})
+        for col in columns:
+            if legend is True:
+                entry = str(label) if label is not None else f"{col} = {level}"
+            else:
+                entry = legend
+            self.lines.setdefault(col, []).append({
+                'level': level, 'color': color, 'dash': plotly_dash,
+                'label': label, 'label_size': label_size,
+                'label_position': label_position,
+                'label_color': label_color, 'legend': entry})
 
     def highlight(self, column, range_tuple, color='yellow', alpha=0.2, opacity=None):
         """Add a highlighted region to the next plot.
+
+        ``column`` may be a single parameter name or a list/tuple of names,
+        in which case the same region is added for each.
 
         Pass ``'reset'`` (alias ``'clear'``) as ``range_tuple`` to remove the
         highlight(s) for ``column`` ('all' removes every highlight; also
@@ -8346,15 +8392,18 @@ class UnichartNotebook:
         if opacity is not None:
             warnings.warn("'opacity' is deprecated, use 'alpha'", DeprecationWarning, stacklevel=2)
             alpha = opacity
+        columns = list(column) if isinstance(column, (list, tuple)) else [column]
         if range_tuple in ('clear', 'reset'):
             if column == 'all':
                 self.highlights.clear()
             else:
-                self.highlights.pop(column, None)
+                for col in columns:
+                    self.highlights.pop(col, None)
             return
 
-        if column not in self.highlights: self.highlights[column] = []
-        self.highlights[column].append({'range': range_tuple, 'color': color, 'alpha': alpha})
+        for col in columns:
+            self.highlights.setdefault(col, []).append(
+                {'range': range_tuple, 'color': color, 'alpha': alpha})
         
     def scale(self, column, range_tuple):
         """
