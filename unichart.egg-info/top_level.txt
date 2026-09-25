@@ -1,4 +1,0 @@
-unichart
-unichart_cli
-unichart_dashboard
-unichart_terminal

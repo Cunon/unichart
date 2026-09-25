@@ -25,7 +25,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import unichart_cli
+from unichart import cli
 from unichart import (UnichartNotebook, png_embed_text, read_png_session,
                       sniff_session)
 
@@ -191,7 +191,7 @@ def test_split_files_separates_sessions_from_data(tmp_path):
     with redirect_stdout(io.StringIO()):
         nb.save_session(str(session))
 
-    data, sessions = unichart_cli._split_files(
+    data, sessions = cli._split_files(
         _Args([csv, session, data_json]))
     assert data == [str(csv), str(data_json)]
     assert sessions == [str(session)]
@@ -199,8 +199,8 @@ def test_split_files_separates_sessions_from_data(tmp_path):
 
 def test_split_files_reports_missing_paths(tmp_path):
     try:
-        unichart_cli._split_files(_Args([tmp_path / 'nope.csv']))
-    except unichart_cli.CliError as exc:
+        cli._split_files(_Args([tmp_path / 'nope.csv']))
+    except cli.CliError as exc:
         assert 'no such file' in str(exc)
     else:
         raise AssertionError('a missing FILE must be reported')
@@ -214,30 +214,30 @@ def test_read_flags_are_rejected_for_a_session_alone(tmp_path):
 
     for kwargs in ({'set_col': 't'}, {'name_col': 't'}, {'combine': True}):
         try:
-            unichart_cli._split_files(_Args([session], **kwargs))
-        except unichart_cli.CliError as exc:
+            cli._split_files(_Args([session], **kwargs))
+        except cli.CliError as exc:
             assert 'not sessions' in str(exc)
         else:
             raise AssertionError(f'{kwargs} should not be accepted alone')
 
     # With a data file on the line they have something to act on again.
-    data, sessions = unichart_cli._split_files(
+    data, sessions = cli._split_files(
         _Args([csv, session], set_col='t'))
     assert data and sessions
 
 
 def test_completion_methods_match_the_real_ones():
-    """The check unichart_cli's own comment promises."""
-    from unichart_dashboard import PLOT_METHODS
-    assert unichart_cli.COMPLETION_METHODS == tuple(PLOT_METHODS)
+    """The check cli's own comment promises."""
+    from unichart.dashboard import PLOT_METHODS
+    assert cli.COMPLETION_METHODS == tuple(PLOT_METHODS)
 
 
 def test_save_session_flag_is_completable():
-    assert '--save-session' in unichart_cli.complete('unichart --save-')
+    assert '--save-session' in cli.complete('unichart --save-')
     # A PNG must never be offered as a column source: _header_columns would
     # try to read it as a table.
-    assert '.png' not in unichart_cli._DATA_SUFFIXES
-    assert '.png' in unichart_cli._SESSION_SUFFIXES
+    assert '.png' not in cli._DATA_SUFFIXES
+    assert '.png' in cli._SESSION_SUFFIXES
 
 
 def test_cli_routes_a_session_to_the_board_not_to_load(tmp_path, monkeypatch=None):
@@ -247,21 +247,21 @@ def test_cli_routes_a_session_to_the_board_not_to_load(tmp_path, monkeypatch=Non
     with redirect_stdout(io.StringIO()):
         nb.save_session(str(session))
 
-    import unichart_dashboard
+    from unichart import dashboard
     seen = {}
-    original = unichart_dashboard.explore
+    original = dashboard.explore
 
     def fake_explore(notebook=None, **kwargs):
         seen.update(kwargs)
         seen['sets'] = len(notebook.sets)
         return None
 
-    unichart_dashboard.explore = fake_explore
+    dashboard.explore = fake_explore
     try:
         with redirect_stdout(io.StringIO()):
-            code = unichart_cli.main([str(session)])
+            code = cli.main([str(session)])
     finally:
-        unichart_dashboard.explore = original
+        dashboard.explore = original
 
     assert code == 0
     assert seen['sessions'] == [str(session)]
@@ -276,7 +276,7 @@ def test_terminal_restores_sessions_as_startup_commands(tmp_path):
     light session loses its theme, and an explicit dark= has to land after the
     session or the flag loses to it.
     """
-    import unichart_terminal
+    from unichart import terminal
     nb, _ = _notebook(tmp_path, plot=False)
     session = tmp_path / 's.json'
     with redirect_stdout(io.StringIO()):
@@ -293,16 +293,16 @@ def test_terminal_restores_sessions_as_startup_commands(tmp_path):
         captured['darkmode_before_startup'] = notebook.darkmode
         return _StubApp()
 
-    original = unichart_terminal.build_terminal_app
-    unichart_terminal.build_terminal_app = fake_build
+    original = terminal.build_terminal_app
+    terminal.build_terminal_app = fake_build
     try:
         with redirect_stdout(io.StringIO()):
-            unichart_terminal.terminal(
+            terminal.terminal(
                 nb=UnichartNotebook(), sessions=[str(session)], dark=True,
                 panels=[{'method': 'plot', 'x': 't', 'y': ['temp']}],
                 open_browser=False)
     finally:
-        unichart_terminal.build_terminal_app = original
+        terminal.build_terminal_app = original
 
     startup = captured['startup']
     assert captured['darkmode_before_startup'] is True, 'the board flips dark first'
@@ -312,7 +312,7 @@ def test_terminal_restores_sessions_as_startup_commands(tmp_path):
 
 
 def test_terminal_leaves_the_theme_alone_without_dark(tmp_path):
-    import unichart_terminal
+    from unichart import terminal
     nb, _ = _notebook(tmp_path, plot=False)
     session = tmp_path / 's.json'
     with redirect_stdout(io.StringIO()):
@@ -328,14 +328,14 @@ def test_terminal_leaves_the_theme_alone_without_dark(tmp_path):
         captured['startup'] = list(startup)
         return _StubApp()
 
-    original = unichart_terminal.build_terminal_app
-    unichart_terminal.build_terminal_app = fake_build
+    original = terminal.build_terminal_app
+    terminal.build_terminal_app = fake_build
     try:
         with redirect_stdout(io.StringIO()):
-            unichart_terminal.terminal(nb=UnichartNotebook(),
+            terminal.terminal(nb=UnichartNotebook(),
                                        sessions=str(session), open_browser=False)
     finally:
-        unichart_terminal.build_terminal_app = original
+        terminal.build_terminal_app = original
 
     assert captured['startup'] == [f"nb.load_session({str(session)!r})"], \
         'no --dark means nothing overrides the session theme'
@@ -345,7 +345,7 @@ def test_save_session_flag_writes_a_session_with_the_panel(tmp_path):
     _, csv = _notebook(tmp_path, plot=False)
     out = tmp_path / 'board.json'
     with redirect_stdout(io.StringIO()):
-        code = unichart_cli.main([str(csv), '--panel', 'plot:t:temp,press',
+        code = cli.main([str(csv), '--panel', 'plot:t:temp,press',
                                   '--save-session', str(out)])
     assert code == 0
     session = json.loads(out.read_text())
@@ -365,7 +365,7 @@ def test_info_reports_a_plot_call_that_would_not_replay(tmp_path):
 
     out = io.StringIO()
     with redirect_stdout(out):
-        code = unichart_cli.main([str(session), '--info'])
+        code = cli.main([str(session), '--info'])
     assert code == 0
     assert "plot call: plot(x='t'" in out.getvalue()
 
@@ -375,10 +375,10 @@ def test_draw_panels_maps_table_and_contour_signatures(tmp_path):
     nb, _ = _notebook(tmp_path, plot=False)
     with redirect_stdout(io.StringIO()):
         # Would raise "unexpected keyword argument 'x'" if x/y were passed through.
-        unichart_cli._draw_panels(nb, [{'method': 'table', 'x': 't',
+        cli._draw_panels(nb, [{'method': 'table', 'x': 't',
                                         'y': ['temp']}])
         # A one-item y unwraps for the methods that need a scalar.
-        unichart_cli._draw_panels(nb, [{'method': 'histogram', 'x': 'temp'}])
+        cli._draw_panels(nb, [{'method': 'histogram', 'x': 'temp'}])
     assert nb._last_plot_call['method'] == 'histogram'
     assert nb._last_plot_call['kwargs']['x'] == 'temp'
 
@@ -391,7 +391,7 @@ def test_info_on_a_session_reports_its_plot_call(tmp_path):
 
     out = io.StringIO()
     with redirect_stdout(out):
-        code = unichart_cli.main([str(session), '--info'])
+        code = cli.main([str(session), '--info'])
     assert code == 0
     text = out.getvalue()
     assert '1 dataset(s):' in text

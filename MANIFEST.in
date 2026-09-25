@@ -1,0 +1,2 @@
+# Test data the sdist's tests read (tests/test_core_smoke.py); not in the wheel.
+include gallery/dyno_runs.csv

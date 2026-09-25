@@ -34,7 +34,7 @@ Panels are optional. For the GUI each ``--panel`` is replayed as a terminal
 command at startup, so the board opens with those plots already drawn and the
 commands visible in the transcript; for ``--html`` each one becomes a card.
 
-This module is also runnable directly (``python -m unichart_cli ...``) for when
+This module is also runnable directly (``python -m unichart ...``) for when
 the installed console script isn't on PATH.
 """
 
@@ -43,15 +43,15 @@ import os
 import re
 import sys
 
-# unichart / unichart_dashboard are imported lazily inside main() so that
-# `unichart --help` and `--version` stay instant and work even if the optional
-# Dash dependency is missing.
+# unichart._core / unichart.dashboard are imported lazily inside main() so that
+# `unichart --help` and `--version` stay instant (pandas + Plotly + Dash take
+# about a second to import).
 
-__version__ = '0.1.0'
+from . import __version__
 
 # The example gallery is a built page in the source tree (gallery/index.html).
-# A pip install does not carry it — pyproject ships flat py-modules, no data
-# files — so --gallery falls back to pointing at the repository.
+# A pip install does not carry it — the wheel ships no data files — so
+# --gallery falls back to pointing at the repository.
 GALLERY_URL = 'https://github.com/Cunon/unichart/tree/main/gallery'
 
 # One --panel is `method:x:y1,y2[:z]`. Everything the panel spec dict supports
@@ -118,7 +118,7 @@ def parse_panel(spec, methods):
 # bash re-prefixes what it already has and you get `plot:time:plot:time:temp`.
 _WORDBREAKS = ':='
 
-# The panel methods, spelled out rather than imported: unichart_dashboard pulls
+# The panel methods, spelled out rather than imported: unichart.dashboard pulls
 # in Dash, which is both slow on every tab press and missing entirely for the
 # from-scratch user who hasn't installed the extra. Kept honest by a check
 # against PLOT_METHODS in the test suite.
@@ -587,7 +587,7 @@ def _split_files(args):
     """
     from pathlib import Path
 
-    from unichart import sniff_session
+    from ._core import sniff_session
 
     missing = [f for f in args.files if not Path(f).exists()]
     if missing:
@@ -650,7 +650,7 @@ def _draw_panels(nb, panels):
     on the serving path the panels are replayed inside the board rather than
     here, so nothing would have plotted in this process.
     """
-    from unichart_dashboard import _TABLE_METHODS, _Z_METHODS
+    from .dashboard import _TABLE_METHODS, _Z_METHODS
 
     for panel in panels:
         method = panel['method']
@@ -690,7 +690,7 @@ def _session_plot_calls(paths):
     """
     import json
 
-    from unichart import read_png_session, sniff_session
+    from ._core import read_png_session, sniff_session
 
     calls = []
     for path in paths:
@@ -698,7 +698,7 @@ def _session_plot_calls(paths):
             if sniff_session(path) == 'png':
                 session = read_png_session(path) or {}
             else:
-                with open(path) as fh:
+                with open(path, encoding='utf-8') as fh:
                     session = json.load(fh)
         except Exception:                                 # noqa: BLE001
             continue
@@ -710,7 +710,7 @@ def _session_plot_calls(paths):
 
 def _print_info(nb, sessions=()):
     """Summarize what got loaded — the non-GUI way to check a file parsed."""
-    from unichart_dashboard import _all_columns, _numeric_columns
+    from .dashboard import _all_columns, _numeric_columns
 
     if not nb.sets:
         print('No datasets loaded.')
@@ -753,14 +753,14 @@ def main(argv=None):
         print(COMPLETION_SCRIPTS[args.completion], end='')
         return 0
 
-    # Before the unichart/Dash imports: the gallery is a static page and has
-    # no reason to need the optional dashboard extra installed.
+    # Before the unichart/Dash imports: the gallery is a static page, so it
+    # opens instantly without loading pandas, Plotly or Dash.
     if args.gallery:
         return _open_gallery(no_browser=args.no_browser)
 
     try:
-        from unichart import UnichartNotebook
-        from unichart_dashboard import (PLOT_METHODS, _default_panel_spec,
+        from ._core import UnichartNotebook
+        from .dashboard import (PLOT_METHODS, _default_panel_spec,
                                         explore, to_html)
     except ImportError as exc:
         sys.stderr.write(_error_line(f'unichart: {exc}'))
@@ -821,11 +821,11 @@ def main(argv=None):
         return 0
 
     except ImportError as exc:
-        # Dash is an optional extra. --info and --html don't need it, so this
-        # only fires on the serving path — report it as one actionable line
-        # rather than a traceback out of _require_dash.
-        sys.stderr.write(_error_line(f'unichart: {exc}')
-                         + '  the explorer needs Dash:  pip install dash\n')
+        # Dash is a dependency, but a hand-built environment can still lack
+        # it. --info and --html don't need it, so this only fires on the
+        # serving path — report _require_dash's message as one line, not a
+        # traceback.
+        sys.stderr.write(_error_line(f'unichart: {exc}'))
         return 1
     except CliError as exc:
         sys.stderr.write(_error_line(f'unichart: {exc}'))

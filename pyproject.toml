@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+# >=77 for the SPDX `license` string and `license-files`
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,36 +8,60 @@ name = "unichart"
 version = "0.1.0"
 description = "A plotting and notebook dashboard tool built on Plotly"
 readme = "README.md"
-requires-python = ">=3.9"
-authors = [{ name = "Cunon", email = "tomtravelsto@gmail.com" }]
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Cunon" }]
 keywords = ["plotly", "plotting", "visualization", "jupyter", "dashboard"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: Jupyter",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
+# Floors are the versions CI's oldest-deps job installs (uv --resolution
+# lowest-direct) and runs the tests and gallery against. plotly>=5.16 is the
+# first with shape legend entries, which reference lines use.
 dependencies = [
-    "pandas",
-    "numpy",
-    "plotly",
-    "scipy",
-    "ipywidgets",
-    "ipython",
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "plotly>=5.16",
+    "scipy>=1.10",
+    "ipywidgets>=8.0",
+    "ipython>=8.0",
+    # The explorer (the `unichart` command's default action) and dashboards.
+    # >=4: the board's theming relies on Dash 4's CSS tokens and portals.
+    "dash>=4",
 ]
 
 [project.optional-dependencies]
 # Trend lines via LOWESS smoothing
 trend = ["statsmodels"]
-# Interactive web dashboards (unichart_dashboard.dashboard / nb.dashboard)
-dashboard = ["dash"]
-# High-resolution PNG export (nb.save_png), which renders through kaleido
-png = ["kaleido"]
+# High-resolution PNG export (nb.save_png), which renders through kaleido.
+# kaleido 1.x only works with plotly>=6.1.1 (older plotly needs kaleido 0.2.1),
+# so asking for PNG export lifts the plotly floor too.
+png = ["kaleido", "plotly>=6.1.1"]
 # Everything
-all = ["statsmodels", "dash", "kaleido"]
+all = ["statsmodels", "kaleido", "plotly>=6.1.1"]
 
 [project.scripts]
 # `unichart` on PATH after install: opens the explorer GUI on a data file.
-unichart = "unichart_cli:main"
+unichart = "unichart.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Cunon/unichart"
 Repository = "https://github.com/Cunon/unichart"
+Issues = "https://github.com/Cunon/unichart/issues"
+Changelog = "https://github.com/Cunon/unichart/blob/main/CHANGELOG.md"
 
 [tool.setuptools]
-# Flat top-level modules: `import unichart` and `from unichart_dashboard import dashboard`
-py-modules = ["unichart", "unichart_dashboard", "unichart_cli", "unichart_terminal"]
+# Explicit: the repo root also holds tests/, gallery/ and demo_notebooks/.
+packages = ["unichart"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
