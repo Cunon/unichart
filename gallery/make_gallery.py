@@ -586,9 +586,14 @@ RUNTIME_JS = """
 
 def _plotly_script(embed_js: bool) -> str:
     """The <script> that provides window.Plotly."""
-    if not embed_js:
-        return (f'<script src="{PLOTLY_CDN}" charset="utf-8"></script>')
     from plotly.offline import get_plotlyjs
+    if not embed_js:
+        # Subresource integrity: the browser refuses the CDN file unless it
+        # hashes to the bundle plotly.py ships, which cdnjs serves byte for byte.
+        digest = hashlib.sha384(get_plotlyjs().encode("utf-8")).digest()
+        sri = "sha384-" + base64.b64encode(digest).decode("ascii")
+        return (f'<script src="{PLOTLY_CDN}" integrity="{sri}" '
+                f'crossorigin="anonymous" charset="utf-8"></script>')
     return f"<script>{get_plotlyjs()}</script>"
 
 

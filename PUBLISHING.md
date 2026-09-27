@@ -119,6 +119,31 @@ Existing editable installs need `pip install -e .` re-run, since the old
       `UnichartNotebook()` "Initialized" print (polish, noted for later).
 - [ ] Later: add py3.14 to the matrix once its wheels are settled for scipy/pandas.
 
+## Security hardening (2026-09-24)
+
+- [x] Every action is pinned to a commit SHA, with the version in a comment, in all
+      three workflows. This also fixes the `oldest-deps` failure, which was
+      `unable to find version v10`: setup-uv publishes no major tags. Checkout uses
+      `persist-credentials: false`. `.github/dependabot.yml` opens a monthly grouped
+      PR to bump the pins.
+- [x] The gallery's plotly.js `<script>` from cdnjs carries a sha384 `integrity`
+      hash, computed from plotly.py's bundled copy (byte-identical to cdnjs for 3.5.0
+      and 4.1.1). Checked in Chrome: the right hash loads, a wrong one is blocked.
+- [ ] GitHub settings (yours):
+      - 2FA on the account.
+      - Actions → General: workflow permissions "Read repository contents", and
+        don't let Actions create or approve PRs.
+      - A ruleset on `main`: require a PR and passing CI, block force pushes and
+        deletion.
+      - A tag ruleset on `v*`: only you can create, update or delete.
+      - Environment `pypi`: you as required reviewer, prevent self-review off,
+        deployment tags `v*`. Environment `github-pages`: branch `main` only.
+      - Pages: "Enforce HTTPS" on.
+      - Security: enable Dependabot alerts, secret scanning and push protection.
+- [ ] PyPI/TestPyPI: 2FA with an authenticator app or security key, recovery
+      codes saved offline, and no API tokens created, since Trusted Publishing
+      needs none.
+
 ## Phase 5 — release
 
 - [ ] **Run CI first — it has never run.** `ci.yml` triggers on pushes to `main`
