@@ -13,6 +13,7 @@ environments without it.
 """
 
 import io
+import json
 import re
 import sys
 import tempfile
@@ -182,6 +183,213 @@ def test_session_round_trip():
     assert len(fresh.list_sets(output='df')) == len(nb.list_sets(output='df'))
     assert isinstance(fresh.last_fig, go.Figure)
     assert len(fresh.last_fig.data) == len(nb.last_fig.data)
+
+
+GRID = dict(x='time_s', y=['rpm', 'torque_nm', 'cht_c', 'eta_pct'], ncols=2)
+
+
+def _grid_domains(fig):
+    """Where each panel of a 2x2 grid sits, which is what the gaps decide."""
+    return [(tuple(fig.layout[f'xaxis{i}'].domain),
+             tuple(fig.layout[f'yaxis{i}'].domain)) for i in ('', 2, 3, 4)]
+
+
+def test_spacing_attributes_draw_like_the_arguments():
+    """nb.hspace / nb.vspace draw what hspace= / vspace= draw, and a per-call
+    value still wins over them."""
+    builtin = _grid_domains(_draw(lambda nb: nb.plot(**GRID)))
+    per_call = _grid_domains(_draw(
+        lambda nb: nb.plot(**GRID, hspace=110, vspace='90px')))
+    assert per_call != builtin
+
+    def standing(nb):
+        nb.hspace, nb.vspace = 110, '90px'
+        nb.plot(**GRID)
+    assert _grid_domains(_draw(standing)) == per_call
+
+    def overridden(nb):
+        nb.hspace, nb.vspace = 300, 300
+        nb.plot(**GRID, hspace=110, vspace='90px')
+    assert _grid_domains(_draw(overridden)) == per_call
+
+
+# Attribute: (a good value, values its check must refuse).
+PLOT_DEFAULT_ATTRS = {
+    'hspace': (110, (-5, 'wide', True, [80])),
+    'vspace': ('40px', (-1, 'tall')),
+    'ncols': (2, (0, 1.5, True, '2')),
+    'nrows': (3, (-1, 2.0)),
+    'legend_scroll': (False, (0, 'no')),
+    'suppress_legends': (True, (1, 'yes')),
+}
+
+
+def _refuses(nb, attr, bad):
+    """Assigning ``bad`` raises and leaves the setting as it was."""
+    before = getattr(nb, attr)
+    try:
+        setattr(nb, attr, bad)
+    except (TypeError, ValueError):
+        pass
+    else:
+        raise AssertionError(f'nb.{attr} = {bad!r} was accepted')
+    assert getattr(nb, attr) == before, f'nb.{attr} changed on a refused value'
+
+
+def _session_copy(nb):
+    """A fresh notebook restored from ``nb``'s saved session."""
+    with tempfile.TemporaryDirectory() as tmp, redirect_stdout(io.StringIO()):
+        path = Path(tmp) / 'session.json'
+        nb.save_session(path)
+        fresh = UnichartNotebook()
+        fresh.load_session(path)
+    return fresh
+
+
+def test_plot_default_attributes():
+    """Each attribute is its set_default_format argument's setting: checked on
+    assignment, cleared by None or reset_format('defaults'), kept by sessions."""
+    nb = _notebook()
+    for attr, (good, bads) in PLOT_DEFAULT_ATTRS.items():
+        assert getattr(nb, attr) is None, attr
+        other = _notebook()
+        other.set_default_format(**{attr: good})
+        assert getattr(other, attr) == good, attr
+        setattr(nb, attr, good)
+        assert nb.plot_defaults[attr] == good, attr
+        for bad in bads:
+            _refuses(nb, attr, bad)
+
+    fresh = _session_copy(nb)
+    for attr, (good, _) in PLOT_DEFAULT_ATTRS.items():
+        assert getattr(fresh, attr) == good, attr
+
+    nb.hspace = None
+    assert nb.hspace is None and nb.vspace == '40px'
+    with redirect_stdout(io.StringIO()):
+        nb.reset_format('defaults')
+    assert all(getattr(nb, attr) is None for attr in PLOT_DEFAULT_ATTRS)
+
+
+def test_grid_and_legend_attributes_draw_like_the_arguments():
+    four = dict(x='time_s', y=['rpm', 'torque_nm', 'cht_c', 'eta_pct'])
+    per_call = _grid_domains(_draw(lambda nb: nb.plot(**four, ncols=1)))
+    assert per_call != _grid_domains(_draw(lambda nb: nb.plot(**four)))
+
+    def standing(nb):
+        nb.ncols = 1
+        nb.plot(**four)
+    assert _grid_domains(_draw(standing)) == per_call
+
+    def hidden(nb):
+        nb.suppress_legends = True
+        nb.plot(**four)
+    assert {tr.visible for tr in _draw(hidden).data} == {'legendonly'}
+
+
+def test_figsize_attribute():
+    nb = _notebook()
+    assert nb.figsize == (12, 8)
+    nb.figsize = [10, 6]
+    assert nb.figsize == (10, 6)             # stored as a tuple, like the method's
+    for bad in ('big', (10,), (10, 6, 1), (10, -1), (True, 5)):
+        _refuses(nb, 'figsize', bad)
+    nb.set_default_format(figsize=(9, 5))
+    assert nb.figsize == (9, 5)
+    assert _session_copy(nb).figsize == (9, 5)
+    nb.figsize = None
+    assert nb.figsize == (12, 8)
+
+    def standing(nb):
+        nb.figsize = (10, 6)
+        nb.plot(x='time_s', y='rpm')
+    fig = _draw(standing)
+    per_call = _draw(lambda nb: nb.plot(x='time_s', y='rpm', figsize=(10, 6)))
+    size = (fig.layout.width, fig.layout.height)
+    assert size == (per_call.layout.width, per_call.layout.height)
+    assert size != (1200, 800)
+
+
+def test_plot_style_attribute():
+    """nb.plot_style = 'plotly' is set_plot_style('plotly'), minus the message:
+    same figure, loaded sets restyled too."""
+    def by_attr(nb):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            nb.plot_style = 'plotly'
+        assert out.getvalue() == '', 'the attribute printed'
+        nb.plot(x='time_s', y='rpm')
+
+    def by_method(nb):
+        nb.set_plot_style('plotly')
+        nb.plot(x='time_s', y='rpm')
+    assert _draw(by_attr).to_json() == _draw(by_method).to_json()
+
+    nb = _notebook()
+    assert nb.plot_style == 'matplotlib'
+    nb.plot_style = 'plotly'
+    assert nb.sets[0].color == '#636EFA'     # Plotly's palette, not tab10
+    assert _session_copy(nb).plot_style == 'plotly'
+    for bad in ('seaborn', 3, ['plotly']):
+        _refuses(nb, 'plot_style', bad)
+    nb.plot_style = 'mpl'
+    assert nb.plot_style == 'matplotlib'
+    nb.plot_style = 'plotly'
+    nb.plot_style = None
+    assert nb.plot_style == 'matplotlib'
+
+
+def test_font_size_attributes():
+    nb = _notebook()
+    assert nb.legend_size is None
+    nb.legend_size = 'large'
+    other = _notebook()
+    with redirect_stdout(io.StringIO()):
+        other.set_font_sizes(legend='large')
+    assert nb.legend_size == other.legend_size == 14.0
+    assert nb.get_font_sizes()['legend'] == 14.0
+    for bad in ('gigantic', 0, -3, True):
+        _refuses(nb, 'legend_size', bad)
+
+    nb.axes_tick_size = 11
+    assert _session_copy(nb).axes_tick_size == 11.0
+    nb.axes_tick_size = 'reset'
+    assert nb.axes_tick_size is None
+    with redirect_stdout(io.StringIO()):
+        nb.reset_format('fonts')
+    assert nb.legend_size is None
+
+    def standing(nb):
+        nb.legend_size = 'large'
+        nb.plot(x='time_s', y='rpm')
+    assert _draw(standing).layout.legend.font.size == 14.0
+
+    # set_font_sizes checks once, not again through the attribute's setter.
+    with warnings.catch_warnings(record=True) as caught, redirect_stdout(io.StringIO()):
+        warnings.simplefilter('always')
+        nb.set_font_sizes(legend=80)
+    assert len([w for w in caught if 'unusually large' in str(w.message)]) == 1
+
+
+def test_session_skips_a_bad_attribute_value():
+    """A saved value an attribute's check refuses is skipped with a warning;
+    the rest of the session still restores."""
+    nb = _notebook()
+    nb.legend_size = 'large'
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / 'session.json'
+        with redirect_stdout(io.StringIO()):
+            nb.save_session(path)
+        session = json.loads(path.read_text(encoding='utf-8'))
+        session['notebook']['figsize'] = 'big'
+        path.write_text(json.dumps(session), encoding='utf-8')
+        out = io.StringIO()
+        with redirect_stdout(out):
+            fresh = UnichartNotebook()
+            fresh.load_session(path)
+    assert 'session value for figsize ignored' in out.getvalue()
+    assert fresh.figsize == (12, 8)
+    assert fresh.legend_size == 14.0
 
 
 BOARD_PANELS = [

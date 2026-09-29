@@ -186,6 +186,11 @@ Rules for new code:
   style is layered on afterwards, in `_finalize`.)
 - **Read font sizes through `_font_size('axes_tick_size')`**, not
   `self.axes_tick_size`, so a style default applies when the user hasn't set one.
+  A new size slot is a `_font_size_attr('foo_size', 'foo')` line in the class,
+  a `foo=` argument to `set_font_sizes`, and entries in `get_font_sizes` and
+  `_SESSION_NB_ATTRS`. A plain `self.foo_size = None` in `__init__` is not one:
+  `set_font_sizes` writes the `_font_sizes` store, which `_font_size` reads
+  through the property.
 - A per-dataset attribute a style should be able to change belongs in
   `_DATASET_FORMAT_DEFAULTS` (read via `notebook.default_format`), not
   hardcoded in `Dataset.__init__`.

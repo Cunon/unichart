@@ -251,6 +251,32 @@
   }
   .group-head p { margin: 0; color: var(--muted); font-size: var(--step--1); }
 
+  /* ---------------- section primer ---------------- */
+
+  .primer {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+    gap: 30px;
+    align-items: start;
+    margin-bottom: 34px;
+  }
+  .primer p { margin: 0; color: var(--muted); }
+  .primer dl {
+    margin: 0;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 10px 16px;
+    font-size: var(--step--1);
+  }
+  .primer dt { color: var(--accent); white-space: nowrap; }
+  .primer dt code { font-weight: 500; }
+  .primer dd { margin: 0; color: var(--muted); }
+  .primer code {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: .95em;
+  }
+  .primer p code, .primer dd code { color: var(--ink); }
+
   /* ---------------- cards ---------------- */
 
   .card {
@@ -357,6 +383,9 @@
 
   @media (max-width: 720px) {
     .setup { grid-template-columns: minmax(0, 1fr); gap: 22px; }
+    .primer { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+    .primer dl { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+    .primer dd + dt { margin-top: 10px; }
     .card-head, .plate, .code pre { padding-inline: 16px; }
     .wrap { padding-inline: 16px; }
   }
@@ -401,7 +430,7 @@
       </p>
       <p>
         Load it once and every example below starts from this state. No example
-        re-reads the file or touches Plotly directly.
+        re-reads the file, and only the last section touches Plotly directly.
       </p>
       <dl>
         <dt>time_s</dt><dd>elapsed seconds, 0–600</dd>

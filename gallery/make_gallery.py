@@ -175,7 +175,8 @@ def fresh_nb(df: pd.DataFrame) -> UnichartNotebook:
 
 # --------------------------------------------------------------------------
 # The gallery itself. Each entry's `code` is executed verbatim and shown
-# verbatim; `nb` is a notebook freshly loaded with the frame above.
+# verbatim; `nb` is a notebook freshly loaded with the frame above, and `df`
+# is that frame. A snippet that assigns `fig` is shown by that figure.
 # --------------------------------------------------------------------------
 
 SECTIONS = [
@@ -185,7 +186,43 @@ SECTIONS = [
     ("fields", "Fields and tables", "Scattered data as a surface, and numbers as numbers."),
     ("analysis", "Analysis", "Differences against a baseline, and fits through the cloud."),
     ("looks", "Looks", "The same figures, restyled."),
+    ("plotly", "Modify figures with Plotly", "Every figure is plain Plotly underneath: "
+                                             "take it and change anything."),
 ]
+
+# Prose drawn between a section's heading and its first card. The plotly one
+# states library behaviour no card can show: _clear_last_fig emptying the
+# previous figure, and save_png writing last_fig while the session it embeds
+# replays only the plot call. Keep it in step with those.
+SECTION_INTROS = {
+    "plotly": """\
+      <div class="primer">
+        <p>
+          Each plotting method hands back an ordinary
+          <code>plotly.graph_objects.Figure</code>, already styled. Anything you do to it
+          lands after unichart's styling, so it wins, and anything in the Plotly
+          documentation works on it: the layout, single traces, one subplot of a grid,
+          traces of your own.
+        </p>
+        <dl>
+          <dt><code>fig = nb.plot(…)</code></dt>
+          <dd>Every plotting method returns its figure (<code>table</code> and
+            <code>summary</code> with <code>output='fig'</code>). Assigning it doesn't draw
+            it: end the cell with <code>fig</code>, or call <code>fig.show()</code>.</dd>
+          <dt><code>nb.last_fig</code></dt>
+          <dd>The same figure, kept on the notebook. Reach for it when
+            <code>set_static_images()</code> makes plot calls return PNGs.</dd>
+          <dt><code>go.Figure(fig)</code></dt>
+          <dd>A copy of your own. The next unichart plot empties the figure it replaces,
+            to free memory.</dd>
+          <dt><code>nb.save_png()</code></dt>
+          <dd>Saves <code>last_fig</code>, edits made in place included, though the session
+            it embeds replays only the unichart call. Save a copy with
+            <code>fig.write_image()</code> or <code>fig.write_html()</code>.</dd>
+        </dl>
+      </div>
+""",
+}
 
 EXAMPLES = [
     dict(
@@ -360,6 +397,63 @@ EXAMPLES = [
              "nb.plot(x='time_s', y=['rpm', 'cht_c'], hspace=200)",
         dark=True,
     ),
+
+    # Each ends with a bare `fig`: the line that draws it in a notebook cell.
+    dict(
+        section="plotly", id="go-layout", api="fig.update_layout · fig.update_traces",
+        title="Take the figure, keep going",
+        blurb="nb.plot hands back the figure it drew, and from there it's plain Plotly: "
+              "units on the ticks, and one tooltip that reads all four runs at the "
+              "instant under the cursor. Hover the chart to see it.",
+        code="fig = nb.plot(x='time_s', y='power_kw')   # a plotly go.Figure\n"
+             "fig.update_layout(hovermode='x unified')   # one tooltip, every run\n"
+             "fig.update_traces(hovertemplate='%{y:.1f} kW')\n"
+             "fig.update_xaxes(dtick=120, ticksuffix=' s')\n"
+             "fig.update_yaxes(ticksuffix=' kW', rangemode='tozero')\n"
+             "fig",
+    ),
+    dict(
+        section="plotly", id="go-traces", api="fig.update_traces(selector=…)",
+        title="Spotlight one run",
+        blurb="unichart names each trace '<index>: <title>', so a selector can pick one "
+              "run out of the rest. The arrow's position comes from the data, found "
+              "with ordinary pandas.",
+        code="fig = nb.plot(x='time_s', y='egt_c')\n"
+             "fig.update_traces(opacity=0.3)                 # every run ...\n"
+             "fig.update_traces(opacity=1, line_width=3,     # ... but this one\n"
+             "                  selector=dict(name='2: Hot day'))\n"
+             "peak = df.loc[df['egt_c'].idxmax()]\n"
+             "fig.add_annotation(x=peak['time_s'], y=peak['egt_c'], arrowhead=2,\n"
+             "                   text=f\"peak {peak['egt_c']:.0f} °C\")\n"
+             "fig",
+    ),
+    dict(
+        section="plotly", id="go-subplots", api="row= · col=",
+        title="One panel at a time",
+        blurb="Grids are built with make_subplots, so row= and col= reach a single "
+              "panel. The panels fill row by row, in the order of your y list.",
+        code="fig = nb.plot(x='time_s', y=['rpm', 'torque_nm', 'cht_c', 'eta_pct'],\n"
+             "              ncols=2, hspace=110)\n"
+             "fig.update_xaxes(title=None, row=1)              # the whole top row\n"
+             "fig.update_yaxes(ticksuffix=' %', row=2, col=2)  # eta_pct only\n"
+             "fig.add_hrect(y0=150, y1=180, row=2, col=1,      # cht_c only\n"
+             "              fillcolor='firebrick', opacity=0.12, line_width=0)\n"
+             "fig",
+    ),
+    dict(
+        section="plotly", id="go-add-trace", api="fig.add_trace",
+        title="Traces of your own",
+        blurb="Anything you can compute can join the figure — here the mean of the four "
+              "runs, drawn over them in heavy dots and listed in the same legend.",
+        code="import plotly.graph_objects as go\n"
+             "\n"
+             "fig = nb.plot(x='time_s', y='cht_c')\n"
+             "mean = df.groupby('time_s')['cht_c'].mean()\n"
+             "fig.add_trace(go.Scatter(x=mean.index, y=mean, name='mean of runs',\n"
+             "                         line=dict(color='black', width=3, dash='dot'),\n"
+             "                         legendrank=2000))   # list it after the runs\n"
+             "fig",
+    ),
 ]
 
 
@@ -372,7 +466,7 @@ def render_example(ex: dict, df: pd.DataFrame, static: bool = False) -> dict:
     import plotly.io as pio
 
     nb = fresh_nb(df)
-    ns = {"nb": nb, "np": np, "pd": pd}
+    ns = {"nb": nb, "np": np, "pd": pd, "df": df.copy()}
 
     chatter = io.StringIO()
     with warnings.catch_warnings(record=True) as caught:
@@ -665,6 +759,7 @@ def build(only: str | None = None, dump_dir: str | None = None,
             f'        <h2>{html.escape(stitle)}</h2>\n'
             f'        <p>{html.escape(sblurb)}</p>\n'
             f'      </div>\n'
+            + SECTION_INTROS.get(sid, "")
             + "\n".join(rendered)
             + "\n    </section>"
         )
