@@ -162,7 +162,7 @@ def test_styles_and_dark_mode():
     def call(nb):
         nb.set_plot_style('plotly')
         nb.toggle_darkmode(True)
-        nb.set_plot_size(500, 300)
+        nb.set_plot_size(5, 3)                 # inches, like figsize
         nb.plot(x='time_s', y=['torque_nm', 'eta_pct'])
     _draw(call)
 
@@ -369,6 +369,67 @@ def test_font_size_attributes():
         warnings.simplefilter('always')
         nb.set_font_sizes(legend=80)
     assert len([w for w in caught if 'unusually large' in str(w.message)]) == 1
+
+
+def test_plot_size_attribute():
+    """nb.plot_size is set_plot_size's setting, in the same inches."""
+    nb = _notebook()
+    assert nb.plot_size is None
+    nb.set_plot_size(4.6, 3.0)
+    assert nb.plot_size == (4.6, 3.0)         # what was set, not ~460 px
+
+    def by_attr(nb):
+        nb.plot_size = (4.6, 3)
+        nb.plot(x='time_s', y=['rpm', 'cht_c'], ncols=2)
+
+    def by_method(nb):
+        nb.set_plot_size(4.6, 3)
+        nb.plot(x='time_s', y=['rpm', 'cht_c'], ncols=2)
+    a, b = _draw(by_attr), _draw(by_method)
+    assert (a.layout.width, a.layout.height) == (b.layout.width, b.layout.height)
+    assert a.layout.width > 900               # two 4.6in panels, not 4.6px ones
+
+    for bad in ('big', (4.6,), (4.6, 3, 1), (0, 3), (-1, 3), ('4', 3), (True, 3)):
+        _refuses(nb, 'plot_size', bad)
+    nb.plot_size = [5, None]                  # width only; a list is fine
+    assert nb.plot_size == (5, None)
+    nb.plot_size = (None, None)
+    assert nb.plot_size is None
+
+    # Per-panel vs whole grid is its own attribute, which this leaves alone.
+    nb.set_plot_size(10, 6, per_subplot=False)
+    nb.plot_size = (8, 5)
+    assert nb.plot_size_per_subplot is False
+    with redirect_stdout(io.StringIO()):
+        nb.reset_format('plot_size')
+    assert nb.plot_size is None and nb.plot_size_per_subplot is True
+
+
+def test_plot_size_in_sessions():
+    """Saved in inches under plot_size_in, and in px under plot_size, the key
+    older sessions hold and an older unichart reads. Both kinds load right."""
+    nb = _notebook()
+    nb.plot_size = (4.6, 3)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / 'session.json'
+        with redirect_stdout(io.StringIO()):
+            nb.save_session(path)
+        saved = json.loads(path.read_text(encoding='utf-8'))
+        state = saved['notebook']
+        assert state['plot_size_in'] == [4.6, 3]
+        assert state['plot_size'] == [4.6 * 100, 300]
+        with redirect_stdout(io.StringIO()):
+            fresh = UnichartNotebook()
+            fresh.load_session(path)
+        assert fresh.plot_size == (4.6, 3)
+
+        del state['plot_size_in']             # as saved before the key existed
+        state['plot_size'] = [460, None]
+        path.write_text(json.dumps(saved), encoding='utf-8')
+        with redirect_stdout(io.StringIO()):
+            older = UnichartNotebook()
+            older.load_session(path)
+        assert older.plot_size == (4.6, None)
 
 
 def test_session_skips_a_bad_attribute_value():

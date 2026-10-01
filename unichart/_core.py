@@ -4715,6 +4715,24 @@ def _check_figsize(val):
     return tuple(val)
 
 
+def _check_plot_size(val):
+    """``val`` as a ``(width, height)`` tuple in inches, either of which may
+    be ``None`` (that dimension unpinned), or ``None`` when neither is."""
+    if val is None:
+        return None
+    if not isinstance(val, (tuple, list)) or len(val) != 2:
+        raise ValueError("plot_size must be a (width, height) tuple in "
+                         f"inches, got {val!r}")
+    for name, v in zip(('width', 'height'), val):
+        if v is None:
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise TypeError(f"{name} must be numeric (inches), got {type(v).__name__}")
+        if v <= 0:
+            raise ValueError(f"{name} must be positive, got {v}")
+    return None if val[0] is None and val[1] is None else tuple(val)
+
+
 def _check_positive_int(name, val):
     if isinstance(val, bool) or not isinstance(val, int) or val < 1:
         raise ValueError(f"{name} must be a positive integer, got {val!r}")
@@ -4912,10 +4930,11 @@ class UnichartNotebook:
         # color_map and default_format exist. Change via set_plot_style.
         self._apply_style_defaults(DEFAULT_PLOT_STYLE)
 
-        # Optional fixed plot-area size (px, w/h, either may be None) so plots
+        # Optional fixed plot-area size (inches, w/h, either may be None) so plots
         # stay the same size — and shape — regardless of suptitle/legend/margins
-        # or how many subplots the call produces. Set via set_plot_size; applied
-        # in _finalize. None = size driven by figsize. plot_size_per_subplot
+        # or how many subplots the call produces. Set via nb.plot_size or
+        # set_plot_size; applied in _finalize, which works in px through
+        # _plot_size_px. None = size driven by figsize. plot_size_per_subplot
         # decides whether the pinned size is one panel (default) or the whole
         # subplot grid.
         self.plot_size = None
@@ -5523,14 +5542,15 @@ class UnichartNotebook:
         'sig_figs', 'decimals',
     )
 
-    # Notebook-level formatting captured by save_session. plot_style and
-    # default_format are handled separately (style install order matters and
-    # default_format carries the _MARKER_BY_INDEX sentinel).
+    # Notebook-level formatting captured by save_session. plot_style,
+    # default_format and plot_size are handled separately (style install order
+    # matters, default_format carries the _MARKER_BY_INDEX sentinel, and
+    # plot_size is saved in two units: see _build_session).
     _SESSION_NB_ATTRS = (
         'darkmode', 'suptitle', 'footer', 'plot_title', 'x_label', 'y_label',
         'display_parms', 'axis_limits', 'lines', 'highlights',
         'parm_description_dict', 'variable_formats', 'color_map', 'marker_map',
-        'figsize', 'plot_defaults', 'plot_size', 'plot_size_per_subplot',
+        'figsize', 'plot_defaults', 'plot_size_per_subplot',
         'grid_format', 'watermark_format',
         'suptitle_size', 'footer_size', 'legend_size', 'axes_title_size',
         'axes_tick_size', 'subplot_title_size', 'colorbar_size', 'hover_size',
@@ -5827,6 +5847,12 @@ class UnichartNotebook:
 
         nb_state = {a: getattr(self, a, None) for a in self._SESSION_NB_ATTRS}
         nb_state['plot_style'] = getattr(self, 'plot_style', None)
+        # plot_size is saved twice: in inches under 'plot_size_in', which is what
+        # load_session reads, and in px under 'plot_size', the key and unit
+        # sessions have always carried, so an older unichart still opens this
+        # one at the right size.
+        nb_state['plot_size_in'] = self.plot_size
+        nb_state['plot_size'] = self._plot_size_px
         nb_state['default_format'] = {
             k: (self._SESSION_MARKER_SENTINEL if v is _MARKER_BY_INDEX else v)
             for k, v in self.default_format.items()}
@@ -6037,10 +6063,18 @@ class UnichartNotebook:
                         setattr(self, attr, nb_state[attr])
                     except (TypeError, ValueError) as exc:
                         print(f"Warning: session value for {attr} ignored ({exc})")
-            # JSON turns tuples into lists; plot_size is used as a tuple (the
-            # figsize setter converts its own).
-            if isinstance(self.plot_size, list):
-                self.plot_size = tuple(self.plot_size)
+            # plot_size: inches under 'plot_size_in'. A session saved before that
+            # key existed has only the px value, under 'plot_size'.
+            if 'plot_size_in' in nb_state or 'plot_size' in nb_state:
+                try:
+                    if 'plot_size_in' in nb_state:
+                        self.plot_size = nb_state['plot_size_in']
+                    else:
+                        px = nb_state['plot_size']
+                        self.plot_size = None if px is None else [
+                            None if v is None else v / 100 for v in px]
+                except (TypeError, ValueError) as exc:
+                    print(f"Warning: session value for plot_size ignored ({exc})")
 
         return created
 
@@ -7417,8 +7451,9 @@ class UnichartNotebook:
         _parse_spacing('hspace', hspace)
         _parse_spacing('vspace', vspace)
         ref = None
-        if self.plot_size is not None:   # already in px, None for an unpinned dim
-            ref = {'panel' if self.plot_size_per_subplot else 'paper': self.plot_size}
+        px = self._plot_size_px          # None for an unpinned dim
+        if px is not None:
+            ref = {'panel' if self.plot_size_per_subplot else 'paper': px}
         return {'hspace': hspace, 'vspace': vspace, 'spacing_ref': ref}
 
     # ------------------------------------------------------------------
@@ -7479,6 +7514,28 @@ class UnichartNotebook:
     @figsize.setter
     def figsize(self, value):
         self._figsize = _DEFAULT_FIGSIZE if value is None else _check_figsize(value)
+
+    @property
+    def plot_size(self):
+        """Pinned plot-area size ``(width, height)`` in inches, the units
+        :meth:`set_plot_size` and ``figsize`` use: ``nb.plot_size = (4.6, 3)``.
+        Either may be ``None`` to leave that dimension to ``figsize``; ``None``
+        (the default) pins nothing. Whether it sizes each panel or the whole
+        grid is :attr:`plot_size_per_subplot`, which assigning this leaves as
+        it is (``set_plot_size`` sets both).
+        """
+        return self._plot_size
+
+    @plot_size.setter
+    def plot_size(self, value):
+        self._plot_size = _check_plot_size(value)
+
+    @property
+    def _plot_size_px(self):
+        """:attr:`plot_size` in px, the unit the layout code works in."""
+        if self._plot_size is None:
+            return None
+        return tuple(None if v is None else v * 100 for v in self._plot_size)
 
     @property
     def plot_style(self):
@@ -8704,7 +8761,8 @@ class UnichartNotebook:
         dimension driven by ``figsize``. Each call replaces the previous setting
         (calling with only ``height`` drops a prior ``width`` pin).
         ``reset=True`` (or both ``None``) clears it — equivalent to
-        ``reset_format('plot_size')``.
+        ``reset_format('plot_size')``. The size is also the ``nb.plot_size``
+        attribute, in the same inches: ``nb.plot_size = (4, 3)``.
 
         Parameters
         ----------
@@ -8757,19 +8815,10 @@ class UnichartNotebook:
             self.plot_size_per_subplot = True
             return
 
-        def _v(name, val):
-            if val is None:
-                return None
-            if isinstance(val, bool) or not isinstance(val, (int, float)):
-                raise TypeError(f"{name} must be numeric (inches), got {type(val).__name__}")
-            if val <= 0:
-                raise ValueError(f"{name} must be positive, got {val}")
-            return val * 100
-
         if not isinstance(per_subplot, bool):
             raise TypeError("per_subplot must be True or False, got "
                             f"{type(per_subplot).__name__}")
-        self.plot_size = (_v('width', width), _v('height', height))
+        self.plot_size = (width, height)   # the property checks both, in inches
         self.plot_size_per_subplot = per_subplot
 
     @staticmethod
@@ -8810,9 +8859,9 @@ class UnichartNotebook:
         that panel's share of the paper area to get the paper size the figure
         must provide. Shared by ``_apply_footer`` (which needs the final plot
         height before the figure is resized) and ``_enforce_plot_size``."""
-        if fig is None or self.plot_size is None:
+        if fig is None or self._plot_size_px is None:
             return None, None
-        pw, ph = self.plot_size
+        pw, ph = self._plot_size_px
         if not self.plot_size_per_subplot:
             return pw, ph
         fx, fy = self._panel_fractions(fig)
@@ -9121,7 +9170,7 @@ class UnichartNotebook:
             ax.position = min(1.0, (panel_px + k * slot) / inner_px)
 
     def _enforce_plot_size(self, fig):
-        """Resize the figure so its plot area matches ``self.plot_size`` — each
+        """Resize the figure so its plot area matches the pinned ``plot_size`` — each
         panel in the default per-subplot mode, the whole grid otherwise.
         No-op unless a plot size is pinned.
 
@@ -9136,14 +9185,14 @@ class UnichartNotebook:
         width is itself a function of the width. That one is solved in closed
         form — ``plot area = data region + one slot per extra axis`` — and the
         axes are re-laid against the answer."""
-        if fig is None or self.plot_size is None:
+        if fig is None or self._plot_size_px is None:
             return fig
         m = fig.layout.margin
 
         def mv(val, default):
             return default if val is None else val
 
-        raw_w, raw_h = self.plot_size
+        raw_w, raw_h = self._plot_size_px
         n_extra = len(self._extra_yaxes(fig))
         if raw_w is not None:
             if n_extra:

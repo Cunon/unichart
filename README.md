@@ -229,11 +229,13 @@ nb.var_format(['CHT1', 'CHT2'], reset=True)           # drop all their overrides
   sig_figs/decimals, legend, grid, subplot spacing, barmode, agg, alpha, …)
   applied to future plots/datasets.
 - The common settings are also attributes, checked as you assign them:
-  `nb.figsize = (10, 6)`, `nb.ncols` / `nb.nrows`, `nb.hspace` / `nb.vspace`,
+  `nb.figsize = (10, 6)`, `nb.plot_size = (4, 3)` (both in inches),
+  `nb.ncols` / `nb.nrows`, `nb.hspace` / `nb.vspace`,
   `nb.legend_scroll`, `nb.suppress_legends`, `nb.plot_style = 'plotly'`, and
   the font sizes (`nb.legend_size = 'large'`: each `set_font_sizes` argument
-  plus `_size`). Each holds the same setting as the method argument of the same
-  name, and `None` puts it back to its built-in.
+  plus `_size`). Each is the same setting its method sets (`set_plot_size`,
+  `set_default_format`, `set_font_sizes`, `set_plot_style`), and `None` puts
+  it back to its built-in.
 - `set_color_palette` / `color_map` / `marker_map` — the ordered lists assigned
   to datasets by index (integer lookups cycle).
 - `toggle_darkmode(True/False)` — dark theme.
@@ -346,6 +348,8 @@ nb.plot(x='t', y='CHT')                   # 1 panel,  4x3in
 nb.plot(x='t', y=['CHT', 'EGT', 'RPM'])   # 3 panels, 4x3in each
 nb.set_plot_size(height=3)      # pin height only; width follows figsize
 nb.set_plot_size(reset=True)    # back to figsize-driven sizing
+nb.plot_size = (4, 3)           # the same pin as an attribute, also in inches
+nb.plot_size = None             # ...and cleared
 ```
 
 The size applies to **one subplot panel** by default, and the figure grows to
@@ -362,7 +366,8 @@ instead of crushing them into each other.
 
 Each call replaces the previous setting, `per_subplot` included — a later
 `set_plot_size(height=3)` returns to per-panel mode unless you pass
-`per_subplot=False` again.
+`per_subplot=False` again. Assigning `nb.plot_size` changes only the size; the
+mode is `nb.plot_size_per_subplot`.
 
 Note that in per-panel mode a wide grid makes a wide figure — five 6in panels
 side by side is a ~22in figure. Use a smaller per-panel size or `ncols=1` when
