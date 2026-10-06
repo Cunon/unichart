@@ -228,6 +228,14 @@ nb.var_format(['CHT1', 'CHT2'], reset=True)           # drop all their overrides
 - `set_default_format(...)` — persistent defaults (markersize, linestyle,
   sig_figs/decimals, legend, grid, subplot spacing, barmode, agg, alpha, …)
   applied to future plots/datasets.
+- The common settings are also attributes, checked as you assign them:
+  `nb.figsize = (10, 6)`, `nb.plot_size = (4, 3)` (both in inches),
+  `nb.ncols` / `nb.nrows`, `nb.hspace` / `nb.vspace`,
+  `nb.legend_scroll`, `nb.suppress_legends`, `nb.plot_style = 'plotly'`, and
+  the font sizes (`nb.legend_size = 'large'`: each `set_font_sizes` argument
+  plus `_size`). Each is the same setting its method sets (`set_plot_size`,
+  `set_default_format`, `set_font_sizes`, `set_plot_style`), and `None` puts
+  it back to its built-in.
 - `set_color_palette` / `color_map` / `marker_map` — the ordered lists assigned
   to datasets by index (integer lookups cycle).
 - `toggle_darkmode(True/False)` — dark theme.
@@ -268,16 +276,17 @@ Marker and line-style strings are **Matplotlib-compatible** (`'o'`, `'s'`,
 
 ### Matplotlib look
 
-Plots are drawn with Plotly and look like it. If your figures need to sit next
-to Matplotlib output — a paper, a report, a deck already full of `pyplot` —
-switch the whole environment over:
+Plots are drawn with Plotly but, by default, styled to sit next to Matplotlib
+output — a paper, a report, a deck already full of `pyplot`. Switch the whole
+environment to Plotly's own look, and back:
 
 ```python
-nb.set_plot_style('matplotlib')   # or 'mpl' / 'plt'
-nb.set_plot_style('plotly')       # back to the default look
+nb.set_plot_style('plotly')       # Plotly's own look
+nb.set_plot_style('matplotlib')   # back to the default; or 'mpl' / 'plt'
+nb.plot_style = 'plotly'          # the same switch, as an attribute
 ```
 
-That restyles plots to approximate Matplotlib's defaults: a white (or black, in
+The Matplotlib style approximates Matplotlib's defaults: a white (or black, in
 dark mode) plot area framed by spines on all four sides, outward ticks, no zero
 lines, a gray grid, DejaVu Sans at Matplotlib's point sizes, the **tab10** color
 cycle, and **viridis** for contours and hue-colored scatters.
@@ -291,8 +300,8 @@ cycle, and **viridis** for contours and hue-colored scatters.
 - Two Matplotlib habits stay opt-in: it draws lines *without* markers
   (`nb.set_default_format(marker=None)` if you want that), and dashboards keep
   the board's UI font so charts and chrome read as one surface.
-- `reset_format('all')` (or `'defaults'`) returns to the `'plotly'` style along
-  with the other stored defaults.
+- `reset_format('all')` (or `'defaults'`) returns to the `'matplotlib'` style
+  along with the other stored defaults.
 
 ### Decorations
 
@@ -339,6 +348,8 @@ nb.plot(x='t', y='CHT')                   # 1 panel,  4x3in
 nb.plot(x='t', y=['CHT', 'EGT', 'RPM'])   # 3 panels, 4x3in each
 nb.set_plot_size(height=3)      # pin height only; width follows figsize
 nb.set_plot_size(reset=True)    # back to figsize-driven sizing
+nb.plot_size = (4, 3)           # the same pin as an attribute, also in inches
+nb.plot_size = None             # ...and cleared
 ```
 
 The size applies to **one subplot panel** by default, and the figure grows to
@@ -355,7 +366,8 @@ instead of crushing them into each other.
 
 Each call replaces the previous setting, `per_subplot` included — a later
 `set_plot_size(height=3)` returns to per-panel mode unless you pass
-`per_subplot=False` again.
+`per_subplot=False` again. Assigning `nb.plot_size` changes only the size; the
+mode is `nb.plot_size_per_subplot`.
 
 Note that in per-panel mode a wide grid makes a wide figure — five 6in panels
 side by side is a ~22in figure. Use a smaller per-panel size or `ncols=1` when
@@ -373,13 +385,18 @@ grid is too crowded for its figure the gaps are clamped and a warning says so;
 a bigger `figsize` or `set_plot_size` is the cure.
 
 To change it, every gridded plot method (`plot`, `bar`, `box`, `histogram`,
-`contour`) takes `hspace` (columns) and `vspace` (rows), and
-`set_default_format` sets the standing default:
+`contour`) takes `hspace` (columns) and `vspace` (rows). The `nb.hspace` and
+`nb.vspace` attributes set the standing default, the way `nb.figsize` does for
+the figure size; `set_default_format` sets the same thing in one call, and a
+per-call value always wins:
 
 ```python
 nb.plot(x='t', y=['CHT', 'EGT', 'RPM'], ncols=1, vspace=100)   # 100px rows
 nb.plot(x='t', y=['CHT', 'EGT'], hspace=0.05)     # 5% of the plot width
-nb.set_default_format(hspace='60px', vspace=40)   # for every plot from now on
+nb.hspace = '60px'                                # for every plot from now on
+nb.vspace = 40
+nb.set_default_format(hspace='60px', vspace=40)   # the same, in one call
+nb.hspace = None                                  # back to the built-in 80px
 ```
 
 A value of 1 or more is pixels (`60` or `'60px'`); below 1 it is a fraction of

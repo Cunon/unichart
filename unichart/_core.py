@@ -4693,6 +4693,114 @@ def sniff_session(source):
         return None
 
 
+# ---------------------------------------------------------------------------
+# Notebook settings as attributes (nb.figsize, nb.hspace, nb.legend_size, ...)
+# ---------------------------------------------------------------------------
+# Each is the same setting as its set_default_format / set_font_sizes /
+# set_plot_style spelling and shares that method's check, so a bad value fails
+# on the assignment instead of at the next plot. None puts one back to its
+# built-in.
+
+_DEFAULT_FIGSIZE = (12, 8)
+
+
+def _check_figsize(val):
+    """``val`` as a ``(width, height)`` tuple of positive numbers, or raise."""
+    if (not isinstance(val, (tuple, list)) or len(val) != 2
+            or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                   or v <= 0 for v in val)):
+        raise ValueError(
+            f"figsize must be a (width, height) tuple of positive "
+            f"numbers, got {val!r}")
+    return tuple(val)
+
+
+def _check_plot_size(val):
+    """``val`` as a ``(width, height)`` tuple in inches, either of which may
+    be ``None`` (that dimension unpinned), or ``None`` when neither is."""
+    if val is None:
+        return None
+    if not isinstance(val, (tuple, list)) or len(val) != 2:
+        raise ValueError("plot_size must be a (width, height) tuple in "
+                         f"inches, got {val!r}")
+    for name, v in zip(('width', 'height'), val):
+        if v is None:
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise TypeError(f"{name} must be numeric (inches), got {type(v).__name__}")
+        if v <= 0:
+            raise ValueError(f"{name} must be positive, got {v}")
+    return None if val[0] is None and val[1] is None else tuple(val)
+
+
+def _check_positive_int(name, val):
+    if isinstance(val, bool) or not isinstance(val, int) or val < 1:
+        raise ValueError(f"{name} must be a positive integer, got {val!r}")
+    return val
+
+
+def _check_bool(name, val):
+    if not isinstance(val, bool):
+        raise TypeError(f"{name} must be bool, got {type(val).__name__}")
+    return val
+
+
+def _font_size_value(name, value):
+    """A font size the way ``set_font_sizes`` takes one: ``None`` (leave it),
+    ``'reset'`` (clear it), a positive number, or a :data:`FONT_SIZE_MAP` name
+    such as ``'large'``. Returns ``None``, ``'reset'`` or a float."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if value.lower() == 'reset':
+            return 'reset'
+        resolved = FONT_SIZE_MAP.get(value.lower())
+        if resolved is None:
+            valid = ', '.join(sorted(FONT_SIZE_MAP))
+            raise ValueError(f"{name}: unknown size name '{value}'. Valid names: {valid}")
+        value = resolved
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be numeric or a size name, got {type(value).__name__}")
+    if value <= 0:
+        raise ValueError(f"{name} must be positive, got {value}")
+    if value > 72:
+        warnings.warn(f"{name}={value} is unusually large for a font size.")
+    return float(value)
+
+
+def _plot_default_attr(key, check, doc):
+    """A notebook attribute over ``plot_defaults[key]``, the store that
+    ``set_default_format`` writes, so sessions save it and
+    ``reset_format('defaults')`` clears it. ``check(key, value)`` raises on a
+    bad value before anything changes; ``None`` clears the setting."""
+    def fget(self):
+        return self.plot_defaults.get(key)
+
+    def fset(self, value):
+        if value is not None:
+            check(key, value)
+        self.plot_defaults[key] = value
+
+    return property(fget, fset, doc=doc)
+
+
+def _font_size_attr(key, arg):
+    """A notebook attribute for one font size: the same setting as
+    ``set_font_sizes(arg=)``, and what ``get_font_sizes`` reports."""
+    def fget(self):
+        return self._font_sizes.get(key)
+
+    def fset(self, value):
+        value = _font_size_value(key, value)
+        self._font_sizes[key] = None if value == 'reset' else value
+
+    return property(fget, fset, doc=(
+        f"Font size of the {arg.replace('_', ' ')} text, the same setting as "
+        f"``set_font_sizes({arg}=)``: a size in px, or a name such as "
+        "``'large'``. ``None`` (or ``'reset'``) goes back to the plot style's "
+        "own size."))
+
+
 class UnichartNotebook:
     """Interactive multi-dataset plotting environment for notebooks.
 
@@ -4759,15 +4867,18 @@ class UnichartNotebook:
         self.footer = None
 
         # Default figure size (width, height) in inches, used by the plot methods
-        # whenever a call doesn't pass figsize=. Change via set_default_format.
+        # whenever a call doesn't pass figsize=. Change via nb.figsize or
+        # set_default_format; it is a checked property over _figsize.
         # Distinct from set_plot_size, which pins the inner plot area; figsize
         # sets the overall figure dimensions.
-        self.figsize = (12, 8)
+        self.figsize = _DEFAULT_FIGSIZE
 
         # Persistent per-call plotting defaults, set via set_default_format.
         # None = unset, so the relevant plot method falls back to its own built-in
         # (resolved through _apply_default). An explicit per-call argument always
         # wins over the stored default. Cleared by set_default_format(reset=True).
+        # hspace, vspace, ncols, nrows, legend_scroll and suppress_legends are
+        # also attributes (nb.ncols = 2), properties over this dict.
         self.plot_defaults = {
             'legend': None, 'suppress_legends': None, 'legend_scroll': None,
             'ncols': None, 'nrows': None, 'hspace': None, 'vspace': None,
@@ -4819,10 +4930,11 @@ class UnichartNotebook:
         # color_map and default_format exist. Change via set_plot_style.
         self._apply_style_defaults(DEFAULT_PLOT_STYLE)
 
-        # Optional fixed plot-area size (px, w/h, either may be None) so plots
+        # Optional fixed plot-area size (inches, w/h, either may be None) so plots
         # stay the same size — and shape — regardless of suptitle/legend/margins
-        # or how many subplots the call produces. Set via set_plot_size; applied
-        # in _finalize. None = size driven by figsize. plot_size_per_subplot
+        # or how many subplots the call produces. Set via nb.plot_size or
+        # set_plot_size; applied in _finalize, which works in px through
+        # _plot_size_px. None = size driven by figsize. plot_size_per_subplot
         # decides whether the pinned size is one panel (default) or the whole
         # subplot grid.
         self.plot_size = None
@@ -4843,16 +4955,10 @@ class UnichartNotebook:
         # nb.watermark(reset=True) or reset_format('watermark').
         self.watermark_format = {}
 
-        self.suptitle_size = None
-        self.footer_size = None
-        self.legend_size = None
-        self.axes_title_size = None
-        self.axes_tick_size = None
-        self.subplot_title_size = None
-        self.colorbar_size = None
-        self.hover_size = None
-        self.table_header_size = None
-        self.table_cell_size = None
+        # Font sizes set by the user, behind the suptitle_size, legend_size, ...
+        # properties (and set_font_sizes). A missing key is None: the plot
+        # style's own size.
+        self._font_sizes = {}
 
         print("UniChart Notebook Environment Initialized.")
 
@@ -5436,14 +5542,15 @@ class UnichartNotebook:
         'sig_figs', 'decimals',
     )
 
-    # Notebook-level formatting captured by save_session. plot_style and
-    # default_format are handled separately (style install order matters and
-    # default_format carries the _MARKER_BY_INDEX sentinel).
+    # Notebook-level formatting captured by save_session. plot_style,
+    # default_format and plot_size are handled separately (style install order
+    # matters, default_format carries the _MARKER_BY_INDEX sentinel, and
+    # plot_size is saved in two units: see _build_session).
     _SESSION_NB_ATTRS = (
         'darkmode', 'suptitle', 'footer', 'plot_title', 'x_label', 'y_label',
         'display_parms', 'axis_limits', 'lines', 'highlights',
         'parm_description_dict', 'variable_formats', 'color_map', 'marker_map',
-        'figsize', 'plot_defaults', 'plot_size', 'plot_size_per_subplot',
+        'figsize', 'plot_defaults', 'plot_size_per_subplot',
         'grid_format', 'watermark_format',
         'suptitle_size', 'footer_size', 'legend_size', 'axes_title_size',
         'axes_tick_size', 'subplot_title_size', 'colorbar_size', 'hover_size',
@@ -5740,6 +5847,12 @@ class UnichartNotebook:
 
         nb_state = {a: getattr(self, a, None) for a in self._SESSION_NB_ATTRS}
         nb_state['plot_style'] = getattr(self, 'plot_style', None)
+        # plot_size is saved twice: in inches under 'plot_size_in', which is what
+        # load_session reads, and in px under 'plot_size', the key and unit
+        # sessions have always carried, so an older unichart still opens this
+        # one at the right size.
+        nb_state['plot_size_in'] = self.plot_size
+        nb_state['plot_size'] = self._plot_size_px
         nb_state['default_format'] = {
             k: (self._SESSION_MARKER_SENTINEL if v is _MARKER_BY_INDEX else v)
             for k, v in self.default_format.items()}
@@ -5944,12 +6057,24 @@ class UnichartNotebook:
                     for k, v in nb_state['default_format'].items()}
             for attr in self._SESSION_NB_ATTRS:
                 if attr in nb_state:
-                    setattr(self, attr, nb_state[attr])
-            # JSON turns tuples into lists; these two are used as tuples.
-            for attr in ('figsize', 'plot_size'):
-                val = getattr(self, attr, None)
-                if isinstance(val, list):
-                    setattr(self, attr, tuple(val))
+                    # Checked attributes (figsize, the font sizes) reject a bad
+                    # saved value; skip that one rather than stop halfway.
+                    try:
+                        setattr(self, attr, nb_state[attr])
+                    except (TypeError, ValueError) as exc:
+                        print(f"Warning: session value for {attr} ignored ({exc})")
+            # plot_size: inches under 'plot_size_in'. A session saved before that
+            # key existed has only the px value, under 'plot_size'.
+            if 'plot_size_in' in nb_state or 'plot_size' in nb_state:
+                try:
+                    if 'plot_size_in' in nb_state:
+                        self.plot_size = nb_state['plot_size_in']
+                    else:
+                        px = nb_state['plot_size']
+                        self.plot_size = None if px is None else [
+                            None if v is None else v / 100 for v in px]
+                except (TypeError, ValueError) as exc:
+                    print(f"Warning: session value for plot_size ignored ({exc})")
 
         return created
 
@@ -7131,7 +7256,7 @@ class UnichartNotebook:
         built-ins. Shared by set_default_format(reset=True) and
         reset_format('defaults')."""
         self.default_format = dict(_DATASET_FORMAT_DEFAULTS)
-        self.figsize = (12, 8)
+        self.figsize = _DEFAULT_FIGSIZE
         self.plot_defaults = {k: None for k in self.plot_defaults}
         # The plot style is a default too (it drives color_map, default_format
         # and the font-size fallbacks), so a defaults reset returns to the
@@ -7326,9 +7451,116 @@ class UnichartNotebook:
         _parse_spacing('hspace', hspace)
         _parse_spacing('vspace', vspace)
         ref = None
-        if self.plot_size is not None:   # already in px, None for an unpinned dim
-            ref = {'panel' if self.plot_size_per_subplot else 'paper': self.plot_size}
+        px = self._plot_size_px          # None for an unpinned dim
+        if px is not None:
+            ref = {'panel' if self.plot_size_per_subplot else 'paper': px}
         return {'hspace': hspace, 'vspace': vspace, 'spacing_ref': ref}
+
+    # ------------------------------------------------------------------
+    # Notebook-wide settings as attributes
+    # ------------------------------------------------------------------
+    # nb.figsize = (10, 6), nb.ncols = 2, nb.legend_size = 'large', ... Each is
+    # the same setting as a set_default_format / set_font_sizes /
+    # set_plot_style argument, checked on assignment (see the module-level
+    # _plot_default_attr / _font_size_attr). A per-call argument still wins.
+
+    hspace = _plot_default_attr('hspace', _parse_spacing, """\
+        Default gap between subplot columns for every gridded plot method:
+        ``nb.hspace = 110``. Pixels if 1 or more (``110`` or ``'110px'``), a
+        fraction of the plot area if below 1. ``None`` (the default) gives each
+        plot its built-in gap: 80 px, or more where contour colorbars or
+        secondary y axes need it. The same setting as
+        ``set_default_format(hspace=)``.""")
+
+    vspace = _plot_default_attr('vspace', _parse_spacing, """\
+        Default gap between subplot rows for every gridded plot method:
+        ``nb.vspace = 90``. Same units as :attr:`hspace`; ``None`` (the default)
+        gives the built-in 70 px. The same setting as
+        ``set_default_format(vspace=)``.""")
+
+    ncols = _plot_default_attr('ncols', _check_positive_int, """\
+        Default number of subplot columns: ``nb.ncols = 2``. Resolved as a pair
+        with :attr:`nrows`, so setting one leaves the other to fit the grid, and
+        it takes precedence over ``plot``'s memory of the last grid. ``None``
+        (the default) lets the grid shape itself. The same setting as
+        ``set_default_format(ncols=)``.""")
+
+    nrows = _plot_default_attr('nrows', _check_positive_int, """\
+        Default number of subplot rows: ``nb.nrows = 3``. The row counterpart
+        of :attr:`ncols`, and the same setting as
+        ``set_default_format(nrows=)``.""")
+
+    legend_scroll = _plot_default_attr('legend_scroll', _check_bool, """\
+        Whether an interactive plot's legend scrolls when it is too tall for
+        the figure (``None``, the default, means yes). ``False`` shows every
+        entry, making the figure taller so the plot area keeps its size.
+        ``save_png`` and static images always show the whole legend. The same
+        setting as ``set_default_format(legend_scroll=)``.""")
+
+    suppress_legends = _plot_default_attr('suppress_legends', _check_bool, """\
+        ``True`` starts every plot with its traces hidden, to be clicked on in
+        the legend (``None``, the default, means no). The same setting as
+        ``set_default_format(suppress_legends=)``.""")
+
+    @property
+    def figsize(self):
+        """Default figure size ``(width, height)`` in inches for every plot
+        method: ``nb.figsize = (10, 6)``. ``None`` goes back to the built-in
+        ``(12, 8)``. The same setting as ``set_default_format(figsize=)``;
+        distinct from :meth:`set_plot_size`, which pins the plot area instead.
+        """
+        return self._figsize
+
+    @figsize.setter
+    def figsize(self, value):
+        self._figsize = _DEFAULT_FIGSIZE if value is None else _check_figsize(value)
+
+    @property
+    def plot_size(self):
+        """Pinned plot-area size ``(width, height)`` in inches, the units
+        :meth:`set_plot_size` and ``figsize`` use: ``nb.plot_size = (4.6, 3)``.
+        Either may be ``None`` to leave that dimension to ``figsize``; ``None``
+        (the default) pins nothing. Whether it sizes each panel or the whole
+        grid is :attr:`plot_size_per_subplot`, which assigning this leaves as
+        it is (``set_plot_size`` sets both).
+        """
+        return self._plot_size
+
+    @plot_size.setter
+    def plot_size(self, value):
+        self._plot_size = _check_plot_size(value)
+
+    @property
+    def _plot_size_px(self):
+        """:attr:`plot_size` in px, the unit the layout code works in."""
+        if self._plot_size is None:
+            return None
+        return tuple(None if v is None else v * 100 for v in self._plot_size)
+
+    @property
+    def plot_style(self):
+        """The overall look, ``'matplotlib'`` (the default) or ``'plotly'``:
+        ``nb.plot_style = 'plotly'``. Assigning it does everything
+        :meth:`set_plot_style` does, restyling the datasets already loaded,
+        just without the printed confirmation. ``None`` goes back to the
+        default style.
+        """
+        return self._plot_style
+
+    @plot_style.setter
+    def plot_style(self, value):
+        self._set_plot_style(DEFAULT_PLOT_STYLE if value is None else value)
+
+    suptitle_size = _font_size_attr('suptitle_size', 'suptitle')
+    footer_size = _font_size_attr('footer_size', 'footer')
+    legend_size = _font_size_attr('legend_size', 'legend')
+    axes_title_size = _font_size_attr('axes_title_size', 'axes_title')
+    axes_tick_size = _font_size_attr('axes_tick_size', 'axes_tick')
+    subplot_title_size = _font_size_attr('subplot_title_size', 'subplot_title')
+    colorbar_size = _font_size_attr('colorbar_size', 'colorbar')
+    hover_size = _font_size_attr('hover_size', 'hover')
+    table_header_size = _font_size_attr('table_header_size', 'table_header')
+    table_cell_size = _font_size_attr('table_cell_size', 'table_cell')
 
     def set_default_format(self, markersize=None, linestyle=None, linewidth=None,
                            edgewidth=None, edge_color=None, alpha=None, fill=None,
@@ -7354,6 +7586,10 @@ class UnichartNotebook:
         per-call argument always wins. Only the values you pass change; others
         persist — except ``sig_figs`` and ``decimals``, two spellings of one
         knob, which clear each other. Color remains controlled by ``color_map``.
+
+        figsize, ncols, nrows, hspace, vspace, legend_scroll and
+        suppress_legends are also attributes holding the same setting
+        (``nb.ncols = 2``), which is how to clear just one (``nb.ncols = None``).
 
         ``reset=True`` restores *all* of the above — per-dataset styles, figsize,
         and the per-call defaults — to their built-ins, and ignores other args
@@ -7436,15 +7672,7 @@ class UnichartNotebook:
 
         # Validate everything into locals first; commit only at the end so a bad
         # arg can't leave the notebook in a half-updated state.
-        new_figsize = None
-        if figsize is not None:
-            if (not isinstance(figsize, (tuple, list)) or len(figsize) != 2
-                    or any(isinstance(v, bool) or not isinstance(v, (int, float))
-                           or v <= 0 for v in figsize)):
-                raise ValueError(
-                    f"figsize must be a (width, height) tuple of positive "
-                    f"numbers, got {figsize!r}")
-            new_figsize = tuple(figsize)
+        new_figsize = None if figsize is None else _check_figsize(figsize)
 
         def _num(name, val, lo=0.0, hi=None):
             if isinstance(val, bool) or not isinstance(val, (int, float)):
@@ -7517,21 +7745,13 @@ class UnichartNotebook:
                 raise ValueError(
                     f"legend must be 'above', 'right', or 'off', got {legend!r}")
             pd_updates['legend'] = legend
-        if suppress_legends is not None:
-            if not isinstance(suppress_legends, bool):
-                raise TypeError("suppress_legends must be bool, got "
-                                f"{type(suppress_legends).__name__}")
-            pd_updates['suppress_legends'] = suppress_legends
-        if legend_scroll is not None:
-            if not isinstance(legend_scroll, bool):
-                raise TypeError("legend_scroll must be bool, got "
-                                f"{type(legend_scroll).__name__}")
-            pd_updates['legend_scroll'] = legend_scroll
+        for _name, _val in (('suppress_legends', suppress_legends),
+                            ('legend_scroll', legend_scroll)):
+            if _val is not None:
+                pd_updates[_name] = _check_bool(_name, _val)
         for _name, _val in (('ncols', ncols), ('nrows', nrows)):
             if _val is not None:
-                if isinstance(_val, bool) or not isinstance(_val, int) or _val < 1:
-                    raise ValueError(f"{_name} must be a positive integer, got {_val!r}")
-                pd_updates[_name] = _val
+                pd_updates[_name] = _check_positive_int(_name, _val)
         for _name, _val in (('hspace', hspace), ('vspace', vspace)):
             if _val is not None:
                 _parse_spacing(_name, _val)   # validates; the raw value is stored
@@ -7736,7 +7956,7 @@ class UnichartNotebook:
         restores only the keys a style owns, so unrelated
         ``set_default_format`` choices survive a style switch.
         """
-        self.plot_style = style
+        self._plot_style = style   # not the plot_style property: that restyles sets
         if style == 'matplotlib':
             self.color_map = list(MPL_COLOR_CYCLE)
             self.default_format.update(MPL_DATASET_FORMAT)
@@ -7791,8 +8011,16 @@ class UnichartNotebook:
         nb.set_plot_style('plotly')                  # Plotly's native look
         nb.set_plot_style('plotly', sets=False)      # ...keeping hand-set colors
         nb.set_plot_style('matplotlib')              # back to the default look
+        nb.plot_style = 'plotly'                     # the same, as an attribute
         """
-        key = style.strip().lower() if isinstance(style, str) else style
+        resolved = self._set_plot_style(style, sets)
+        print(f"Plot style set to: {resolved}"
+              f"{' (existing datasets restyled)' if sets and self.sets else ''}")
+
+    def _set_plot_style(self, style, sets=True):
+        """:meth:`set_plot_style` without the message, shared with the
+        ``plot_style`` attribute. Returns the resolved style name."""
+        key = style.strip().lower() if isinstance(style, str) else None
         resolved = _PLOT_STYLE_ALIASES.get(key)
         if resolved is None:
             valid = ', '.join(sorted(set(_PLOT_STYLE_ALIASES)))
@@ -7802,8 +8030,7 @@ class UnichartNotebook:
         if sets:
             for ds in self.sets:
                 self._reset_set_attrs(ds, ('color', 'markersize', 'hue_palette'))
-        print(f"Plot style set to: {resolved}"
-              f"{' (existing datasets restyled)' if sets and self.sets else ''}")
+        return resolved
 
 
     # ------------------------------------------------------------------
@@ -8468,34 +8695,15 @@ class UnichartNotebook:
         reset : bool
             Reset all font sizes to defaults (equivalent to
             ``reset_format('fonts')`` or ``all='reset'``).
-        """
-        keys = ('suptitle_size', 'footer_size', 'legend_size', 'axes_title_size', 'axes_tick_size',
-                'subplot_title_size', 'colorbar_size', 'hover_size', 'table_header_size', 'table_cell_size')
 
+        Each size is also an attribute holding the same setting, named after
+        the argument plus ``_size``: ``nb.legend_size = 'large'``.
+        """
         if reset:
-            for k in keys:
-                setattr(self, k, None)
+            self._font_sizes.clear()
             return
 
-        def _validate(name, value):
-            if value is None:
-                return None
-            if isinstance(value, str):
-                if value.lower() == 'reset':
-                    return 'reset'
-                resolved = FONT_SIZE_MAP.get(value.lower())
-                if resolved is None:
-                    valid = ', '.join(sorted(FONT_SIZE_MAP))
-                    raise ValueError(f"{name}: unknown size name '{value}'. Valid names: {valid}")
-                value = resolved
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise TypeError(f"{name} must be numeric or a size name, got {type(value).__name__}")
-            if value <= 0:
-                raise ValueError(f"{name} must be positive, got {value}")
-            if value > 72:
-                warnings.warn(f"{name}={value} is unusually large for a font size.")
-            return float(value)
-
+        _validate = _font_size_value
         base = _validate('all', all)
         resolved = {
             'suptitle_size':      _validate('suptitle', suptitle)           if suptitle      is not None else base,
@@ -8509,11 +8717,13 @@ class UnichartNotebook:
             'table_header_size':  _validate('table_header', table_header)   if table_header  is not None else base,
             'table_cell_size':    _validate('table_cell', table_cell)       if table_cell    is not None else base,
         }
+        # Already checked, so straight into the store behind the *_size
+        # properties (their setters would check, and warn, a second time).
         for k, v in resolved.items():
             if v == 'reset':
-                setattr(self, k, None)
+                self._font_sizes[k] = None
             elif v is not None:
-                setattr(self, k, v)
+                self._font_sizes[k] = v
 
 
     def get_font_sizes(self):
@@ -8551,7 +8761,8 @@ class UnichartNotebook:
         dimension driven by ``figsize``. Each call replaces the previous setting
         (calling with only ``height`` drops a prior ``width`` pin).
         ``reset=True`` (or both ``None``) clears it — equivalent to
-        ``reset_format('plot_size')``.
+        ``reset_format('plot_size')``. The size is also the ``nb.plot_size``
+        attribute, in the same inches: ``nb.plot_size = (4, 3)``.
 
         Parameters
         ----------
@@ -8604,19 +8815,10 @@ class UnichartNotebook:
             self.plot_size_per_subplot = True
             return
 
-        def _v(name, val):
-            if val is None:
-                return None
-            if isinstance(val, bool) or not isinstance(val, (int, float)):
-                raise TypeError(f"{name} must be numeric (inches), got {type(val).__name__}")
-            if val <= 0:
-                raise ValueError(f"{name} must be positive, got {val}")
-            return val * 100
-
         if not isinstance(per_subplot, bool):
             raise TypeError("per_subplot must be True or False, got "
                             f"{type(per_subplot).__name__}")
-        self.plot_size = (_v('width', width), _v('height', height))
+        self.plot_size = (width, height)   # the property checks both, in inches
         self.plot_size_per_subplot = per_subplot
 
     @staticmethod
@@ -8657,9 +8859,9 @@ class UnichartNotebook:
         that panel's share of the paper area to get the paper size the figure
         must provide. Shared by ``_apply_footer`` (which needs the final plot
         height before the figure is resized) and ``_enforce_plot_size``."""
-        if fig is None or self.plot_size is None:
+        if fig is None or self._plot_size_px is None:
             return None, None
-        pw, ph = self.plot_size
+        pw, ph = self._plot_size_px
         if not self.plot_size_per_subplot:
             return pw, ph
         fx, fy = self._panel_fractions(fig)
@@ -8968,7 +9170,7 @@ class UnichartNotebook:
             ax.position = min(1.0, (panel_px + k * slot) / inner_px)
 
     def _enforce_plot_size(self, fig):
-        """Resize the figure so its plot area matches ``self.plot_size`` — each
+        """Resize the figure so its plot area matches the pinned ``plot_size`` — each
         panel in the default per-subplot mode, the whole grid otherwise.
         No-op unless a plot size is pinned.
 
@@ -8983,14 +9185,14 @@ class UnichartNotebook:
         width is itself a function of the width. That one is solved in closed
         form — ``plot area = data region + one slot per extra axis`` — and the
         axes are re-laid against the answer."""
-        if fig is None or self.plot_size is None:
+        if fig is None or self._plot_size_px is None:
             return fig
         m = fig.layout.margin
 
         def mv(val, default):
             return default if val is None else val
 
-        raw_w, raw_h = self.plot_size
+        raw_w, raw_h = self._plot_size_px
         n_extra = len(self._extra_yaxes(fig))
         if raw_w is not None:
             if n_extra:
@@ -12376,6 +12578,11 @@ class UnichartNotebook:
         print("\n" + _hc("🛠️  ATTRIBUTES:", 'head'))
         print("-" * 70)
         attrs = {a: v for a, v in self.__dict__.items() if not a.startswith('_')}
+        # Settable properties (color_map, hspace, ...) are config too, but live
+        # on the class rather than in __dict__. uset is only the old name of sets.
+        for name, prop in inspect.getmembers(cls, lambda m: isinstance(m, property)):
+            if prop.fset is not None and not name.startswith('_') and name != 'uset':
+                attrs[name] = getattr(self, name)
         if not attrs:
             print("No public instance attributes found.")
         else:
