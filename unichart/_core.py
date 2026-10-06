@@ -571,6 +571,123 @@ def _yaxis_slot_fraction(default_fraction, plot_width_px):
     return max(default_fraction, _YAXIS_SLOT_PX / plot_width_px)
 
 
+# Per-axis width estimate (_yaxis_content_px). Plotly draws tick digits at
+# roughly 0.6 em, pads them ~3px off the tick, and sets a rotated axis title
+# about one title line beyond the labels. A default axis title is 1.2x the
+# figure font (Plotly's Lib.bigFont); the figure font defaults to 12px.
+_YAXIS_CHAR_EM = 0.6
+_YAXIS_TICK_TARGET = 8          # Plotly's auto nticks for a ~500px tall axis
+_YAXIS_TITLE_GAP_PX = 12
+_YAXIS_TRAILING_GAP_PX = 8
+
+
+def _nice_tick_step(span, target=_YAXIS_TICK_TARGET):
+    """The 1/2/2.5/5 x 10^k step Plotly would pick for about ``target`` ticks."""
+    raw = span / max(target, 1)
+    mag = 10 ** np.floor(np.log10(raw))
+    for m in (1, 2, 2.5, 5, 10):
+        if raw <= m * mag:
+            return m * mag
+    return 10 * mag
+
+
+def _tick_label_chars(lo, hi):
+    """Length of the widest tick label Plotly's default format gives ``lo..hi``:
+    plain decimals, an SI suffix (``124k``, ``1.5M``) once the axis reaches
+    1e4, and exponent form for very small magnitudes."""
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        return 4
+    if hi < lo:
+        lo, hi = hi, lo
+    span = hi - lo
+    if span <= 0:
+        span = abs(hi) or 1.0
+        lo, hi = lo - span / 2, hi + span / 2
+    step = _nice_tick_step(span)
+    big = max(abs(lo), abs(hi))
+    if big >= 1e4:
+        power = min(int(np.log10(big) // 3) * 3, 12)
+        scale, suffix = 10.0 ** power, 1
+    elif big < 1e-4:
+        # "1.25e-5": mantissa digits plus the exponent
+        mant = step / 10 ** np.floor(np.log10(big))
+        dec = max(0, -int(np.floor(np.log10(mant) + 1e-9)))
+        return 1 + (1 + dec if dec else 0) + 4 + (lo < 0)
+    else:
+        scale, suffix = 1.0, 0
+    s = step / scale
+    dec = max(0, -int(np.floor(np.log10(s) + 1e-9)))
+    if abs(s / 10 ** -dec - round(s / 10 ** -dec)) > 1e-6:
+        dec += 1                      # a 2.5 step needs one more digit
+    first = np.ceil(lo / step) * step
+    ticks = np.arange(first, hi + step * 1e-6, step)[:50] / scale
+    if not len(ticks):
+        ticks = np.array([lo, hi]) / scale
+    return max(len(f"{t:.{dec}f}") for t in ticks) + suffix
+
+
+def _resolved_size(*sizes, default=12):
+    for s in sizes:
+        if s is not None:
+            return s
+    return default
+
+
+def _yaxis_content_px(fig, key):
+    """Pixels a right-hand y axis needs beyond its axis line: outside ticks,
+    its widest tick label, and its rotated title. Read off the finished figure
+    (ranges, traces, the style template's ticks, the applied font sizes) so it
+    agrees with what Plotly will draw. Floored at ``_YAXIS_SLOT_PX``."""
+    ax = fig.layout[key]
+    tpl_ax = fig.layout.template.layout.yaxis if fig.layout.template else None
+    base_font = _resolved_size(fig.layout.font.size,
+                               fig.layout.template.layout.font.size
+                               if fig.layout.template else None)
+    tick_px = _resolved_size(ax.tickfont.size, tpl_ax.tickfont.size if tpl_ax else None,
+                             default=base_font)
+    title_px = _resolved_size(ax.title.font.size,
+                              tpl_ax.title.font.size if tpl_ax else None,
+                              default=round(base_font * 1.2))
+    ticks = ax.ticks if ax.ticks is not None else (tpl_ax.ticks if tpl_ax else None)
+    ticklen = _resolved_size(ax.ticklen, tpl_ax.ticklen if tpl_ax else None, default=5)
+
+    if ax.showticklabels is False:
+        chars = 0
+    elif ax.range is not None and ax.type != 'log':
+        chars = _tick_label_chars(float(ax.range[0]), float(ax.range[1]))
+    else:
+        ref = 'y' + key[5:]
+        vals, has_bar = [], False
+        for tr in fig.data:
+            if (getattr(tr, 'yaxis', None) or 'y') != ref:
+                continue
+            y = getattr(tr, 'y', None)
+            if y is None:
+                continue
+            arr = pd.to_numeric(pd.Series(np.asarray(y).ravel()), errors='coerce').dropna()
+            if len(arr):
+                vals += [arr.min(), arr.max()]
+            has_bar = has_bar or tr.type == 'bar'
+        if not vals:
+            chars = 4
+        else:
+            lo, hi = min(vals), max(vals)
+            if has_bar:
+                lo, hi = min(lo, 0.0), max(hi, 0.0)
+            if ax.type == 'log' and lo > 0:
+                lo, hi = np.floor(np.log10(lo)), np.ceil(np.log10(hi))
+                chars = _tick_label_chars(10 ** lo, 10 ** hi)
+            else:
+                pad = (hi - lo) * 0.05
+                chars = _tick_label_chars(lo - pad, hi + pad)
+
+    width = (ticklen if ticks == 'outside' else 0) + 3 + chars * tick_px * _YAXIS_CHAR_EM
+    if ax.title.text:
+        width += _YAXIS_TITLE_GAP_PX + title_px
+    width += _YAXIS_TRAILING_GAP_PX
+    return max(_YAXIS_SLOT_PX, int(np.ceil(width)))
+
+
 _PINNED_ENTRY_BASE_PX = 40
 _PINNED_ENTRY_CHAR_PX = 10
 _PINNED_GROUP_BASE_PX = 46
@@ -4840,8 +4957,6 @@ class UnichartNotebook:
         self.last_format = 'stack'
         self.last_ymult_format = 'color'
         self.darkmode = False
-        self.last_ncols = None
-        self.last_nrows = None
         self.last_fig = None
 
         # When True, plotting methods return a flat inline PNG instead of an
@@ -7480,8 +7595,8 @@ class UnichartNotebook:
 
     ncols = _plot_default_attr('ncols', _check_positive_int, """\
         Default number of subplot columns: ``nb.ncols = 2``. Resolved as a pair
-        with :attr:`nrows`, so setting one leaves the other to fit the grid, and
-        it takes precedence over ``plot``'s memory of the last grid. ``None``
+        with :attr:`nrows`, so setting one leaves the other to fit the grid. A
+        per-call ``ncols=`` / ``nrows=`` applies to that call only. ``None``
         (the default) lets the grid shape itself. The same setting as
         ``set_default_format(ncols=)``.""")
 
@@ -7634,9 +7749,9 @@ class UnichartNotebook:
             entry instead, making the figure taller so the plot area keeps its
             size. ``save_png`` and static images always show the whole legend.
         ncols, nrows : positive int
-            Default subplot grid. Takes precedence over the sticky "remember the
-            last grid" memory in ``plot``, but an explicit per-call ncols/nrows
-            still wins. Resolved as a pair: setting one leaves the other auto.
+            Default subplot grid. An explicit per-call ncols/nrows wins for
+            that call only and does not change this default. Resolved as a
+            pair: setting one leaves the other auto.
         hspace, vspace : number or str
             Default gap between subplot columns / rows for every gridded plot
             method. A value of 1 or more is pixels (``60`` or ``'60px'``); a
@@ -9151,23 +9266,75 @@ class UnichartNotebook:
                 numbered.append((int(key[5:] or 1), ax))
         return [ax for _, ax in sorted(numbered, key=lambda pair: pair[0])]
 
-    def _reflow_extra_yaxes(self, fig, panel_px, inner_px):
-        """Re-lay the extra y axes so each gets ``_YAXIS_SLOT_PX`` of real
-        estate, given a plot area of ``inner_px`` whose data region is
-        ``panel_px`` wide. The last axis lands on paper 1.0 exactly as it does
-        at build time, so ``margin.r`` still covers its labels."""
+    @classmethod
+    def _right_yaxis_slots(cls, fig):
+        """``(slots, last_px)`` for a multi-axis plot's right-hand y axes.
+        ``slots[k]`` is the px gap before the k-th free axis, i.e. the width
+        the axis to its left needs for its own ticks and title (the anchored
+        second axis first); ``last_px`` is what the outermost axis needs from
+        the right margin. Empty slots when there are no free axes."""
+        extras = cls._extra_yaxes(fig)
+        if not extras:
+            return [], 0
+        keys = {id(fig.layout[k]): k for k in fig.to_plotly_json()['layout']
+                if k.startswith('yaxis')}
+        widths = [_yaxis_content_px(fig, 'yaxis2')]
+        widths += [_yaxis_content_px(fig, keys[id(ax)]) for ax in extras]
+        return widths[:-1], widths[-1]
+
+    def _reflow_extra_yaxes(self, fig, panel_px, inner_px, slots):
+        """Re-lay the extra y axes given a plot area of ``inner_px`` whose data
+        region is ``panel_px`` wide, giving the k-th axis ``slots[k]`` px after
+        its left neighbour. The last axis lands on paper 1.0, so ``margin.r``
+        (sized for that axis) covers its labels."""
         axes = self._extra_yaxes(fig)
         if not axes:
             return
-        # Normally the caller sized inner_px to give every axis a full slot, so
-        # this is exactly _YAXIS_SLOT_PX. It only bites in whole-grid mode,
-        # where the axes come out of a fixed plot area and the 50% clamp can
-        # leave less than they want: share what there is evenly rather than
-        # handing the first axes a full slot and stacking the rest on the edge.
-        slot = min(_YAXIS_SLOT_PX, (inner_px - panel_px) / len(axes))
+        # Normally panel_px + sum(slots) == inner_px. Where the 50% clamp left
+        # less room than the axes want, scale every gap down evenly rather than
+        # handing the first axes their full width and stacking the rest on the
+        # edge.
+        want = sum(slots)
+        scale = min(1.0, (inner_px - panel_px) / want) if want else 1.0
         fig.update_layout(xaxis=dict(domain=[0, panel_px / inner_px]))
-        for k, ax in enumerate(axes, start=1):
-            ax.position = min(1.0, (panel_px + k * slot) / inner_px)
+        edge = panel_px
+        for ax, slot in zip(axes, slots):
+            edge += slot * scale
+            ax.position = min(1.0, edge / inner_px)
+
+    @staticmethod
+    def _legend_right_of_plot(fig):
+        """True when the legend sits in the right margin: an explicit
+        ``legend='right'`` placement, or Plotly's default vertical legend
+        (orientation and x both unset, which Plotly puts at x=1.02)."""
+        leg = fig.layout.legend
+        return (fig.layout.showlegend is not False and leg.orientation != 'h'
+                and (leg.x is None or leg.x >= 1))
+
+    def _layout_right_yaxes(self, fig):
+        """Space a multi-axis plot's right-hand y axes by what each one's tick
+        labels and title actually need, once the style and font sizes are on
+        the figure. The builders only know a fixed slot, so wide labels
+        (``0.00125``, ``1540.5``) or a large tick font ran into the next axis.
+        The right margin is sized for the outermost axis (plus a right-hand
+        legend beyond it). A pinned plot size is handled afterwards by
+        ``_enforce_plot_size``, which reuses the same widths."""
+        if fig is None:
+            return fig
+        slots, last_px = self._right_yaxis_slots(fig)
+        if not slots:
+            return fig
+        right_legend = self._legend_right_of_plot(fig)
+        r = last_px + (160 if right_legend else 0)
+        fig.update_layout(margin=dict(r=r))
+        m = fig.layout.margin
+        width = fig.layout.width or 1200
+        inner = width - (80 if m.l is None else m.l) - r
+        panel = max(inner * 0.5, inner - sum(slots))
+        self._reflow_extra_yaxes(fig, panel, inner, slots)
+        if right_legend:
+            fig.update_layout(legend=dict(x=1 + (last_px + 10) / inner))
+        return fig
 
     def _enforce_plot_size(self, fig):
         """Resize the figure so its plot area matches the pinned ``plot_size`` — each
@@ -9183,8 +9350,8 @@ class UnichartNotebook:
         Extra right-hand y axes are the exception to "read the width off the
         domain": their slots are sized in px, so the domain that decides the
         width is itself a function of the width. That one is solved in closed
-        form — ``plot area = data region + one slot per extra axis`` — and the
-        axes are re-laid against the answer."""
+        form — ``plot area = data region + each extra axis's slot`` (from
+        ``_right_yaxis_slots``) — and the axes are re-laid against the answer."""
         if fig is None or self._plot_size_px is None:
             return fig
         m = fig.layout.margin
@@ -9193,19 +9360,20 @@ class UnichartNotebook:
             return default if val is None else val
 
         raw_w, raw_h = self._plot_size_px
-        n_extra = len(self._extra_yaxes(fig))
+        slots, last_px = self._right_yaxis_slots(fig)
         if raw_w is not None:
-            if n_extra:
+            if slots:
                 if self.plot_size_per_subplot:
                     # The pin is the data region; the axes get their slots on top.
-                    panel_px, inner_w = raw_w, raw_w + n_extra * _YAXIS_SLOT_PX
+                    panel_px, inner_w = raw_w, raw_w + sum(slots)
                 else:
                     # The pin is the whole plot area; the axes take their slots
                     # out of it, which is what whole-grid mode asks for.
                     inner_w = raw_w
-                    panel_px = max(inner_w * 0.5,
-                                   inner_w - n_extra * _YAXIS_SLOT_PX)
-                self._reflow_extra_yaxes(fig, panel_px, inner_w)
+                    panel_px = max(inner_w * 0.5, inner_w - sum(slots))
+                self._reflow_extra_yaxes(fig, panel_px, inner_w, slots)
+                if self._legend_right_of_plot(fig):
+                    fig.update_layout(legend=dict(x=1 + (last_px + 10) / inner_w))
             else:
                 inner_w = self._pinned_inner_size(fig)[0]
             fig.update_layout(width=inner_w + mv(m.l, 80) + mv(m.r, 80))
@@ -9700,6 +9868,7 @@ class UnichartNotebook:
         fig = self._apply_style(fig)
         fig = self._apply_grid(fig)
         fig = self._apply_fonts(fig)
+        fig = self._layout_right_yaxes(fig)
         fig = self._apply_footer(fig, footer)
         fig = self._apply_watermark(fig)
         # Before _enforce_plot_size, so the pinned top band isn't sized for
@@ -10045,13 +10214,7 @@ class UnichartNotebook:
         self.last_y = y
         self._record_plot_call('plot', locals())
 
-        # Grid precedence: explicit call arg > standing default > sticky last grid
         ncols, nrows = self._resolve_grid(ncols, nrows)
-        if ncols is None and nrows is None and (
-                self.last_ncols is not None or self.last_nrows is not None):
-            ncols, nrows = self.last_ncols, self.last_nrows
-        self.last_ncols = ncols
-        self.last_nrows = nrows
 
         if by == 'sets' or by == 'datasets':
             fig = uniplot_per_dataset(
@@ -10359,13 +10522,7 @@ class UnichartNotebook:
         self.last_y = y
         self._record_plot_call('plot_marginal', locals())
 
-        # Grid precedence as in plot: explicit arg > standing default > sticky last grid
         ncols, nrows = self._resolve_grid(ncols, nrows)
-        if ncols is None and nrows is None and (
-                self.last_ncols is not None or self.last_nrows is not None):
-            ncols, nrows = self.last_ncols, self.last_nrows
-        self.last_ncols = ncols
-        self.last_nrows = nrows
 
         common = dict(
             list_of_datasets=self.sets, x=x, y=y,
