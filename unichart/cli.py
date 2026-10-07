@@ -12,8 +12,8 @@ session::
     unichart runs.csv --html board.html   # write a static board instead of serving
     unichart --gallery                    # open the example gallery and exit
 
-A FILE can also be a saved session — a ``.json`` from ``nb.save_session`` or a
-PNG from ``nb.save_png``, which carries its session in a metadata chunk. Those
+A FILE can also be a saved session — a ``.json`` from ``uc.save_session`` or a
+PNG from ``uc.save_png``, which carries its session in a metadata chunk. Those
 are restored rather than read as data, bringing back the datasets, the queries,
 the formatting and the plot itself::
 
@@ -506,7 +506,7 @@ def build_parser():
         description='Open the unichart explorer on a data file, or export a '
                     'static board.',
         epilog='Panels beyond method/x/y/z (kwargs, dataset pins) are '
-               'expressible from Python: see nb.dashboard / nb.explore.\n'
+               'expressible from Python: see uc.dashboard / uc.explore.\n'
                'Help is colored on a terminal; set NO_COLOR=1 to turn that off.',
         formatter_class=argparse.RawDescriptionHelpFormatter)
 
@@ -614,19 +614,19 @@ def _split_files(args):
     return data, sessions
 
 
-def _load(nb, files, args):
+def _load(uc, files, args):
     """Load the data FILEs onto the notebook."""
     if not files:
         return
     sources = files if len(files) > 1 else files[0]
     try:
-        nb.load(sources, set_idx_column=args.set_col,
+        uc.load(sources, set_idx_column=args.set_col,
                 set_name_column=args.name_col, combined=args.combine)
     except Exception as exc:                              # noqa: BLE001
         raise CliError(f'could not read the data: {exc}') from exc
 
 
-def _load_sessions(nb, paths, replay=True):
+def _load_sessions(uc, paths, replay=True):
     """Restore each session file onto the notebook, in command-line order.
 
     Only for the paths with no board — ``--info``, ``--html``,
@@ -638,12 +638,12 @@ def _load_sessions(nb, paths, replay=True):
     """
     for path in paths:
         try:
-            nb.load_session(path, replay=replay)
+            uc.load_session(path, replay=replay)
         except Exception as exc:                          # noqa: BLE001
             raise CliError(f'could not load the session {path}: {exc}') from exc
 
 
-def _draw_panels(nb, panels):
+def _draw_panels(uc, panels):
     """Draw each --panel through its real plot method.
 
     ``--save-session`` needs this: a session records the last plotting call, and
@@ -676,7 +676,7 @@ def _draw_panels(nb, panels):
             if panel.get('z') is not None and method in _Z_METHODS:
                 kwargs['z'] = panel['z']
         try:
-            getattr(nb, method)(**kwargs)
+            getattr(uc, method)(**kwargs)
         except Exception as exc:                          # noqa: BLE001
             raise CliError(f'--panel {method}: {exc}') from exc
 
@@ -684,7 +684,7 @@ def _draw_panels(nb, panels):
 def _session_plot_calls(paths):
     """The plot call recorded in each session file, straight from the file.
 
-    Read rather than taken from ``nb._last_plot_call`` after the restore: that
+    Read rather than taken from ``uc._last_plot_call`` after the restore: that
     attribute is only set when the replay *worked*, and --info exists to say
     what a file contains — including a call that would not replay.
     """
@@ -708,20 +708,20 @@ def _session_plot_calls(paths):
     return calls
 
 
-def _print_info(nb, sessions=()):
+def _print_info(uc, sessions=()):
     """Summarize what got loaded — the non-GUI way to check a file parsed."""
     from .dashboard import _all_columns, _numeric_columns
 
-    if not nb.sets:
+    if not uc.sets:
         print('No datasets loaded.')
         return
-    print(f'\n{len(nb.sets)} dataset(s):')
-    for ds in nb.sets:
+    print(f'\n{len(uc.sets)} dataset(s):')
+    for ds in uc.sets:
         print(f'  [{ds.index}] {ds.title_format} — {len(ds.df):,} rows')
-    numeric = set(_numeric_columns(nb))
-    print(f'\n{len(_all_columns(nb))} column(s) '
+    numeric = set(_numeric_columns(uc))
+    print(f'\n{len(_all_columns(uc))} column(s) '
           f'({len(numeric)} numeric, marked *):')
-    for name in _all_columns(nb):
+    for name in _all_columns(uc):
         print(f"  {'*' if name in numeric else ' '} {name}")
     # Only a session brings a plot along, so this is the answer to "will opening
     # this file give me my chart back?".
@@ -770,8 +770,8 @@ def main(argv=None):
         panels = [parse_panel(spec, PLOT_METHODS) for spec in args.panel]
         data_files, session_files = _split_files(args)
 
-        nb = UnichartNotebook()
-        _load(nb, data_files, args)
+        uc = UnichartNotebook()
+        _load(uc, data_files, args)
 
         # Serving defers the sessions to the board (see _load_sessions); every
         # other action has no board to defer to and restores them here, after
@@ -780,28 +780,28 @@ def main(argv=None):
         if not serving:
             # --info reads the recorded call out of the file itself, so redrawing
             # the plot here would be work nothing looks at.
-            _load_sessions(nb, session_files, replay=not args.info)
+            _load_sessions(uc, session_files, replay=not args.info)
         if args.dark:
-            nb.toggle_darkmode(True)
+            uc.toggle_darkmode(True)
 
         if args.info:
-            _print_info(nb, session_files)
+            _print_info(uc, session_files)
             return 0
 
         if args.save_session:
-            if not nb.sets:
+            if not uc.sets:
                 raise CliError('--save-session needs data: pass at least one FILE')
-            _draw_panels(nb, panels)
-            nb.save_session(args.save_session)
+            _draw_panels(uc, panels)
+            uc.save_session(args.save_session)
             return 0
 
         if args.html:
-            if not nb.sets:
+            if not uc.sets:
                 raise CliError('--html needs data: pass at least one FILE')
             # to_html rejects an empty panel list, and a board with no panels
             # would be a blank page anyway; fall back to the same auto-seeded
             # plot the explorer opens with.
-            to_html(nb, panels or [_default_panel_spec(nb)], args.html,
+            to_html(uc, panels or [_default_panel_spec(uc)], args.html,
                     ncols=args.ncols, width=args.width, height=args.height,
                     title=args.title, embed_js=args.embed_js)
             print(f'Wrote {args.html}')
@@ -813,7 +813,7 @@ def main(argv=None):
         # one chart pane that fills its own space, so they are not forwarded.
         # --dark is passed through rather than applied above: a restored session
         # carries its own theme and would otherwise overwrite the flag.
-        explore(nb, sessions=session_files or None, panels=panels or None,
+        explore(uc, sessions=session_files or None, panels=panels or None,
                 title=args.title, port=args.port,
                 dark=True if args.dark else None,
                 open_browser=not args.no_browser,

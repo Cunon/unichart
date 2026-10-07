@@ -9,7 +9,7 @@ board that mirrors the web version at plot.thomas-emmons.com:
 * a **terminal** you drive with real Python: ``plot(x='time', y='temp')``.
 
 The notebook's own methods are bound as bare names in the terminal's namespace,
-so the cheat sheet reads the way the library does. ``nb`` is there too, for
+so the cheat sheet reads the way the library does. ``uc`` is there too, for
 anything the shortcuts don't cover.
 
 The top bar's ✕ closes the board: outside a Jupyter kernel the board owns the
@@ -52,7 +52,7 @@ from .dashboard import (_df_from_upload, _pick_port, _require_dash,
 # ---------------------------------------------------------------------------
 # Palette — sampled from the web version. Dark only, on purpose: this board
 # does not carry the dashboard's light/dark token machinery, so restyling it
-# leaves nb.dashboard() and to_html() untouched.
+# leaves uc.dashboard() and to_html() untouched.
 # ---------------------------------------------------------------------------
 
 BG = '#0b0d11'          # page + terminal
@@ -90,7 +90,7 @@ _RECURSIVE = {'explore', 'dashboard', 'dashboard_to_html', 'terminal'}
 _RUN_LOCK = threading.Lock()
 
 # Uploaded and demo files land here so they load through the same
-# nb.load(path) the transcript shows, rather than a hidden side channel. One
+# uc.load(path) the transcript shows, rather than a hidden side channel. One
 # directory per process, not per board: re-running an `explore()` cell in a
 # notebook would otherwise mint a new one every time.
 _UPLOADS = None
@@ -179,7 +179,7 @@ CHEAT_SHEET = [
     ("color(0, 'red')", False),
     ("marker(1, 's')", False),
     ("var_format('temperature', linestyle='--')", True),
-    ("nb.table()", False),
+    ("uc.table()", False),
     ("summary()", False),
     ("list_parms()", False),
     ("help()", False),
@@ -203,7 +203,7 @@ BANNER = [
 # ---------------------------------------------------------------------------
 
 @contextlib.contextmanager
-def _scoped_output(nb, sink):
+def _scoped_output(uc, sink):
     """Route unichart's rich output into ``sink`` for the duration of one command.
 
     ``unichart._core.display`` is a module-level name (bound from IPython at import,
@@ -211,7 +211,7 @@ def _scoped_output(nb, sink):
     library makes — HTML tables from ``table``/``summary``/``list_parms``, and
     the plot copy button. Restored in ``finally`` because the notebook driving
     this board may well be a live Jupyter session: leaving the shim installed
-    would break the user's next ``nb.plot()`` cell.
+    would break the user's next ``uc.plot()`` cell.
 
     The copy button is a Jupyter affordance and would just be noise here (this
     board has its own chart pane), so it is off for the duration too.
@@ -225,7 +225,7 @@ def _scoped_output(nb, sink):
     from . import _core
 
     real_display = _core.display
-    real_copy = nb.copy_buttons
+    real_copy = uc.copy_buttons
     real_help_color = _core._HELP_COLOR
 
     def capture(*objs, **kwargs):
@@ -233,13 +233,13 @@ def _scoped_output(nb, sink):
             sink.append(obj)
 
     _core.display = capture
-    nb.copy_buttons = False
+    uc.copy_buttons = False
     _core._HELP_COLOR = not os.environ.get('NO_COLOR')
     try:
         yield
     finally:
         _core.display = real_display
-        nb.copy_buttons = real_copy
+        uc.copy_buttons = real_copy
         _core._HELP_COLOR = real_help_color
 
 
@@ -347,21 +347,21 @@ class Session:
 
     The namespace exposes the notebook's public methods as bare names — the
     cheat sheet's ``plot(...)`` / ``select(...)`` are those, not globals of our
-    own — plus ``nb`` itself for anything else, and ``exit`` / ``quit``, which
+    own — plus ``uc`` itself for anything else, and ``exit`` / ``quit``, which
     close the board when it owns its process.
     """
 
-    def __init__(self, nb, allow_quit=True):
-        self.nb = nb
+    def __init__(self, uc, allow_quit=True):
+        self.uc = uc
         self.ns = {'__name__': '__console__', '__builtins__': __builtins__,
-                   'nb': nb, 'pd': pd}
+                   'uc': uc, 'nb': uc, 'pd': pd}   # nb: the old name, still answered
         # Shadowing the builtins: a bare exit() should close the board rather
         # than raise SystemExit into the transcript.
         self.ns['exit'] = self.ns['quit'] = _Quitter(allow_quit)
-        for name in dir(nb):
+        for name in dir(uc):
             if name.startswith('_') or name in _RECURSIVE:
                 continue
-            attr = getattr(nb, name, None)
+            attr = getattr(uc, name, None)
             if callable(attr):
                 self.ns[name] = attr
 
@@ -379,8 +379,8 @@ class Session:
         sink, out = [], io.StringIO()
         error = None
         with _RUN_LOCK:
-            before = self.nb.last_fig
-            with _scoped_output(self.nb, sink):
+            before = self.uc.last_fig
+            with _scoped_output(self.uc, sink):
                 try:
                     with contextlib.redirect_stdout(out), \
                             contextlib.redirect_stderr(out):
@@ -390,7 +390,7 @@ class Session:
                         traceback.format_exception_only(type(exc), exc)).rstrip()
                 except BaseException as exc:            # noqa: BLE001
                     error = _format_exception(exc)
-            after = self.nb.last_fig
+            after = self.uc.last_fig
 
         figure = after if (after is not None and after is not before) else None
         html_blocks = []
@@ -445,7 +445,7 @@ class Session:
         if value is None:
             return
         if hasattr(value, 'to_plotly_json'):
-            self.nb.last_fig = value
+            self.uc.last_fig = value
             return
         if isinstance(value, (pd.DataFrame, pd.Series)):
             print(value.to_string())
@@ -819,7 +819,7 @@ def _fit(fig):
     unichart pins width/height on every figure (``_enforce_plot_size``) so
     notebook output is reproducible. The chart pane wants the opposite — fill
     the available width — so those are cleared on a *copy*: mutating the
-    original would corrupt ``nb.last_fig`` for ``save_png`` and re-styling.
+    original would corrupt ``uc.last_fig`` for ``save_png`` and re-styling.
     """
     if fig is None:
         return _blank()
@@ -850,12 +850,12 @@ def _blank():
     }
 
 
-def _dataset_rows(html, nb):
+def _dataset_rows(html, uc):
     """The sidebar's dataset list, colored to match the traces on the chart."""
-    if not nb.sets:
+    if not uc.sets:
         return [html.Div('No data loaded.', className='term-empty')]
     rows = []
-    for ds in nb.sets:
+    for ds in uc.sets:
         rows.append(html.Div([
             html.Span(className='term-swatch', style={'background': ds.color}),
             html.Span(str(ds.index), className='term-set-idx'),
@@ -867,7 +867,7 @@ def _dataset_rows(html, nb):
     return rows
 
 
-def _sidebar(html, dcc, nb):
+def _sidebar(html, dcc, uc):
     return html.Div([
         html.Div([
             html.Span('Data', className='term-label'),
@@ -884,7 +884,7 @@ def _sidebar(html, dcc, nb):
 
         html.Div([
             html.Span('Datasets', className='term-label'),
-            html.Div(_dataset_rows(html, nb), id='term-datasets'),
+            html.Div(_dataset_rows(html, uc), id='term-datasets'),
         ], className='term-section'),
 
         html.Div([
@@ -904,12 +904,12 @@ def _sidebar(html, dcc, nb):
         html.Div([
             'Click any snippet to put it in the terminal. The full ',
             html.Code('UnichartNotebook'), ' API is available as ',
-            html.Code('nb'), '.',
+            html.Code('uc'), '.',
         ], className='term-note'),
     ], className='term-side')
 
 
-# ANSI (from nb.help()) rendered as spans, in this board's palette. Only the
+# ANSI (from uc.help()) rendered as spans, in this board's palette. Only the
 # codes unichart actually emits are mapped; anything else is stripped rather
 # than left to show up as a literal "[36m" in the transcript.
 _ANSI_RE = re.compile(r'\x1b\[([0-9;]*)m')
@@ -966,7 +966,7 @@ def _entry_divs(html, entries):
     return out
 
 
-def build_terminal_app(nb, title=None, banner=True, startup=(),
+def build_terminal_app(uc, title=None, banner=True, startup=(),
                        allow_quit=None):
     """Build (but do not run) the terminal explorer.
 
@@ -987,7 +987,7 @@ def build_terminal_app(nb, title=None, banner=True, startup=(),
     if allow_quit is None:
         from .dashboard import _in_notebook
         allow_quit = not _in_notebook()
-    session = Session(nb, allow_quit=allow_quit)
+    session = Session(uc, allow_quit=allow_quit)
     uploads = _uploads_dir()
 
     entries = []
@@ -1039,7 +1039,7 @@ def build_terminal_app(nb, title=None, banner=True, startup=(),
         ], className='term-top'),
 
         html.Div([
-            _sidebar(html, dcc, nb),
+            _sidebar(html, dcc, uc),
             html.Div(id='term-grip-v', className='term-grip term-grip-v',
                      title='Drag to resize · double-click to reset'),
             html.Div([
@@ -1061,7 +1061,7 @@ def build_terminal_app(nb, title=None, banner=True, startup=(),
                             dcc.Textarea(
                                 id='term-input', value='',
                                 className='term-input',
-                                placeholder='nb.help()  ·  Enter runs · '
+                                placeholder='uc.help()  ·  Enter runs · '
                                             'Shift+Enter for a new line · '
                                             '↑ history',
                                 spellCheck=False),
@@ -1080,7 +1080,7 @@ def build_terminal_app(nb, title=None, banner=True, startup=(),
         _quit_dialog(html) if allow_quit else None,
     ], className='term-app')
 
-    _register(app, nb, session, uploads, board_title, dcc, html, ctx,
+    _register(app, uc, session, uploads, board_title, dcc, html, ctx,
               Input, Output, State, ALL, no_update, allow_quit)
     return app
 
@@ -1133,7 +1133,7 @@ def _result_entries(result):
     return out
 
 
-def _register(app, nb, session, uploads, board_title, dcc, html, ctx,
+def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
               Input, Output, State, ALL, no_update, allow_quit=False):
     """Wire the board up.
 
@@ -1202,7 +1202,7 @@ def _register(app, nb, session, uploads, board_title, dcc, html, ctx,
                 # frame-shaped and a PNG would not survive a to_csv.
                 if sniff_session(raw) is not None:
                     path.write_bytes(raw)
-                    commands.append(f'nb.load_session({str(path)!r})')
+                    commands.append(f'uc.load_session({str(path)!r})')
                     continue
                 try:
                     frame = _df_from_upload(contents, name)
@@ -1212,14 +1212,14 @@ def _register(app, nb, session, uploads, board_title, dcc, html, ctx,
                 # Land the upload on disk so the command reads like a real
                 # load — and so re-running it from history actually works.
                 frame.to_csv(path, index=False)
-                commands.append(f'nb.load({str(path)!r})')
+                commands.append(f'uc.load({str(path)!r})')
         elif trigger == 'term-demo':
             path = uploads / 'demo.csv'
             demo_frame().to_csv(path, index=False)
-            commands.append(f'nb.load({str(path)!r})')
+            commands.append(f'uc.load({str(path)!r})')
             commands.append("plot(x='time', y=['temperature', 'pressure'])")
         elif trigger == 'term-save':
-            if not save_n or not nb.sets:
+            if not save_n or not uc.sets:
                 return (no_update,) * 8
             # Written to the uploads dir and then handed to the browser: the
             # board is served to a browser, so "save" has to mean a download,
@@ -1227,7 +1227,7 @@ def _register(app, nb, session, uploads, board_title, dcc, html, ctx,
             # after the board because the uploads dir is per *process*, and two
             # explore() calls in one notebook share it.
             save_path = uploads / f'{_slug(board_title)}-session.json'
-            commands.append(f'nb.save_session({str(save_path)!r})')
+            commands.append(f'uc.save_session({str(save_path)!r})')
         else:
             if not (source or '').strip():
                 return (no_update,) * 8
@@ -1247,7 +1247,7 @@ def _register(app, nb, session, uploads, board_title, dcc, html, ctx,
             download = dcc.send_file(str(save_path))
 
         return (entries, _entry_divs(html, entries), figure,
-                _dataset_rows(html, nb), '', history, None, download)
+                _dataset_rows(html, uc), '', history, None, download)
 
     # Enter runs, Shift+Enter adds a line, up/down walks history. All of it is
     # clientside: an arrow key must never cost a server round trip, and the
@@ -1660,40 +1660,44 @@ def _spawn(argv, url):
         webbrowser.open(url)
 
 
-def terminal(nb=None, data=None, sessions=None, panels=None, title=None,
+def terminal(uc=None, data=None, sessions=None, panels=None, title=None,
              port=8050, debug=False, open_browser=None, app_window=False,
-             jupyter_mode=None, dark=None, **run_kwargs):
-    """Launch the terminal explorer. See :func:`unichart.dashboard.explore`."""
+             jupyter_mode=None, dark=None, nb=None, **run_kwargs):
+    """Launch the terminal explorer. See :func:`unichart.dashboard.explore`.
+
+    ``nb=`` is the old name of ``uc=``, still accepted."""
     from .dashboard import _in_notebook
 
-    if nb is None:
+    if uc is None:
+        uc = nb
+    if uc is None:
         from ._core import UnichartNotebook
-        nb = UnichartNotebook()
+        uc = UnichartNotebook()
     # The board is dark; match the plots to it unless the caller already chose.
-    if not getattr(nb, 'darkmode', False):
-        nb.toggle_darkmode(True)
+    if not getattr(uc, 'darkmode', False):
+        uc.toggle_darkmode(True)
 
     startup = []
     if data is not None:
-        nb.load(data)
+        uc.load(data)
     # Sessions restore as startup commands rather than here, for three reasons:
     # the restore lands in the transcript like every other action on this board;
     # the plot call it replays paints the chart pane, which otherwise opens blank
     # because it is only ever seeded from a startup result; and it runs after the
     # dark flip above, so a session saved in light mode keeps its theme.
     for path in ([sessions] if isinstance(sessions, (str, Path)) else sessions or []):
-        startup.append(f'nb.load_session({str(path)!r})')
+        startup.append(f'uc.load_session({str(path)!r})')
     # ...which is also why an explicit dark=True has to be re-asserted here: the
     # session would otherwise overwrite it on its way back in.
     if dark is not None and sessions:
-        startup.append(f'nb.toggle_darkmode({bool(dark)!r})')
+        startup.append(f'uc.toggle_darkmode({bool(dark)!r})')
     for panel in panels or []:
         startup.append(_panel_command(panel))
 
     # Asked before the board is built: whether closing it may end the process
     # is the one layout decision that depends on where we are running.
     in_notebook = _in_notebook()
-    app = build_terminal_app(nb, title=title, startup=[c for c in startup if c],
+    app = build_terminal_app(uc, title=title, startup=[c for c in startup if c],
                              allow_quit=not in_notebook)
     # A standalone window is a browser window either way, so asking for one
     # from a kernel means the external board rather than the inline iframe.

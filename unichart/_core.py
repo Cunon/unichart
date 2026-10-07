@@ -249,7 +249,7 @@ def marker_map(index):
 # unichart draws through Plotly, whose house style is recognizable: no axis
 # spines, a drawn zero line, its own color cycle and font. Figures are styled to
 # approximate Matplotlib's rcParams defaults instead, so they sit next to
-# Matplotlib output without reading as foreign. ``nb.set_plot_style('plotly')``
+# Matplotlib output without reading as foreign. ``uc.set_plot_style('plotly')``
 # opts back into Plotly's native look.
 #
 # It takes two halves, because a Plotly template can only carry *layout*
@@ -341,7 +341,7 @@ def _build_mpl_template(darkmode):
         on) rather than Matplotlib's axes.grid=False, so the style can't fight
         an explicit per-plot choice; only its color/width is styled to match
         (linewidth 0.8, solid), at half the opacity of Matplotlib's grid.color
-        '0.8' so the grid sits further behind the data. Override via nb.grid().
+        '0.8' so the grid sits further behind the data. Override via uc.grid().
       * Dark mode keeps the tab10 cycle and dims the grid (a translucent gray
         rather than dark_background's white grid), with the pastel cycle also
         dropped.
@@ -927,7 +927,7 @@ _LINE_LABEL_DEFAULT_SIDE = {'vertical': 'right', 'horizontal': 'top'}
 # copy every time a figure is re-finalized.
 _WATERMARK_NAME = '_uc_watermark'
 
-# Built-in look, used for whatever the user hasn't set via nb.watermark().
+# Built-in look, used for whatever the user hasn't set via uc.watermark().
 # Deliberately faint and centered: the common case is a logo washed behind the
 # data. 'contain' keeps the image's aspect ratio inside the size box, so the
 # user never has to know the file's pixel dimensions.
@@ -1569,9 +1569,9 @@ class _DatasetFrameView:
         self._dataset = dataset
 
     def _slice(self):
-        nb = self._dataset._notebook
-        cdf = nb._combined_df
-        pos = nb._set_positions(self._dataset._set_id)
+        uc = self._dataset._notebook
+        cdf = uc._combined_df
+        pos = uc._set_positions(self._dataset._set_id)
         return cdf.iloc[pos, _data_col_indexer(cdf)]
 
     def __getitem__(self, key):
@@ -1793,8 +1793,8 @@ class Dataset:
         without materializing any rows. All-NaN phantom columns introduced by
         *other* sets sharing the combined frame are excluded. Ownership is
         kept current by the write APIs and by automatic reconciliation of
-        columns added/removed directly on ``nb.df``; after in-place value
-        surgery on the live frame, call ``nb.refresh_own_columns(rescan=True)``.
+        columns added/removed directly on ``uc.df``; after in-place value
+        surgery on the live frame, call ``uc.refresh_own_columns(rescan=True)``.
         """
         cols = self._notebook._combined_df.columns
         return pd.Index([cols[i] for i in self._own_col_positions()])
@@ -1869,7 +1869,7 @@ class Dataset:
         other sets are excluded (see :attr:`columns`).
 
         Returns a fresh copy each call, so assigning to it does NOT persist:
-        use ``ds['col'] = ...`` (or ``nb.set_column``) to write back.
+        use ``ds['col'] = ...`` (or ``uc.set_column``) to write back.
         """
         cdf = self._notebook._combined_df
         return cdf.iloc[self._masked_positions(), self._own_col_positions()]
@@ -4811,7 +4811,7 @@ def sniff_session(source):
 
 
 # ---------------------------------------------------------------------------
-# Notebook settings as attributes (nb.figsize, nb.hspace, nb.legend_size, ...)
+# Notebook settings as attributes (uc.figsize, uc.hspace, uc.legend_size, ...)
 # ---------------------------------------------------------------------------
 # Each is the same setting as its set_default_format / set_font_sizes /
 # set_plot_style spelling and shares that method's check, so a bad value fails
@@ -4921,7 +4921,7 @@ def _font_size_attr(key, arg):
 class UnichartNotebook:
     """Interactive multi-dataset plotting environment for notebooks.
 
-    A notebook holds any number of datasets (``nb.sets``, each a :class:`Dataset`)
+    A notebook holds any number of datasets (``uc.sets``, each a :class:`Dataset`)
     backed by a single shared DataFrame, and turns them into Plotly figures with a
     concise, stateful API. The typical workflow is:
 
@@ -4934,7 +4934,7 @@ class UnichartNotebook:
 
     Plot calls remember their last arguments (``last_x``, ``last_y``, ...), so
     follow-up styling and analysis calls can be made without re-specifying them.
-    Call ``nb.help()`` for a categorized method listing, or ``nb.help('name')``
+    Call ``uc.help()`` for a categorized method listing, or ``uc.help('name')``
     for the full documentation of a single method.
     """
 
@@ -4982,7 +4982,7 @@ class UnichartNotebook:
         self.footer = None
 
         # Default figure size (width, height) in inches, used by the plot methods
-        # whenever a call doesn't pass figsize=. Change via nb.figsize or
+        # whenever a call doesn't pass figsize=. Change via uc.figsize or
         # set_default_format; it is a checked property over _figsize.
         # Distinct from set_plot_size, which pins the inner plot area; figsize
         # sets the overall figure dimensions.
@@ -4993,7 +4993,7 @@ class UnichartNotebook:
         # (resolved through _apply_default). An explicit per-call argument always
         # wins over the stored default. Cleared by set_default_format(reset=True).
         # hspace, vspace, ncols, nrows, legend_scroll and suppress_legends are
-        # also attributes (nb.ncols = 2), properties over this dict.
+        # also attributes (uc.ncols = 2), properties over this dict.
         self.plot_defaults = {
             'legend': None, 'suppress_legends': None, 'legend_scroll': None,
             'ncols': None, 'nrows': None, 'hspace': None, 'vspace': None,
@@ -5019,16 +5019,16 @@ class UnichartNotebook:
 
         # User-customizable color map: the ordered list of colors assigned to
         # datasets by index, mirroring marker_map for markers. Replace it with
-        # your own list (e.g. nb.color_map = ['#FF0000', '#00FF00', ...]) to
+        # your own list (e.g. uc.color_map = ['#FF0000', '#00FF00', ...]) to
         # choose the colors new/reset datasets and integer color() lookups use.
-        # Integer indexing cycles, so nb.color_map[3] works on a 2-color map.
+        # Integer indexing cycles, so uc.color_map[3] works on a 2-color map.
         self.color_map = px.colors.qualitative.Plotly
 
         # User-customizable marker map: the ordered list of marker symbols
         # assigned to datasets by index (the marker analogue of color_map).
-        # Replace it with your own list (e.g. nb.marker_map = ['o', 's', '^'])
+        # Replace it with your own list (e.g. uc.marker_map = ['o', 's', '^'])
         # to choose the markers new/reset datasets and integer marker() lookups
-        # use. Integer indexing cycles, so nb.marker_map[3] works on a 2-marker map.
+        # use. Integer indexing cycles, so uc.marker_map[3] works on a 2-marker map.
         self.marker_map = list(MARKER_MAP_MPL_TO_PLOTLY.keys())
 
         # Per-dataset style defaults (marker/markersize/linestyle/linewidth/
@@ -5047,7 +5047,7 @@ class UnichartNotebook:
 
         # Optional fixed plot-area size (inches, w/h, either may be None) so plots
         # stay the same size — and shape — regardless of suptitle/legend/margins
-        # or how many subplots the call produces. Set via nb.plot_size or
+        # or how many subplots the call produces. Set via uc.plot_size or
         # set_plot_size; applied in _finalize, which works in px through
         # _plot_size_px. None = size driven by figsize. plot_size_per_subplot
         # decides whether the pinned size is one panel (default) or the whole
@@ -5055,19 +5055,19 @@ class UnichartNotebook:
         self.plot_size = None
         self.plot_size_per_subplot = True
 
-        # Sticky gridline formatting set via nb.grid(). Shape:
+        # Sticky gridline formatting set via uc.grid(). Shape:
         # {'x'|'y': {'major'|'minor': {'visible'|'color'|'width'|'dash': value}}}.
         # Empty inner dicts = leave the plot style's grid alone. Applied to every
-        # figure in _finalize (see _apply_grid); cleared by nb.grid(reset=True)
+        # figure in _finalize (see _apply_grid); cleared by uc.grid(reset=True)
         # or reset_format('grid').
         self.grid_format = self._empty_grid_format()
 
-        # Sticky watermark image set via nb.watermark(). Shape:
+        # Sticky watermark image set via uc.watermark(). Shape:
         # {'source': <data URI or URL>, 'source_repr': <as typed>, 'opacity':,
         # 'position':, 'size': (w, h), 'layer':, 'sizing':}. Empty = no
         # watermark; any key absent falls back to _WATERMARK_DEFAULTS. Applied
         # to every figure in _finalize (see _apply_watermark); cleared by
-        # nb.watermark(reset=True) or reset_format('watermark').
+        # uc.watermark(reset=True) or reset_format('watermark').
         self.watermark_format = {}
 
         # Font sizes set by the user, behind the suptitle_size, legend_size, ...
@@ -5110,11 +5110,11 @@ class UnichartNotebook:
 
         Cheap fast path: pandas replaces the columns Index object whenever a
         column is added, removed, or renamed, so an identity check catches any
-        untracked column-set change (e.g. a direct ``nb.df['NEW'] = ...``).
+        untracked column-set change (e.g. a direct ``uc.df['NEW'] = ...``).
         Brand-new columns are claimed by the sets that actually hold data in
         them; removed columns are forgotten everywhere. The one thing this
         cannot see is an in-place *value* write into an existing column
-        (``nb.df.loc[...] = ...``) — the API write paths track those
+        (``uc.df.loc[...] = ...``) — the API write paths track those
         themselves, and ``refresh_own_columns(rescan=True)`` heals after
         direct surgery.
         """
@@ -5150,10 +5150,10 @@ class UnichartNotebook:
 
         Ownership normally maintains itself: loading, ``ds['col'] = ...``,
         ``add_column``, ``set_column`` and df replacement all track it, and
-        columns added/removed/renamed directly on ``nb.df`` are reconciled
+        columns added/removed/renamed directly on ``uc.df`` are reconciled
         automatically from the data. The one blind spot is filling values
         *in place* into existing columns of the live frame (e.g.
-        ``nb.df.loc[rows, 'COL'] = ...``) for a set that didn't own that
+        ``uc.df.loc[rows, 'COL'] = ...``) for a set that didn't own that
         column. Call with ``rescan=True`` after that kind of surgery: every
         column holding any data in a set's rows is claimed by that set.
         Rescan only ever adds ownership, it never revokes it.
@@ -5197,7 +5197,7 @@ class UnichartNotebook:
 
         # A pure append preserves existing rows' labels and positions whenever
         # the current index is already a clean 0..n-1 range (every internal
-        # rebuild path guarantees this; only direct index surgery on nb.df can
+        # rebuild path guarantees this; only direct index surgery on uc.df can
         # break it). In that case existing query masks stay exact — new rows
         # belong to the new, query-less sets and _masked_positions reindexes
         # masks over the longer index with fill_value=False — so the O(sets ×
@@ -5846,7 +5846,7 @@ class UnichartNotebook:
         -----
         Column writes through ``ds[col] = ...``, :meth:`set_column` and
         :meth:`add_column` are tracked, but in-place edits made directly on
-        ``nb.df`` (``nb.df.loc[...] = ...``) are not detectable and would be
+        ``uc.df`` (``uc.df.loc[...] = ...``) are not detectable and would be
         lost on reload — pass ``embed_data='all'`` to be safe. Queries are
         saved as expressions and re-run on load.
         """
@@ -6062,9 +6062,9 @@ class UnichartNotebook:
         :meth:`save_png`) loaded — ``UnichartNotebook.from_session('plot.png')``
         remakes the plot from the image alone. ``kwargs`` go to
         :meth:`load_session`."""
-        nb = cls()
-        nb.load_session(path, **kwargs)
-        return nb
+        uc = cls()
+        uc.load_session(path, **kwargs)
+        return uc
 
     def _restore_session(self, session, path, restore_notebook_format=True):
         """Apply a session dict (see :meth:`_build_session`) to this notebook;
@@ -6249,7 +6249,7 @@ class UnichartNotebook:
         - a **callable** taking each target `Dataset` in turn and returning a
           scalar or a per-set array-like — the per-set-formula form::
 
-              nb.set_column([0, 2], 'THRUST', lambda d: k[d.index] * d['N1'] ** 2)
+              uc.set_column([0, 2], 'THRUST', lambda d: k[d.index] * d['N1'] ** 2)
 
           Each set is written exactly as ``d[col] = fn(d)`` would write it, so a
           returned Series aligns by label and a set carrying an active query
@@ -6517,10 +6517,10 @@ class UnichartNotebook:
         :meth:`_get_uset_slice`. Shorthand follows Python slice semantics
         (exclusive stop)::
 
-            nb.select("1:10")     # sets 1-9
-            nb.select("0,3,7:")   # set 0, set 3, and set 7 to the end
-            nb.select("::2")      # every other set
-            nb.select("-3:")      # the last three sets
+            uc.select("1:10")     # sets 1-9
+            uc.select("0,3,7:")   # set 0, set 3, and set 7 to the end
+            uc.select("::2")      # every other set
+            uc.select("-3:")      # the last three sets
         """
         for ds in self.sets: ds.select = False
         for ds in self._get_uset_slice(uset_slice):
@@ -6533,12 +6533,12 @@ class UnichartNotebook:
     def omit(self, uset_slice=None):
         """Deselect the given dataset(s), leaving the rest of the selection
         untouched. Takes the same selectors as :meth:`select`, e.g.
-        ``nb.omit("5:8")``."""
+        ``uc.omit("5:8")``."""
         for ds in self._get_uset_slice(uset_slice):
             ds.select = False
 
     def restore(self, uset_slice=None):
-        """Re-select the given dataset(s), e.g. ``nb.restore("5:8")``. Takes the
+        """Re-select the given dataset(s), e.g. ``uc.restore("5:8")``. Takes the
         same selectors as :meth:`select`."""
         targets = self.sets if uset_slice == "all" else self._get_uset_slice(uset_slice)
         for ds in targets:
@@ -6604,11 +6604,11 @@ class UnichartNotebook:
 
         Examples
         --------
-        nb.color('all', 'red')              # every dataset red
-        nb.color(0, 'blue')                 # dataset 0 blue
-        nb.color('Temperature', 'blue')     # the Temperature variable blue
-        nb.color('Temperature', 'reset')    # clear that variable override
-        nb.color('all', 'reset')            # back to the color_map colors
+        uc.color('all', 'red')              # every dataset red
+        uc.color(0, 'blue')                 # dataset 0 blue
+        uc.color('Temperature', 'blue')     # the Temperature variable blue
+        uc.color('Temperature', 'reset')    # clear that variable override
+        uc.color('all', 'reset')            # back to the color_map colors
         """
         if isinstance(color_val, int) and not isinstance(color_val, bool):
             color_val = self._color_at(color_val)
@@ -6644,9 +6644,9 @@ class UnichartNotebook:
 
         Examples
         --------
-        nb.marker('all', 's')             # every dataset uses squares
-        nb.marker('Pressure', '^')        # the Pressure variable uses triangles
-        nb.marker('all', 'reset')         # back to the marker_map markers
+        uc.marker('all', 's')             # every dataset uses squares
+        uc.marker('Pressure', '^')        # the Pressure variable uses triangles
+        uc.marker('all', 'reset')         # back to the marker_map markers
         """
         if isinstance(marker_val, int) and not isinstance(marker_val, bool):
             marker_val = self._marker_at(marker_val)
@@ -6677,8 +6677,8 @@ class UnichartNotebook:
 
         Examples
         --------
-        nb.linestyle('all', '--')             # dash every dataset
-        nb.linestyle('Temperature', ':')      # dot the Temperature variable
+        uc.linestyle('all', '--')             # dash every dataset
+        uc.linestyle('Temperature', ':')      # dot the Temperature variable
         """
         variables = self._var_targets(uset_slice)
         if variables is not None:
@@ -6769,7 +6769,7 @@ class UnichartNotebook:
                     f"{i}: {_describe(s, d)}" for i, (s, d) in overrides.items()))
             return self.default_format.get(attr)
 
-        # One positional argument is the notebook-wide form: nb.sig_figs(3).
+        # One positional argument is the notebook-wide form: uc.sig_figs(3).
         # A lone int would otherwise read as a set index with no value.
         if value is None:
             if isinstance(uset_slice, str):
@@ -6781,11 +6781,11 @@ class UnichartNotebook:
                 # A selector with no value ('all', '1:3', ...) — the integer
                 # message below would only confuse.
                 print(f"{attr}({uset_slice!r}) needs a value too: "
-                      f"nb.{attr}({uset_slice!r}, {low + 3}).")
+                      f"uc.{attr}({uset_slice!r}, {low + 3}).")
                 return
             if not _valid(uset_slice):
                 print(f"To target sets, pass a selector and a value: "
-                      f"nb.{attr}(0, {low + 3}).")
+                      f"uc.{attr}(0, {low + 3}).")
                 return
             self.default_format[attr] = uset_slice
             self.default_format[other] = None
@@ -6794,7 +6794,7 @@ class UnichartNotebook:
 
         if self._var_targets(uset_slice) is not None:
             print(f"{attr} is a per-dataset setting, not a per-variable one. "
-                  f"Use nb.{attr}(<sets>, n) or nb.{attr}(n) for all sets.")
+                  f"Use uc.{attr}(<sets>, n) or uc.{attr}(n) for all sets.")
             return
         if isinstance(value, str) and value == 'reset':
             _reset(uset_slice)
@@ -6816,14 +6816,14 @@ class UnichartNotebook:
 
         Two forms, told apart by how many arguments you pass:
 
-        * ``nb.sig_figs(3)`` — one value: the notebook-wide setting. It becomes
+        * ``uc.sig_figs(3)`` — one value: the notebook-wide setting. It becomes
           the default for datasets loaded later *and* is applied to every set
           already loaded.
-        * ``nb.sig_figs(2, 3)`` — a dataset selector then a value: only those
+        * ``uc.sig_figs(2, 3)`` — a dataset selector then a value: only those
           sets, exactly like :meth:`markersize` and friends. Use this form
-          (``nb.sig_figs(3, 4)``) when the number you mean is a set index.
+          (``uc.sig_figs(3, 4)``) when the number you mean is a set index.
 
-        ``nb.sig_figs()`` reports the current precision and returns the
+        ``uc.sig_figs()`` reports the current precision and returns the
         notebook-wide value. ``'reset'`` in place of a value restores the
         built-in precision — for the named sets, or (one-argument form) for
         the notebook and every set.
@@ -6841,10 +6841,10 @@ class UnichartNotebook:
             figs_val (int or 'reset'): Significant figures (>= 1), or 'reset'.
 
         Examples:
-            nb.sig_figs(4)          # 4 sig figs everywhere
-            nb.sig_figs(0, 6)       # set 0 shows 6, the rest keep the default
-            nb.sig_figs(0, 'reset') # set 0 back to the notebook default
-            nb.sig_figs('reset')    # built-in precision everywhere
+            uc.sig_figs(4)          # 4 sig figs everywhere
+            uc.sig_figs(0, 6)       # set 0 shows 6, the rest keep the default
+            uc.sig_figs(0, 'reset') # set 0 back to the notebook default
+            uc.sig_figs('reset')    # built-in precision everywhere
         """
         return self._set_precision('sig_figs', uset_slice, figs_val)
 
@@ -6859,12 +6859,12 @@ class UnichartNotebook:
         precision. Trailing zeros are kept, so ``decimals=2`` shows ``1.5`` as
         ``1.50``, and ``decimals=0`` gives whole numbers.
 
-        * ``nb.decimals(2)`` — one value: the notebook-wide setting, applied to
+        * ``uc.decimals(2)`` — one value: the notebook-wide setting, applied to
           the sets already loaded and inherited by those loaded later.
-        * ``nb.decimals(1, 2)`` — a dataset selector then a value. Use this
+        * ``uc.decimals(1, 2)`` — a dataset selector then a value. Use this
           form when the number you mean is a set index.
 
-        ``nb.decimals()`` reports the current precision. ``'reset'`` restores
+        ``uc.decimals()`` reports the current precision. ``'reset'`` restores
         the built-in precision, for the named sets or (one argument) for the
         notebook and every set. Since a value is rounded either to significant
         figures or to decimal places, setting this clears :attr:`sig_figs`.
@@ -6879,10 +6879,10 @@ class UnichartNotebook:
             dec_val (int or 'reset'): Decimal places (>= 0), or 'reset'.
 
         Examples:
-            nb.decimals(2)          # two places everywhere
-            nb.decimals(0, 3)       # set 0 shows three, the rest the default
-            nb.decimals(0)          # whole numbers everywhere (one value form)
-            nb.decimals('reset')    # built-in precision everywhere
+            uc.decimals(2)          # two places everywhere
+            uc.decimals(0, 3)       # set 0 shows three, the rest the default
+            uc.decimals(0)          # whole numbers everywhere (one value form)
+            uc.decimals('reset')    # built-in precision everywhere
         """
         return self._set_precision('decimals', uset_slice, dec_val)
 
@@ -6891,7 +6891,7 @@ class UnichartNotebook:
         Set the draw order (z-order) for the specified dataset(s).
 
         Datasets are drawn in ascending ``zorder`` (default 0) with later
-        traces on top; ties keep load order. So ``nb.zorder(2, 1)`` lifts set
+        traces on top; ties keep load order. So ``uc.zorder(2, 1)`` lifts set
         2 above everything else without touching the others, and a negative
         value pushes a set behind. Applies wherever sets share axes — plot,
         bar, box, hist, contour (incl. overlay sets) and plot_ymult; the
@@ -6917,9 +6917,9 @@ class UnichartNotebook:
                 't'/'f'), or 'reset' for the default (shown).
 
         Examples:
-            nb.legend(2, False)          # plot set 2 without a legend entry
-            nb.legend([3, 4], 'off')
-            nb.legend('all', 'reset')    # every set back in the legend
+            uc.legend(2, False)          # plot set 2 without a legend entry
+            uc.legend([3, 4], 'off')
+            uc.legend('all', 'reset')    # every set back in the legend
         """
         self._set_or_reset(uset_slice, 'show_legend', show_val)
 
@@ -7003,9 +7003,9 @@ class UnichartNotebook:
 
         Examples
         --------
-        nb.alpha_marker(0, 0.3)          # faint points, full-strength line
-        nb.alpha_marker('CHT1', 0.5)     # per-variable override
-        nb.alpha_marker(0, 'reset')
+        uc.alpha_marker(0, 0.3)          # faint points, full-strength line
+        uc.alpha_marker('CHT1', 0.5)     # per-variable override
+        uc.alpha_marker(0, 'reset')
         """
         alpha_val = self._check_alpha('alpha_marker', alpha_val)
         variables = self._var_targets(uset_slice)
@@ -7025,9 +7025,9 @@ class UnichartNotebook:
 
         Examples
         --------
-        nb.alpha_line(0, 0.3)             # faint connecting line, solid points
-        nb.alpha_line('CHT1', 0.5)        # per-variable override
-        nb.alpha_line(0, 'reset')
+        uc.alpha_line(0, 0.3)             # faint connecting line, solid points
+        uc.alpha_line('CHT1', 0.5)        # per-variable override
+        uc.alpha_line(0, 'reset')
         """
         alpha_val = self._check_alpha('alpha_line', alpha_val)
         variables = self._var_targets(uset_slice)
@@ -7094,11 +7094,11 @@ class UnichartNotebook:
 
         Examples
         --------
-        nb.reg_order('all', 'linear')         # straight-line fit everywhere
-        nb.reg_order(0, 3)                    # cubic polynomial on set 0
-        nb.reg_order(1, 'exp')                # exponential fit on set 1
-        nb.reg_order([0, 2], ('lowess', 0.5)) # smoother LOWESS on sets 0 and 2
-        nb.reg_order('all', 'reset')          # remove the trendlines
+        uc.reg_order('all', 'linear')         # straight-line fit everywhere
+        uc.reg_order(0, 3)                    # cubic polynomial on set 0
+        uc.reg_order(1, 'exp')                # exponential fit on set 1
+        uc.reg_order([0, 2], ('lowess', 0.5)) # smoother LOWESS on sets 0 and 2
+        uc.reg_order('all', 'reset')          # remove the trendlines
         """
         self._set_or_reset(uset_slice, 'reg_order', order)
 
@@ -7125,9 +7125,9 @@ class UnichartNotebook:
 
         Examples
         --------
-        nb.copy_format(0, 2)          # set 2 now styled like set 0
-        nb.copy_format(0, [1, 2])     # sets 1 and 2 styled like set 0
-        nb.copy_format(-1)            # every other set styled like the last one
+        uc.copy_format(0, 2)          # set 2 now styled like set 0
+        uc.copy_format(0, [1, 2])     # sets 1 and 2 styled like set 0
+        uc.copy_format(-1)            # every other set styled like the last one
         """
         src = self._get_uset_slice(source)
         if len(src) != 1:
@@ -7174,7 +7174,7 @@ class UnichartNotebook:
         markers are drawn with edgewidth + 1.
 
         `style` only affects bar-plot overlay columns (the `markers=` argument
-        of `nb.bar`): 'marker' (default symbol overlay), 'tick' (horizontal
+        of `uc.bar`): 'marker' (default symbol overlay), 'tick' (horizontal
         dash at the value), or 'whisker' (dash plus a stem down/up to the top
         of the bar). For `style='whisker'`, `linestyle` sets the stem's dash
         pattern ('-', '--', '-.', ':'; 'None' hides the stem) and `linewidth`
@@ -7182,15 +7182,15 @@ class UnichartNotebook:
 
         Examples
         --------
-        nb.var_format('Temperature', linestyle='--')         # all Temp lines dashed
-        nb.var_format('Pressure', color='blue', marker='s')  # Pressure forced blue squares
-        nb.var_format('Pressure', color='reset')             # remove just the color override
-        nb.var_format('EGT_LIMIT', style='whisker', color='red')
-        nb.var_format(['CHT1', 'CHT2'], marker='x')          # same style for both
-        nb.var_format('EGT', fill=False, edgewidth=2)        # hollow, heavier outline
-        nb.var_format(['CHT1', 'CHT2'], marker='reset')      # clear it on both
-        nb.var_format('Pressure', reset=True)                # drop all Pressure overrides
-        nb.var_format(['CHT1', 'CHT2'], reset=True)          # ...on both
+        uc.var_format('Temperature', linestyle='--')         # all Temp lines dashed
+        uc.var_format('Pressure', color='blue', marker='s')  # Pressure forced blue squares
+        uc.var_format('Pressure', color='reset')             # remove just the color override
+        uc.var_format('EGT_LIMIT', style='whisker', color='red')
+        uc.var_format(['CHT1', 'CHT2'], marker='x')          # same style for both
+        uc.var_format('EGT', fill=False, edgewidth=2)        # hollow, heavier outline
+        uc.var_format(['CHT1', 'CHT2'], marker='reset')      # clear it on both
+        uc.var_format('Pressure', reset=True)                # drop all Pressure overrides
+        uc.var_format(['CHT1', 'CHT2'], reset=True)          # ...on both
 
         Returns
         -------
@@ -7415,19 +7415,19 @@ class UnichartNotebook:
             those entries, e.g. ``reset_format(vars='CHT', lines='ALT')``.
 
         Every formatting setter also accepts ``'reset'`` as its value for
-        per-attribute resets: ``nb.color(0, 'reset')``,
-        ``nb.color('CHT', 'reset')``, ``nb.line('all', 'reset')``,
-        ``nb.scale('all', 'reset')``, ``nb.var_format('CHT', color='reset')``.
+        per-attribute resets: ``uc.color(0, 'reset')``,
+        ``uc.color('CHT', 'reset')``, ``uc.line('all', 'reset')``,
+        ``uc.scale('all', 'reset')``, ``uc.var_format('CHT', color='reset')``.
 
         Examples
         --------
-        nb.reset_format()                       # all applied formatting
-        nb.reset_format('all')                  # ...plus the stored defaults
-        nb.reset_format('lines', 'scales')      # just those scopes
-        nb.reset_format([0, 1])                 # only datasets 0 and 1
-        nb.reset_format('sets', uset_slice=0)   # same, explicit form
-        nb.reset_format(vars='CHT')             # one variable's overrides
-        nb.reset_format(sets=False)             # everything except datasets
+        uc.reset_format()                       # all applied formatting
+        uc.reset_format('all')                  # ...plus the stored defaults
+        uc.reset_format('lines', 'scales')      # just those scopes
+        uc.reset_format([0, 1])                 # only datasets 0 and 1
+        uc.reset_format('sets', uset_slice=0)   # same, explicit form
+        uc.reset_format(vars='CHT')             # one variable's overrides
+        uc.reset_format(sets=False)             # everything except datasets
         """
         # --- Parse positionals: scope names vs dataset selectors -----------
         scopes, selectors, full = [], [], False
@@ -7574,14 +7574,14 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Notebook-wide settings as attributes
     # ------------------------------------------------------------------
-    # nb.figsize = (10, 6), nb.ncols = 2, nb.legend_size = 'large', ... Each is
+    # uc.figsize = (10, 6), uc.ncols = 2, uc.legend_size = 'large', ... Each is
     # the same setting as a set_default_format / set_font_sizes /
     # set_plot_style argument, checked on assignment (see the module-level
     # _plot_default_attr / _font_size_attr). A per-call argument still wins.
 
     hspace = _plot_default_attr('hspace', _parse_spacing, """\
         Default gap between subplot columns for every gridded plot method:
-        ``nb.hspace = 110``. Pixels if 1 or more (``110`` or ``'110px'``), a
+        ``uc.hspace = 110``. Pixels if 1 or more (``110`` or ``'110px'``), a
         fraction of the plot area if below 1. ``None`` (the default) gives each
         plot its built-in gap: 80 px, or more where contour colorbars or
         secondary y axes need it. The same setting as
@@ -7589,19 +7589,19 @@ class UnichartNotebook:
 
     vspace = _plot_default_attr('vspace', _parse_spacing, """\
         Default gap between subplot rows for every gridded plot method:
-        ``nb.vspace = 90``. Same units as :attr:`hspace`; ``None`` (the default)
+        ``uc.vspace = 90``. Same units as :attr:`hspace`; ``None`` (the default)
         gives the built-in 70 px. The same setting as
         ``set_default_format(vspace=)``.""")
 
     ncols = _plot_default_attr('ncols', _check_positive_int, """\
-        Default number of subplot columns: ``nb.ncols = 2``. Resolved as a pair
+        Default number of subplot columns: ``uc.ncols = 2``. Resolved as a pair
         with :attr:`nrows`, so setting one leaves the other to fit the grid. A
         per-call ``ncols=`` / ``nrows=`` applies to that call only. ``None``
         (the default) lets the grid shape itself. The same setting as
         ``set_default_format(ncols=)``.""")
 
     nrows = _plot_default_attr('nrows', _check_positive_int, """\
-        Default number of subplot rows: ``nb.nrows = 3``. The row counterpart
+        Default number of subplot rows: ``uc.nrows = 3``. The row counterpart
         of :attr:`ncols`, and the same setting as
         ``set_default_format(nrows=)``.""")
 
@@ -7620,7 +7620,7 @@ class UnichartNotebook:
     @property
     def figsize(self):
         """Default figure size ``(width, height)`` in inches for every plot
-        method: ``nb.figsize = (10, 6)``. ``None`` goes back to the built-in
+        method: ``uc.figsize = (10, 6)``. ``None`` goes back to the built-in
         ``(12, 8)``. The same setting as ``set_default_format(figsize=)``;
         distinct from :meth:`set_plot_size`, which pins the plot area instead.
         """
@@ -7633,7 +7633,7 @@ class UnichartNotebook:
     @property
     def plot_size(self):
         """Pinned plot-area size ``(width, height)`` in inches, the units
-        :meth:`set_plot_size` and ``figsize`` use: ``nb.plot_size = (4.6, 3)``.
+        :meth:`set_plot_size` and ``figsize`` use: ``uc.plot_size = (4.6, 3)``.
         Either may be ``None`` to leave that dimension to ``figsize``; ``None``
         (the default) pins nothing. Whether it sizes each panel or the whole
         grid is :attr:`plot_size_per_subplot`, which assigning this leaves as
@@ -7655,7 +7655,7 @@ class UnichartNotebook:
     @property
     def plot_style(self):
         """The overall look, ``'matplotlib'`` (the default) or ``'plotly'``:
-        ``nb.plot_style = 'plotly'``. Assigning it does everything
+        ``uc.plot_style = 'plotly'``. Assigning it does everything
         :meth:`set_plot_style` does, restyling the datasets already loaded,
         just without the printed confirmation. ``None`` goes back to the
         default style.
@@ -7704,7 +7704,7 @@ class UnichartNotebook:
 
         figsize, ncols, nrows, hspace, vspace, legend_scroll and
         suppress_legends are also attributes holding the same setting
-        (``nb.ncols = 2``), which is how to clear just one (``nb.ncols = None``).
+        (``uc.ncols = 2``), which is how to clear just one (``uc.ncols = None``).
 
         ``reset=True`` restores *all* of the above — per-dataset styles, figsize,
         and the per-call defaults — to their built-ins, and ignores other args
@@ -7773,12 +7773,12 @@ class UnichartNotebook:
 
         Examples
         --------
-        nb.set_default_format(markersize=6, linestyle='--', linewidth=1)
-        nb.set_default_format(marker=None)   # turn markers off for future sets
-        nb.set_default_format(figsize=(10, 6), legend='right', ncols=2)
-        nb.set_default_format(legend_scroll=False)  # never scroll the legend
-        nb.set_default_format(vspace=100, hspace=0.05)  # 100 px rows, 5% columns
-        nb.set_default_format(reset=True)    # clear styles, figsize, and defaults
+        uc.set_default_format(markersize=6, linestyle='--', linewidth=1)
+        uc.set_default_format(marker=None)   # turn markers off for future sets
+        uc.set_default_format(figsize=(10, 6), legend='right', ncols=2)
+        uc.set_default_format(legend_scroll=False)  # never scroll the legend
+        uc.set_default_format(vspace=100, hspace=0.05)  # 100 px rows, 5% columns
+        uc.set_default_format(reset=True)    # clear styles, figsize, and defaults
         """
         if reset:
             self._reset_defaults()
@@ -8107,8 +8107,8 @@ class UnichartNotebook:
         sets : bool
             Re-derive the **already loaded** datasets' color, markersize and
             hue palette from the new style, so a switch takes effect on data you
-            loaded earlier. This clears manual ``nb.color(...)`` /
-            ``nb.markersize(...)`` / ``nb.hue_palette(...)`` overrides on those
+            loaded earlier. This clears manual ``uc.color(...)`` /
+            ``uc.markersize(...)`` / ``uc.hue_palette(...)`` overrides on those
             sets — pass ``sets=False`` to keep them (only future loads and the
             layout then follow the new style).
 
@@ -8116,17 +8116,17 @@ class UnichartNotebook:
         -----
         Two things stay outside the style. Matplotlib draws line plots without
         markers while unichart assigns one per dataset — turn them off with
-        ``nb.set_default_format(marker=None)`` if you want that too. And
+        ``uc.set_default_format(marker=None)`` if you want that too. And
         ``dashboard`` panels override the figure font with the board's UI font
         so charts and chrome read as one surface, so the DejaVu font (only) is
         not carried into dashboards.
 
         Examples
         --------
-        nb.set_plot_style('plotly')                  # Plotly's native look
-        nb.set_plot_style('plotly', sets=False)      # ...keeping hand-set colors
-        nb.set_plot_style('matplotlib')              # back to the default look
-        nb.plot_style = 'plotly'                     # the same, as an attribute
+        uc.set_plot_style('plotly')                  # Plotly's native look
+        uc.set_plot_style('plotly', sets=False)      # ...keeping hand-set colors
+        uc.set_plot_style('matplotlib')              # back to the default look
+        uc.plot_style = 'plotly'                     # the same, as an attribute
         """
         resolved = self._set_plot_style(style, sets)
         print(f"Plot style set to: {resolved}"
@@ -8182,8 +8182,8 @@ class UnichartNotebook:
         delta always starts as a scatter), and its title and index are its own.
         A column-referencing option is only carried over when that column
         survives into the result.
-        Restyle it like any other set (``nb.linestyle(idx, ...)``), or undo an
-        inherited attribute with that setter's ``'reset'`` (``nb.linestyle(idx,
+        Restyle it like any other set (``uc.linestyle(idx, ...)``), or undo an
+        inherited attribute with that setter's ``'reset'`` (``uc.linestyle(idx,
         'reset')``). Pass ``name_as_study=True`` to also title it after the
         study set.
 
@@ -8655,12 +8655,12 @@ class UnichartNotebook:
         drawn on, matching how the line itself repeats.
 
         Examples:
-            nb.line('rpm', 5000, label='redline')
-            nb.line('cht', 400, color='orange', label='limit',
+            uc.line('rpm', 5000, label='redline')
+            uc.line('cht', 400, color='orange', label='limit',
                     label_size='lg', label_position='left')
-            nb.line('time', 12.5, label='event', label_position=0.25)
-            nb.line('egt', 900, color='orange', legend='EGT limit')
-            nb.line(['cht1', 'cht2', 'cht3'], 400, label='limit')
+            uc.line('time', 12.5, label='event', label_position=0.25)
+            uc.line('egt', 900, color='orange', legend='EGT limit')
+            uc.line(['cht1', 'cht2', 'cht3'], 400, label='limit')
         """
         columns = list(column) if isinstance(column, (list, tuple)) else [column]
 
@@ -8812,7 +8812,7 @@ class UnichartNotebook:
             ``reset_format('fonts')`` or ``all='reset'``).
 
         Each size is also an attribute holding the same setting, named after
-        the argument plus ``_size``: ``nb.legend_size = 'large'``.
+        the argument plus ``_size``: ``uc.legend_size = 'large'``.
         """
         if reset:
             self._font_sizes.clear()
@@ -8866,8 +8866,8 @@ class UnichartNotebook:
 
         ``width``/``height`` are in inches (same units as ``figsize``). By
         default they size **one subplot panel**, and the figure grows to fit the
-        whole grid plus its margins — so ``nb.plot(x, y='A')`` and
-        ``nb.plot(x, y=['A', 'B', 'C'])`` draw panels of identical size and
+        whole grid plus its margins — so ``uc.plot(x, y='A')`` and
+        ``uc.plot(x, y=['A', 'B', 'C'])`` draw panels of identical size and
         shape, instead of splitting one fixed area between however many
         variables you asked for. Pass ``per_subplot=False`` to pin the *whole*
         grid instead, letting the panels shrink as it grows.
@@ -8876,8 +8876,8 @@ class UnichartNotebook:
         dimension driven by ``figsize``. Each call replaces the previous setting
         (calling with only ``height`` drops a prior ``width`` pin).
         ``reset=True`` (or both ``None``) clears it — equivalent to
-        ``reset_format('plot_size')``. The size is also the ``nb.plot_size``
-        attribute, in the same inches: ``nb.plot_size = (4, 3)``.
+        ``reset_format('plot_size')``. The size is also the ``uc.plot_size``
+        attribute, in the same inches: ``uc.plot_size = (4, 3)``.
 
         Parameters
         ----------
@@ -8898,10 +8898,10 @@ class UnichartNotebook:
 
         Examples
         --------
-        nb.set_plot_size(4, 3)                    # every panel 4x3in, always
-        nb.set_plot_size(height=3)                # pin height only
-        nb.set_plot_size(6, 4, per_subplot=False) # pin the whole grid instead
-        nb.set_plot_size(reset=True)
+        uc.set_plot_size(4, 3)                    # every panel 4x3in, always
+        uc.set_plot_size(height=3)                # pin height only
+        uc.set_plot_size(6, 4, per_subplot=False) # pin the whole grid instead
+        uc.set_plot_size(reset=True)
 
         Notes
         -----
@@ -9398,7 +9398,7 @@ class UnichartNotebook:
         ``toggle_darkmode``).
 
         Only the options you pass are stored; repeated calls merge, so
-        ``nb.grid(color='gray')`` then ``nb.grid(width=2)`` keeps both. Called
+        ``uc.grid(color='gray')`` then ``uc.grid(width=2)`` keeps both. Called
         with no arguments, returns the current settings without changing them.
 
         ``visible=True`` never re-enables grids that a plot deliberately hides
@@ -9423,7 +9423,7 @@ class UnichartNotebook:
             Which axes this call's options apply to (default 'both').
         which : {'major', 'minor', 'both'}
             Major gridlines (default), minor gridlines (off by default in
-            Plotly — enable with ``nb.grid(which='minor', visible=True)``), or
+            Plotly — enable with ``uc.grid(which='minor', visible=True)``), or
             both.
         reset : bool
             Drop all stored gridline settings (equivalent to
@@ -9433,11 +9433,11 @@ class UnichartNotebook:
 
         Examples
         --------
-        nb.grid(False)                            # no gridlines
-        nb.grid(color='lightgray', width=0.5, dash='dot')
-        nb.grid(axis='x', visible=False)          # vertical gridlines off
-        nb.grid(which='minor', visible=True)      # minor gridlines on
-        nb.grid(reset=True)                       # back to the style's grid
+        uc.grid(False)                            # no gridlines
+        uc.grid(color='lightgray', width=0.5, dash='dot')
+        uc.grid(axis='x', visible=False)          # vertical gridlines off
+        uc.grid(which='minor', visible=True)      # minor gridlines on
+        uc.grid(reset=True)                       # back to the style's grid
         """
         if reset or visible == 'reset':
             self.grid_format = self._empty_grid_format()
@@ -9529,7 +9529,7 @@ class UnichartNotebook:
         Settings persist across plots and sit on top of the active plot style
         (they survive ``set_plot_style`` and ``toggle_darkmode``). Only the
         options you pass are stored; repeated calls merge, so
-        ``nb.watermark('logo.png')`` then ``nb.watermark(opacity=0.3)`` keeps
+        ``uc.watermark('logo.png')`` then ``uc.watermark(opacity=0.3)`` keeps
         both. Called with no arguments, returns the current settings without
         changing them.
 
@@ -9579,12 +9579,12 @@ class UnichartNotebook:
 
         Examples
         --------
-        nb.watermark('logo.png')                          # faint, centered
-        nb.watermark('logo.png', opacity=0.4, position='bottom right', size=0.15)
-        nb.watermark('draft.png', layer='above', opacity=0.08)
-        nb.watermark(position=(0.5, 0.1))                 # move the current one
-        nb.watermark()                                    # show current settings
-        nb.watermark(reset=True)                          # remove it
+        uc.watermark('logo.png')                          # faint, centered
+        uc.watermark('logo.png', opacity=0.4, position='bottom right', size=0.15)
+        uc.watermark('draft.png', layer='above', opacity=0.08)
+        uc.watermark(position=(0.5, 0.1))                 # move the current one
+        uc.watermark()                                    # show current settings
+        uc.watermark(reset=True)                          # remove it
         """
         if reset or (isinstance(source, str) and source.lower() == 'reset'):
             self.watermark_format = {}
@@ -9928,7 +9928,7 @@ class UnichartNotebook:
 
         Note: with static mode on, plotting methods return an ``Image``, not a
         Plotly ``Figure``, so you can't chain ``.update_layout(...)`` on the
-        return value — use ``nb.last_fig`` for that.
+        return value — use ``uc.last_fig`` for that.
 
         Parameters
         ----------
@@ -9937,9 +9937,9 @@ class UnichartNotebook:
 
         Examples
         --------
-        nb.set_static_images()            # on, keeps notebook small
-        nb.set_static_images(scale=3)     # higher-resolution PNGs
-        nb.set_static_images(False)       # back to interactive figures
+        uc.set_static_images()            # on, keeps notebook small
+        uc.set_static_images(scale=3)     # higher-resolution PNGs
+        uc.set_static_images(False)       # back to interactive figures
         """
         self.static_images = bool(enabled)
         if scale is not None:
@@ -9961,8 +9961,8 @@ class UnichartNotebook:
 
         Examples
         --------
-        nb.set_copy_buttons(False)   # hide the buttons
-        nb.set_copy_buttons()        # show them again
+        uc.set_copy_buttons(False)   # hide the buttons
+        uc.set_copy_buttons()        # show them again
         """
         self.copy_buttons = bool(enabled)
         print(f"Plot copy buttons {'on' if self.copy_buttons else 'off'}.")
@@ -10648,14 +10648,14 @@ class UnichartNotebook:
         ~~~~~~~~~~~~~~~
         Formatting comes from ``var_format``::
 
-            nb.var_format('EGT_LIMIT', color='red', marker='*', markersize=18)
-            nb.bar(x='PHASE', y='EGT', markers='EGT_LIMIT')
+            uc.var_format('EGT_LIMIT', color='red', marker='*', markersize=18)
+            uc.bar(x='PHASE', y='EGT', markers='EGT_LIMIT')
 
-            nb.var_format('EGT_LIMIT', style='tick')     # horizontal dash at the value
-            nb.var_format('EGT_LIMIT', style='whisker')  # dash + stem to the bar top
+            uc.var_format('EGT_LIMIT', style='tick')     # horizontal dash at the value
+            uc.var_format('EGT_LIMIT', style='whisker')  # dash + stem to the bar top
 
         In the default ``by='vars'`` view each panel names its variable on the
-        y-axis; setting ``nb.y_label`` reverts to one shared y title on the
+        y-axis; setting ``uc.y_label`` reverts to one shared y title on the
         first column. In a multi-panel chart, overlay columns pair positionally
         with the y variables: the i-th marker column draws only on the i-th y
         variable's panel, attached to that variable's bars (extras fall back to
@@ -12109,7 +12109,7 @@ class UnichartNotebook:
         plot: the full plotting session (every set's rows, queries and
         formatting, the notebook-level formatting) plus the plotting call
         that produced the figure, stored as a PNG text chunk. Image viewers
-        ignore it; ``nb.load_session('plot.png')`` (or
+        ignore it; ``uc.load_session('plot.png')`` (or
         ``UnichartNotebook.from_session('plot.png')``) reads it back and
         replots. :func:`read_png_session` shows what an image contains.
 
@@ -12668,7 +12668,7 @@ class UnichartNotebook:
         close = difflib.get_close_matches(key, public, n=5)
         print(f"No method or category named {key!r}.")
         print("Did you mean: " + ", ".join(close) + " ?" if close
-              else "Call nb.help() for the full list.")
+              else "Call uc.help() for the full list.")
 
     def help(self, topic=None):
         """Show a categorized overview of the notebook API, or detailed help
@@ -12711,7 +12711,7 @@ class UnichartNotebook:
         # set-difference so nothing is ever hidden.
         public = {n: f for n, f in inspect.getmembers(cls, inspect.isfunction)
                   if not n.startswith('_')}
-        print("\n" + _hc("🔍 PUBLIC METHODS  (call nb.help('name') for "
+        print("\n" + _hc("🔍 PUBLIC METHODS  (call uc.help('name') for "
                           "full details):", 'head'))
         print("-" * 70)
         shown = set()
@@ -12756,12 +12756,12 @@ class UnichartNotebook:
 
         print("\n" + _hc("💡 QUICK START:", 'head'))
         print("-" * 70)
-        print("1. Load data:       nb.load_df(df, title='MyData')")
-        print("2. Select datasets: nb.select([0, 1])")
-        print("3. Plot:            nb.plot(x='time', y='value')")
-        print("4. Multi-Y plot:    nb.plot_ymult(x='time', y=['Temp', 'Pressure'])")
-        print("5. Variable format: nb.var_format('Temp', linestyle='--')")
-        print("6. Method details:  nb.help('delta')")
+        print("1. Load data:       uc.load_df(df, title='MyData')")
+        print("2. Select datasets: uc.select([0, 1])")
+        print("3. Plot:            uc.plot(x='time', y='value')")
+        print("4. Multi-Y plot:    uc.plot_ymult(x='time', y=['Temp', 'Pressure'])")
+        print("5. Variable format: uc.var_format('Temp', linestyle='--')")
+        print("6. Method details:  uc.help('delta')")
 
         print("\n" + "=" * 70)
 
@@ -13004,10 +13004,10 @@ def new_uc(
     start a notebook already styled the way you want, instead of following the
     constructor with a run of ``set_*`` calls::
 
-        nb = new_uc()                                  # today's defaults
-        nb = new_uc(plot_style='plotly', darkmode=True) # dark plotly look
-        nb = new_uc(markersize=5, linewidth=1, figsize=(10, 6), legend='right')
-        nb = new_uc(data=df, set_name_column='ENGINE')  # styled, then loaded
+        uc = new_uc()                                  # today's defaults
+        uc = new_uc(plot_style='plotly', darkmode=True) # dark plotly look
+        uc = new_uc(markersize=5, linewidth=1, figsize=(10, 6), legend='right')
+        uc = new_uc(data=df, set_name_column='ENGINE')  # styled, then loaded
 
     Settings are applied in dependency order — style first (it installs its own
     palette and format defaults), then palettes, then the format and per-call
@@ -13057,7 +13057,7 @@ def new_uc(
     copy_buttons : bool
         Show the copy-to-clipboard button on interactive plots.
     data : DataFrame, optional
-        Loaded with ``nb.load_df(data, **load_kwargs)`` *after* everything above,
+        Loaded with ``uc.load_df(data, **load_kwargs)`` *after* everything above,
         so the datasets are styled by the presets.
     **load_kwargs
         Remaining keywords go to ``load_df`` (``set_name_column=``,
@@ -13079,19 +13079,19 @@ def new_uc(
             f"Load arguments are only accepted alongside data=; for a preset, "
             f"check the spelling against uc_defaults().")
 
-    nb = UnichartNotebook()
+    uc = UnichartNotebook()
 
     # Style first: _apply_style_defaults overwrites color_map and the
     # style-owned default_format entries, so anything set before it is lost.
-    if plot_style != nb.plot_style:
-        nb.set_plot_style(plot_style)
-    if bool(darkmode) != nb.darkmode:
-        nb.toggle_darkmode(bool(darkmode))
+    if plot_style != uc.plot_style:
+        uc.set_plot_style(plot_style)
+    if bool(darkmode) != uc.darkmode:
+        uc.toggle_darkmode(bool(darkmode))
 
     if color_map is not AUTO:
-        nb.color_map = list(color_map)
+        uc.color_map = list(color_map)
     if marker_map is not AUTO:
-        nb.marker_map = list(marker_map)
+        uc.marker_map = list(marker_map)
 
     # One set_default_format call so a bad value fails before anything else is
     # touched. AUTO knobs are dropped; the rest pass None through harmlessly
@@ -13109,29 +13109,29 @@ def new_uc(
         'histfunc': histfunc, 'histnorm': histnorm, 'boxmode': boxmode,
         'points': points,
     }
-    nb.set_default_format(**{k: v for k, v in fmt.items() if v is not AUTO})
+    uc.set_default_format(**{k: v for k, v in fmt.items() if v is not AUTO})
 
     if font_sizes:
-        nb.set_font_sizes(**font_sizes)
+        uc.set_font_sizes(**font_sizes)
     if suptitle is not None:
-        nb.suptitle = suptitle
+        uc.suptitle = suptitle
     if footer is not None:
-        nb.footer = footer
+        uc.footer = footer
     if plot_size is not None:
         if not isinstance(plot_size, (tuple, list)) or len(plot_size) != 2:
             raise ValueError("plot_size must be a (width, height) tuple in "
                              f"inches, got {plot_size!r}")
-        nb.set_plot_size(plot_size[0], plot_size[1],
+        uc.set_plot_size(plot_size[0], plot_size[1],
                          per_subplot=plot_size_per_subplot)
 
-    if bool(static_images) != nb.static_images or static_scale != nb.static_scale:
-        nb.set_static_images(static_images, scale=static_scale)
-    if bool(copy_buttons) != nb.copy_buttons:
-        nb.set_copy_buttons(copy_buttons)
+    if bool(static_images) != uc.static_images or static_scale != uc.static_scale:
+        uc.set_static_images(static_images, scale=static_scale)
+    if bool(copy_buttons) != uc.copy_buttons:
+        uc.set_copy_buttons(copy_buttons)
 
     if data is not None:
-        nb.load_df(data, **load_kwargs)
-    return nb
+        uc.load_df(data, **load_kwargs)
+    return uc
 
 
 def uc_defaults():
@@ -13144,7 +13144,7 @@ def uc_defaults():
 
         report = {**uc_defaults(), 'figsize': (10, 6), 'markersize': 5}
         report.pop('data')
-        nb = new_uc(**report)
+        uc = new_uc(**report)
     """
     return {name: p.default
             for name, p in inspect.signature(new_uc).parameters.items()

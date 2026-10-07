@@ -65,7 +65,7 @@ pip install "unichart[all] @ git+https://github.com/Cunon/unichart.git"
 
 ## Core concepts
 
-A `UnichartNotebook` holds any number of **datasets** (`nb.sets`, each a
+A `UnichartNotebook` holds any number of **datasets** (`uc.sets`, each a
 `Dataset`) backed by a single shared DataFrame. Each dataset carries its own
 style state (color, marker, line style, selection flag, query, title). The
 typical loop is:
@@ -80,12 +80,12 @@ typical loop is:
 
 Two conveniences run through the whole API:
 
-- **Sticky arguments.** Plot calls remember their last `x`/`y` (`nb.last_x`,
-  `nb.last_y`, grid, format), so follow-up styling and analysis calls don't need
+- **Sticky arguments.** Plot calls remember their last `x`/`y` (`uc.last_x`,
+  `uc.last_y`, grid, format), so follow-up styling and analysis calls don't need
   to re-specify them.
-- **Built-in help.** `nb.help()` prints a categorized method + attribute
-  overview; `nb.help('delta')` prints one method's full signature and docstring;
-  `nb.help('Plotting')` lists a single category. Headings, method names and
+- **Built-in help.** `uc.help()` prints a categorized method + attribute
+  overview; `uc.help('delta')` prints one method's full signature and docstring;
+  `uc.help('Plotting')` lists a single category. Headings, method names and
   signatures are colored in a terminal, in Jupyter and in the explorer's
   terminal (plain when piped; `NO_COLOR=1` disables it).
 
@@ -96,30 +96,30 @@ Two conveniences run through the whole API:
 ```python
 from unichart import UnichartNotebook
 
-nb = UnichartNotebook()
+uc = UnichartNotebook()
 
 # 1. Load — one DataFrame split into one Dataset per unique set id,
 #    or a list of DataFrames loaded as separate sets.
-nb.load_df(df, set_idx_column='run_id', set_name_column='run_name')
+uc.load_df(df, set_idx_column='run_id', set_name_column='run_name')
 
 # 2. Select which datasets participate in the next plot
-nb.select([0, 1, 2])          # or nb.omit(3), nb.query('all', 'temp > 100')
-nb.select('1:10')             # range shorthand — sets 1-9 (exclusive stop,
+uc.select([0, 1, 2])          # or uc.omit(3), uc.query('all', 'temp > 100')
+uc.select('1:10')             # range shorthand — sets 1-9 (exclusive stop,
                               # like a Python slice). Also '0,3,7:', '::2', '-3:'.
                               # Works anywhere a set selector is accepted:
-                              # nb.omit('5:8'), nb.color('0:3', 'red'), ...
+                              # uc.omit('5:8'), uc.color('0:3', 'red'), ...
 
 # 3. Plot — one subplot per Y variable by default
-nb.plot(x='time', y=['temperature', 'pressure'])
+uc.plot(x='time', y=['temperature', 'pressure'])
 
 # 4. Style
-nb.color(0, 'red')                        # dataset 0 red
-nb.var_format('temperature', linestyle='--')   # every temperature line dashed
-nb.toggle_darkmode(True)
+uc.color(0, 'red')                        # dataset 0 red
+uc.var_format('temperature', linestyle='--')   # every temperature line dashed
+uc.toggle_darkmode(True)
 
 # 5. Analyse
-nb.plot(x='time', y='temperature', by='ymult')   # shared X, multiple Y axes
-nb.delta(base_idx=0, study_indices='all', delta_parms='temperature')
+uc.plot(x='time', y='temperature', by='ymult')   # shared X, multiple Y axes
+uc.delta(base_idx=0, study_indices='all', delta_parms='temperature')
 ```
 
 ### Loading data
@@ -138,11 +138,11 @@ nb.delta(base_idx=0, study_indices='all', delta_parms='temperature')
 Every plot draws only the **selected** datasets, so selection is how you slice:
 
 ```python
-nb.select([0, 2])          # show only sets 0 and 2
-nb.omit(1)                 # hide set 1
-nb.restore()               # re-select everything
-nb.query(1, 'rpm > 5000')  # row-level filter on set 1 (pandas query syntax)
-nb.selected()              # list currently selected sets
+uc.select([0, 2])          # show only sets 0 and 2
+uc.omit(1)                 # hide set 1
+uc.restore()               # re-select everything
+uc.query(1, 'rpm > 5000')  # row-level filter on set 1 (pandas query syntax)
+uc.selected()              # list currently selected sets
 ```
 
 Most styling/analysis methods accept the same `uset_slice` argument: an int, a
@@ -153,7 +153,7 @@ list of ints, `'all'`, or `'selected'`.
 ## Plot types
 
 All plotting methods return an interactive Plotly `go.Figure` (cached in
-`nb.last_fig`) and share layout options (`figsize`, `ncols`/`nrows`,
+`uc.last_fig`) and share layout options (`figsize`, `ncols`/`nrows`,
 `hspace`/`vspace`, `suptitle`, `footer`, `legend`, `by`).
 
 | Method | What it draws |
@@ -168,11 +168,11 @@ All plotting methods return an interactive Plotly `go.Figure` (cached in
 | `table(cols=, x_in=, kind=)` | Rendered data table; optionally interpolate values at given `x_in` points. |
 
 ```python
-nb.plot(x='time', y='temp', by='sets', ncols=2, suptitle='Per run')
-nb.plot_marginal(x='rpm', y='torque', marginal='kde')
-nb.bar(x='config', y='efficiency', barmode='group', agg='mean')
-nb.histogram(x='error', nbins=40, histnorm='probability')
-nb.contour(x='rpm', y='torque', z='efficiency', overlay_sets=[1, 2])
+uc.plot(x='time', y='temp', by='sets', ncols=2, suptitle='Per run')
+uc.plot_marginal(x='rpm', y='torque', marginal='kde')
+uc.bar(x='config', y='efficiency', barmode='group', agg='mean')
+uc.histogram(x='error', nbins=40, histnorm='probability')
+uc.contour(x='rpm', y='torque', z='efficiency', overlay_sets=[1, 2])
 ```
 
 ---
@@ -185,14 +185,14 @@ style, which beats **notebook defaults** — each on a per-attribute basis.
 **Per-dataset** (by `uset_slice`):
 
 ```python
-nb.color(0, 'red'); nb.marker([1, 2], 's'); nb.linestyle('all', '--')
-nb.markersize(0, 12); nb.alpha('selected', 0.5); nb.fill(1, True)
-nb.linewidth(0, 3); nb.edgewidth(0, 1); nb.hue(0, 'category')
-nb.alpha_marker(0, 0.3); nb.alpha_line(1, 0.2)   # opacity of just the markers / just the line
-nb.zorder(2, 1)       # draw set 2 on top of the rest (higher = later = on top)
-nb.legend(3, False)   # still plot set 3, but leave it out of the legend
-nb.sig_figs(0, 4)     # set 0's values display to 4 significant figures
-nb.decimals(1, 2)     # set 1's to two decimal places instead
+uc.color(0, 'red'); uc.marker([1, 2], 's'); uc.linestyle('all', '--')
+uc.markersize(0, 12); uc.alpha('selected', 0.5); uc.fill(1, True)
+uc.linewidth(0, 3); uc.edgewidth(0, 1); uc.hue(0, 'category')
+uc.alpha_marker(0, 0.3); uc.alpha_line(1, 0.2)   # opacity of just the markers / just the line
+uc.zorder(2, 1)       # draw set 2 on top of the rest (higher = later = on top)
+uc.legend(3, False)   # still plot set 3, but leave it out of the legend
+uc.sig_figs(0, 4)     # set 0's values display to 4 significant figures
+uc.decimals(1, 2)     # set 1's to two decimal places instead
 ```
 
 `sig_figs` and `decimals` are the display-precision knob, in its two
@@ -206,21 +206,21 @@ also restyles the sets already loaded), two are selector-then-value, and
 `'reset'` restores the built-in precision:
 
 ```python
-nb.sig_figs(4)          # 4 sig figs everywhere, and for sets loaded later
-nb.decimals(2)          # ... or two decimal places everywhere
-nb.sig_figs(0, 6)       # just set 0 (use this form when you mean a set index)
-nb.sig_figs('reset')    # back to the built-in precision
-nb.sig_figs()           # report the current setting
+uc.sig_figs(4)          # 4 sig figs everywhere, and for sets loaded later
+uc.decimals(2)          # ... or two decimal places everywhere
+uc.sig_figs(0, 6)       # just set 0 (use this form when you mean a set index)
+uc.sig_figs('reset')    # back to the built-in precision
+uc.sig_figs()           # report the current setting
 ```
 
 **Per-variable** (applies wherever that column is plotted):
 
 ```python
-nb.var_format('Temperature', linestyle='--')          # all Temp lines dashed
-nb.var_format('Pressure', color='blue', marker='s')   # Pressure = blue squares
-nb.var_format('Pressure', color='reset')              # drop just the color override
-nb.var_format(['CHT1', 'CHT2'], marker='x')           # a list gets the same overrides
-nb.var_format(['CHT1', 'CHT2'], reset=True)           # drop all their overrides
+uc.var_format('Temperature', linestyle='--')          # all Temp lines dashed
+uc.var_format('Pressure', color='blue', marker='s')   # Pressure = blue squares
+uc.var_format('Pressure', color='reset')              # drop just the color override
+uc.var_format(['CHT1', 'CHT2'], marker='x')           # a list gets the same overrides
+uc.var_format(['CHT1', 'CHT2'], reset=True)           # drop all their overrides
 ```
 
 **Notebook-wide defaults & appearance:**
@@ -229,10 +229,10 @@ nb.var_format(['CHT1', 'CHT2'], reset=True)           # drop all their overrides
   sig_figs/decimals, legend, grid, subplot spacing, barmode, agg, alpha, …)
   applied to future plots/datasets.
 - The common settings are also attributes, checked as you assign them:
-  `nb.figsize = (10, 6)`, `nb.plot_size = (4, 3)` (both in inches),
-  `nb.ncols` / `nb.nrows`, `nb.hspace` / `nb.vspace`,
-  `nb.legend_scroll`, `nb.suppress_legends`, `nb.plot_style = 'plotly'`, and
-  the font sizes (`nb.legend_size = 'large'`: each `set_font_sizes` argument
+  `uc.figsize = (10, 6)`, `uc.plot_size = (4, 3)` (both in inches),
+  `uc.ncols` / `uc.nrows`, `uc.hspace` / `uc.vspace`,
+  `uc.legend_scroll`, `uc.suppress_legends`, `uc.plot_style = 'plotly'`, and
+  the font sizes (`uc.legend_size = 'large'`: each `set_font_sizes` argument
   plus `_size`). Each is the same setting its method sets (`set_plot_size`,
   `set_default_format`, `set_font_sizes`, `set_plot_style`), and `None` puts
   it back to its built-in.
@@ -246,7 +246,7 @@ nb.var_format(['CHT1', 'CHT2'], reset=True)           # drop all their overrides
   and aspect ratio regardless of titles, legends or subplot count (see below).
 - `grid(...)` — gridline formatting: visibility, color, width, dash pattern,
   per axis (`axis='x'/'y'/'both'`) and major/minor (`which=`), e.g.
-  `nb.grid(color='lightgray', dash=':')` or `nb.grid(which='minor', visible=True)`.
+  `uc.grid(color='lightgray', dash=':')` or `uc.grid(which='minor', visible=True)`.
 - `watermark(...)` — stamp a logo or seal onto every plot, with control over
   opacity, position and size (see below).
 - `set_static_images(True)` / `save_png(...)` — render flat PNGs inline (keeps
@@ -254,7 +254,7 @@ nb.var_format(['CHT1', 'CHT2'], reset=True)           # drop all their overrides
   `pip install "unichart[png]"`).
   Every saved PNG also carries the full plotting session (data, queries,
   formatting and the plot call) in a metadata chunk, so
-  `UnichartNotebook.from_session('plot.png')` or `nb.load_session('plot.png')`
+  `UnichartNotebook.from_session('plot.png')` or `uc.load_session('plot.png')`
   remakes the plot from the image alone; `read_png_session('plot.png')` shows
   what is embedded, `save_png(..., embed_session=False)` writes a plain image.
   `parms=['x', 'y']` whitelists the columns embedded (plotted, query and hue
@@ -281,9 +281,9 @@ output — a paper, a report, a deck already full of `pyplot`. Switch the whole
 environment to Plotly's own look, and back:
 
 ```python
-nb.set_plot_style('plotly')       # Plotly's own look
-nb.set_plot_style('matplotlib')   # back to the default; or 'mpl' / 'plt'
-nb.plot_style = 'plotly'          # the same switch, as an attribute
+uc.set_plot_style('plotly')       # Plotly's own look
+uc.set_plot_style('matplotlib')   # back to the default; or 'mpl' / 'plt'
+uc.plot_style = 'plotly'          # the same switch, as an attribute
 ```
 
 The Matplotlib style approximates Matplotlib's defaults: a white (or black, in
@@ -298,7 +298,7 @@ cycle, and **viridis** for contours and hue-colored scatters.
   `markersize()` / `hue_palette()` overrides on them; pass `sets=False` to keep
   those and apply the style only to the layout and to future loads.
 - Two Matplotlib habits stay opt-in: it draws lines *without* markers
-  (`nb.set_default_format(marker=None)` if you want that), and dashboards keep
+  (`uc.set_default_format(marker=None)` if you want that), and dashboards keep
   the board's UI font so charts and chrome read as one surface.
 - `reset_format('all')` (or `'defaults'`) returns to the `'matplotlib'` style
   along with the other stored defaults.
@@ -306,20 +306,20 @@ cycle, and **viridis** for contours and hue-colored scatters.
 ### Decorations
 
 ```python
-nb.line('rpm', level=5000, color='red', linestyle='--')  # reference line
-nb.highlight('time', (10, 20), color='yellow', alpha=0.2) # shaded band
-nb.scale('pressure', (0, 100))                            # fix an axis range
-nb.suptitle = 'Overview'; nb.footer = 'source: rig A'      # figure text
+uc.line('rpm', level=5000, color='red', linestyle='--')  # reference line
+uc.highlight('time', (10, 20), color='yellow', alpha=0.2) # shaded band
+uc.scale('pressure', (0, 100))                            # fix an axis range
+uc.suptitle = 'Overview'; uc.footer = 'source: rig A'      # figure text
 ```
 
 Reference lines can carry a **label**, drawn on the line inside the plot area:
 
 ```python
-nb.line('rpm', 5000, label='redline')                     # default: far end of the line
-nb.line('cht', 400, color='orange', label='limit',
+uc.line('rpm', 5000, label='redline')                     # default: far end of the line
+uc.line('cht', 400, color='orange', label='limit',
         label_size='lg', label_position='left')           # named size + position
-nb.line('time', 12.5, label='event', label_position=0.25) # 0-1 fraction along the line
-nb.line('cht', 350, label='target', label_position='center below', label_color='gray')
+uc.line('time', 12.5, label='event', label_position=0.25) # 0-1 fraction along the line
+uc.line('cht', 350, label='target', label_position='center below', label_color='gray')
 ```
 
 - `label_size` — a number or a size name (`'small'`, `'lg'`, …, same vocabulary
@@ -332,7 +332,7 @@ nb.line('cht', 350, label='target', label_position='center below', label_color='
 - `label_color` — defaults to the line's `color`.
 - `legend` — add the line to the legend: `True` names the entry after `label`
   (or `'<column> = <level>'` without one), a string names it explicitly, e.g.
-  `nb.line('egt', 900, color='orange', legend='EGT limit')`. Line entries sit
+  `uc.line('egt', 900, color='orange', legend='EGT limit')`. Line entries sit
   after the data entries, and clicking one toggles the line.
 
 ### Fixed plot size / aspect ratio
@@ -343,13 +343,13 @@ two plots in the same notebook end up different shapes. `set_plot_size` pins
 the **plot area** instead:
 
 ```python
-nb.set_plot_size(4, 3)          # every panel exactly 4x3in, in every plot
-nb.plot(x='t', y='CHT')                   # 1 panel,  4x3in
-nb.plot(x='t', y=['CHT', 'EGT', 'RPM'])   # 3 panels, 4x3in each
-nb.set_plot_size(height=3)      # pin height only; width follows figsize
-nb.set_plot_size(reset=True)    # back to figsize-driven sizing
-nb.plot_size = (4, 3)           # the same pin as an attribute, also in inches
-nb.plot_size = None             # ...and cleared
+uc.set_plot_size(4, 3)          # every panel exactly 4x3in, in every plot
+uc.plot(x='t', y='CHT')                   # 1 panel,  4x3in
+uc.plot(x='t', y=['CHT', 'EGT', 'RPM'])   # 3 panels, 4x3in each
+uc.set_plot_size(height=3)      # pin height only; width follows figsize
+uc.set_plot_size(reset=True)    # back to figsize-driven sizing
+uc.plot_size = (4, 3)           # the same pin as an attribute, also in inches
+uc.plot_size = None             # ...and cleared
 ```
 
 The size applies to **one subplot panel** by default, and the figure grows to
@@ -366,8 +366,8 @@ instead of crushing them into each other.
 
 Each call replaces the previous setting, `per_subplot` included — a later
 `set_plot_size(height=3)` returns to per-panel mode unless you pass
-`per_subplot=False` again. Assigning `nb.plot_size` changes only the size; the
-mode is `nb.plot_size_per_subplot`.
+`per_subplot=False` again. Assigning `uc.plot_size` changes only the size; the
+mode is `uc.plot_size_per_subplot`.
 
 Note that in per-panel mode a wide grid makes a wide figure — five 6in panels
 side by side is a ~22in figure. Use a smaller per-panel size or `ncols=1` when
@@ -385,18 +385,18 @@ grid is too crowded for its figure the gaps are clamped and a warning says so;
 a bigger `figsize` or `set_plot_size` is the cure.
 
 To change it, every gridded plot method (`plot`, `bar`, `box`, `histogram`,
-`contour`) takes `hspace` (columns) and `vspace` (rows). The `nb.hspace` and
-`nb.vspace` attributes set the standing default, the way `nb.figsize` does for
+`contour`) takes `hspace` (columns) and `vspace` (rows). The `uc.hspace` and
+`uc.vspace` attributes set the standing default, the way `uc.figsize` does for
 the figure size; `set_default_format` sets the same thing in one call, and a
 per-call value always wins:
 
 ```python
-nb.plot(x='t', y=['CHT', 'EGT', 'RPM'], ncols=1, vspace=100)   # 100px rows
-nb.plot(x='t', y=['CHT', 'EGT'], hspace=0.05)     # 5% of the plot width
-nb.hspace = '60px'                                # for every plot from now on
-nb.vspace = 40
-nb.set_default_format(hspace='60px', vspace=40)   # the same, in one call
-nb.hspace = None                                  # back to the built-in 80px
+uc.plot(x='t', y=['CHT', 'EGT', 'RPM'], ncols=1, vspace=100)   # 100px rows
+uc.plot(x='t', y=['CHT', 'EGT'], hspace=0.05)     # 5% of the plot width
+uc.hspace = '60px'                                # for every plot from now on
+uc.vspace = 40
+uc.set_default_format(hspace='60px', vspace=40)   # the same, in one call
+uc.hspace = None                                  # back to the built-in 80px
 ```
 
 A value of 1 or more is pixels (`60` or `'60px'`); below 1 it is a fraction of
@@ -409,13 +409,13 @@ hold it.
 Stamp a logo, seal or "DRAFT" graphic onto every plot:
 
 ```python
-nb.watermark('logo.png')                                   # faint, centered
-nb.watermark('logo.png', opacity=0.4,
+uc.watermark('logo.png')                                   # faint, centered
+uc.watermark('logo.png', opacity=0.4,
              position='bottom right', size=0.15)           # corner logo
-nb.watermark('draft.png', opacity=0.08, layer='above')     # tint over the data
-nb.watermark(opacity=0.3)                                  # tweak; other settings kept
-nb.watermark()                                             # show current settings
-nb.watermark(reset=True)                                   # remove it
+uc.watermark('draft.png', opacity=0.08, layer='above')     # tint over the data
+uc.watermark(opacity=0.3)                                  # tweak; other settings kept
+uc.watermark()                                             # show current settings
+uc.watermark(reset=True)                                   # remove it
 ```
 
 - **`opacity`** — `0`–`1` (default `0.15`).
@@ -448,13 +448,13 @@ Two consistent rules cover every reset:
    or a decoration:
 
    ```python
-   nb.color(0, 'reset')             # dataset 0 back to its color_map color
-   nb.marker('all', 'reset')        # every set back to its marker_map marker
-   nb.color('Pressure', 'reset')    # drop the Pressure color override
-   nb.var_format('CHT', color='reset')  # same, per attribute
-   nb.line('all', 'reset')          # remove reference lines ('clear' also works)
-   nb.highlight('rpm', 'reset')     # remove highlights on one column
-   nb.scale('all', 'reset')         # clear every fixed axis range
+   uc.color(0, 'reset')             # dataset 0 back to its color_map color
+   uc.marker('all', 'reset')        # every set back to its marker_map marker
+   uc.color('Pressure', 'reset')    # drop the Pressure color override
+   uc.var_format('CHT', color='reset')  # same, per attribute
+   uc.line('all', 'reset')          # remove reference lines ('clear' also works)
+   uc.highlight('rpm', 'reset')     # remove highlights on one column
+   uc.scale('all', 'reset')         # clear every fixed axis range
    ```
 
 2. **`reset_format()` is the single bulk-reset hub**, with optional scopes
@@ -462,11 +462,11 @@ Two consistent rules cover every reset:
    `'plot_size'`, `'grid'`, `'watermark'`, `'defaults'`, `'all'`:
 
    ```python
-   nb.reset_format()                     # all applied formatting
-   nb.reset_format('lines', 'scales')    # just those
-   nb.reset_format([0, 1])               # just datasets 0 and 1
-   nb.reset_format(vars='CHT')           # just one variable's overrides
-   nb.reset_format('all')                # everything, incl. set_default_format state
+   uc.reset_format()                     # all applied formatting
+   uc.reset_format('lines', 'scales')    # just those
+   uc.reset_format([0, 1])               # just datasets 0 and 1
+   uc.reset_format(vars='CHT')           # just one variable's overrides
+   uc.reset_format('all')                # everything, incl. set_default_format state
    ```
 
    `set_font_sizes(reset=True)`, `set_plot_size(reset=True)`,
@@ -485,7 +485,7 @@ Two consistent rules cover every reset:
 - **`table(...)` / `table_read(...)`** — tabulate columns, or interpolate a
   Y column at arbitrary X inputs (`kind='linear'`, extrapolation controllable).
   `sig_figs=` / `decimals=` round the displayed cells; without them each set's
-  own `sig_figs` / `decimals` (see `nb.sig_figs`, `nb.decimals`) applies.
+  own `sig_figs` / `decimals` (see `uc.sig_figs`, `uc.decimals`) applies.
 - **`reg_info(...)`** / `reg_order` — fit and report regressions / trend lines
   (polynomial or LOWESS; LOWESS needs `statsmodels`).
 - **`summary(cols=...)`** — per-dataset descriptive statistics (count / min /
@@ -505,7 +505,7 @@ context: a header bar owns the dataset selection and the light/dark theme for
 
 ```python
 # Inline in a Jupyter notebook:
-nb.dashboard(panels=[
+uc.dashboard(panels=[
     {'method': 'plot', 'x': 'time', 'y': 'temp'},
     {'method': 'bar',  'x': 'config', 'y': 'efficiency',
      'kwargs': {'barmode': 'group', 'agg': 'mean'}},
@@ -546,15 +546,15 @@ from unichart.dashboard import explore
 
 explore(data='runs.csv')   # standalone — serves the board and opens your browser
 explore()                  # empty; drop a file on the sidebar, or hit "Load demo data"
-nb.explore()               # on a notebook you already have (inline in Jupyter)
-nb.explore(app_window=True)  # in its own desktop window instead of a browser tab
+uc.explore()               # on a notebook you already have (inline in Jupyter)
+uc.explore(app_window=True)  # in its own desktop window instead of a browser tab
 ```
 
 The notebook's methods are bound as bare names in the terminal, so the cheat
-sheet reads the way the library does, and `nb` covers everything else:
+sheet reads the way the library does, and `uc` covers everything else:
 
 ```python
->>> nb.load('runs.csv')
+>>> uc.load('runs.csv')
 >>> plot(x='time', y=['temperature', 'pressure'])
 >>> select([0, 1]); color(0, 'red')
 >>> summary()
@@ -563,7 +563,7 @@ sheet reads the way the library does, and `nb` covers everything else:
 - **Enter** runs, **Shift+Enter** adds a line, **↑ / ↓** walks history.
 - **⧉ copy chart** in the top bar puts the current figure on the clipboard as a
   2× PNG, rasterized from what's on screen (no `kaleido` needed). The same
-  `⧉ copy` affordance unichart shows under plots in a notebook — `nb.plot()` in
+  `⧉ copy` affordance unichart shows under plots in a notebook — `uc.plot()` in
   Jupyter still has its own; this is the board's.
 - **Syntax highlighting** everywhere Python appears: the cheat-sheet snippets,
   every command in the transcript, and the input line as you type. The
@@ -577,10 +577,10 @@ sheet reads the way the library does, and `nb` covers everything else:
 - Plots go to the chart pane; `table()` / `summary()` / `list_parms()` render as
   their real sortable, filterable HTML tables inline in the transcript.
 - Errors show a traceback trimmed to the line you typed.
-- Dropping a file loads it through a visible `nb.load(...)` command, so the
+- Dropping a file loads it through a visible `uc.load(...)` command, so the
   transcript is a real record of the session. Drop a **saved session** —
   `.json` or a `save_png` image — and it restores through an equally visible
-  `nb.load_session(...)`, bringing its datasets, formatting and plot back. The
+  `uc.load_session(...)`, bringing its datasets, formatting and plot back. The
   file's contents decide, not its extension, so a data `.json` still loads as
   data.
 - **✕ close** in the top bar shuts the board down: it asks first, then stops
@@ -591,9 +591,9 @@ sheet reads the way the library does, and `nb` covers everything else:
 - **💾 save session** in the top bar downloads the board as a session file:
   everything loaded, however it is styled, and whatever is currently plotted.
   Reopen it with `unichart that-file.json`, by dropping it back on the sidebar,
-  or with `nb.load_session(...)` from Python.
+  or with `uc.load_session(...)` from Python.
 - The board runs against **your** notebook: what you load or restyle there is
-  on `nb` afterwards.
+  on `uc` afterwards.
 
 The board is dark, and `explore()` switches the notebook to dark mode to match
 unless it already is. Options: `data=`, `panels=` (dashboard-style specs,
@@ -665,7 +665,7 @@ unichart runs.csv --app
 
 ```python
 explore(data='runs.csv', app_window=True)   # the same thing from Python
-nb.explore(app_window=True)
+uc.explore(app_window=True)
 ```
 
 It works by handing the URL to a Chromium-family browser's `--app` mode (Chrome,
@@ -700,8 +700,8 @@ to a session's stored theme (the terminal board's own chrome is always dark).
 `unichart --help` lists them all.
 
 Panel options beyond `method` / `x` / `y` / `z` — `kwargs` like `nbins` or
-`barmode`, dataset pins — aren't expressible as a flag; use `nb.dashboard` /
-`nb.explore` from Python, where the spec dict is clearer than any encoding
+`barmode`, dataset pins — aren't expressible as a flag; use `uc.dashboard` /
+`uc.explore` from Python, where the spec dict is clearer than any encoding
 would be. A missing file or malformed `--panel` prints one line and exits
 non-zero rather than raising.
 
@@ -741,7 +741,7 @@ so completing a flag costs nothing.
 ### Export to standalone HTML
 
 ```python
-nb.dashboard_to_html(panels, path='board.html')
+uc.dashboard_to_html(panels, path='board.html')
 ```
 
 Renders each panel once and writes a self-contained HTML file (the frozen
@@ -764,16 +764,16 @@ Dash is imported lazily, so the core toolkit never requires it.
   consistent.
 - **Notebook-friendly memory management.** Static-image mode and last-figure
   clearing keep notebook file sizes manageable even with many large plots, while
-  `nb.last_fig` still caches the real interactive figure for re-styling or PNG
+  `uc.last_fig` still caches the real interactive figure for re-styling or PNG
   export.
-- **Discoverable.** `nb.help()`, `nb.list_sets()`, `nb.list_parms()`, and
-  `nb.summary()` let you inspect the environment without leaving the notebook.
+- **Discoverable.** `uc.help()`, `uc.list_sets()`, `uc.list_parms()`, and
+  `uc.summary()` let you inspect the environment without leaving the notebook.
 
 ---
 
 ## Learning more
 
-- **`nb.help()`** — live, categorized API reference inside the notebook.
+- **`uc.help()`** — live, categorized API reference inside the notebook.
 - **[`PLOTTING_STYLE_GUIDE.md`](https://github.com/Cunon/unichart/blob/main/PLOTTING_STYLE_GUIDE.md)** — conventions for
   producing clean, consistent figures.
 - **[`demo_notebooks/`](https://github.com/Cunon/unichart/tree/main/demo_notebooks)** — runnable examples covering the main

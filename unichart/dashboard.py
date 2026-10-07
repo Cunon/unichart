@@ -1396,7 +1396,7 @@ def explore(nb=None, data=None, sessions=None, panels=None, title=None,
     """
     from .terminal import terminal
 
-    return terminal(nb=nb, data=data, sessions=sessions, panels=panels,
+    return terminal(uc=nb, data=data, sessions=sessions, panels=panels,
                     title=title, port=port, debug=debug,
                     open_browser=open_browser, app_window=app_window,
                     jupyter_mode=jupyter_mode, dark=dark, **run_kwargs)

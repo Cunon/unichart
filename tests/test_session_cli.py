@@ -306,8 +306,8 @@ def test_terminal_restores_sessions_as_startup_commands(tmp_path):
 
     startup = captured['startup']
     assert captured['darkmode_before_startup'] is True, 'the board flips dark first'
-    assert startup[0] == f"nb.load_session({str(session)!r})"
-    assert startup[1] == 'nb.toggle_darkmode(True)', '--dark must outlast the session'
+    assert startup[0] == f"uc.load_session({str(session)!r})"
+    assert startup[1] == 'uc.toggle_darkmode(True)', '--dark must outlast the session'
     assert startup[2].startswith('plot('), 'panels draw on top of the session'
 
 
@@ -332,12 +332,12 @@ def test_terminal_leaves_the_theme_alone_without_dark(tmp_path):
     terminal.build_terminal_app = fake_build
     try:
         with redirect_stdout(io.StringIO()):
-            terminal.terminal(nb=UnichartNotebook(),
+            terminal.terminal(uc=UnichartNotebook(),
                                        sessions=str(session), open_browser=False)
     finally:
         terminal.build_terminal_app = original
 
-    assert captured['startup'] == [f"nb.load_session({str(session)!r})"], \
+    assert captured['startup'] == [f"uc.load_session({str(session)!r})"], \
         'no --dark means nothing overrides the session theme'
 
 

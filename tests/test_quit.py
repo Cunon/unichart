@@ -112,7 +112,7 @@ def test_terminal_tells_the_board_whether_it_owns_the_process(tmp_path=None):
         for in_notebook in (True, False):
             dashboard._in_notebook = lambda: in_notebook
             with redirect_stdout(io.StringIO()):
-                terminal.terminal(nb=_notebook(), open_browser=False)
+                terminal.terminal(uc=_notebook(), open_browser=False)
             assert seen['allow_quit'] is not in_notebook
     finally:
         (terminal.build_terminal_app,

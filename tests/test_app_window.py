@@ -75,7 +75,7 @@ def _terminal(in_notebook=False, **kwargs):
     dashboard._in_notebook = lambda: in_notebook
     try:
         with redirect_stdout(io.StringIO()):
-            terminal.terminal(nb=UnichartNotebook(), **kwargs)
+            terminal.terminal(uc=UnichartNotebook(), **kwargs)
     finally:
         (terminal.build_terminal_app,
          terminal._browser_launcher,
