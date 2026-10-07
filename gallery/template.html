@@ -316,6 +316,29 @@
   .card > .plate:last-child { border-bottom: none; }
   .plate--dark { background: #000000; }
   .plate img { height: auto; display: inline-block; }
+  /* the notebook's own HTML table widget; scrolls sideways on narrow screens */
+  .html-out { overflow-x: auto; color: #000; text-align: left; }
+  .html-out pre.stdout { overflow-x: auto; }
+  /* unichart's table widget at notebook size, scaled to sit in a card */
+  .html-out [id^="unichart-table-"] { zoom: .75; }
+  .html-out [id^="unichart-table-"] td { white-space: nowrap; }
+  .html-out pre.stdout {
+    margin: 0 0 12px;
+    font: var(--step--1)/1.5 "IBM Plex Mono", ui-monospace, monospace;
+    color: #2b323b;
+  }
+  /* pandas' own HTML repr, styled as JupyterLab does */
+  .html-out table.dataframe {
+    border-collapse: collapse; border: none;
+    font: var(--step--1)/1.4 "IBM Plex Sans", system-ui, sans-serif;
+    font-variant-numeric: tabular-nums;
+  }
+  .html-out table.dataframe th,
+  .html-out table.dataframe td { padding: 4px 12px; border: none; text-align: right; }
+  .html-out table.dataframe thead th { border-bottom: 1px solid #b8bfc8; font-weight: 600; }
+  .html-out table.dataframe tbody th { font-weight: 600; }
+  .html-out table.dataframe tbody tr:nth-child(odd) { background: #f4f6f8; }
+  .html-out table.dataframe tbody tr:hover { background: #e8eef7; }
 
   .chart { width: 100%; }
   .chart:empty::after {
