@@ -298,7 +298,7 @@ def test_terminal_restores_sessions_as_startup_commands(tmp_path):
     try:
         with redirect_stdout(io.StringIO()):
             terminal.terminal(
-                nb=UnichartNotebook(), sessions=[str(session)], dark=True,
+                uc=UnichartNotebook(), sessions=[str(session)], dark=True,
                 panels=[{'method': 'plot', 'x': 't', 'y': ['temp']}],
                 open_browser=False)
     finally:

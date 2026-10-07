@@ -1,7 +1,7 @@
 """On-the-fly Dash dashboards that combine multiple unichart figures.
 
 `UnichartNotebook` plotting methods each return a Plotly ``go.Figure`` and cache the
-most recent one in ``nb.last_fig``. This module wires those figures into an
+most recent one in ``uc.last_fig``. This module wires those figures into an
 interactive Dash board with one shared data context: a header bar owns the
 dataset selection and the light/dark theme for *every* panel, and each panel
 keeps only the controls that are genuinely its own (plot type, x / y / z
@@ -11,7 +11,7 @@ Typical use, inline in a Jupyter notebook::
 
     from unichart.dashboard import dashboard
 
-    dashboard(nb, panels=[
+    dashboard(uc, panels=[
         {'method': 'plot', 'x': 'time', 'y': 'temp'},
         {'method': 'bar',  'x': 'cat',  'y': 'val'},
     ], ncols=2, title='Test rig overview')
@@ -27,6 +27,7 @@ toolkit never requires it.
 """
 
 import base64
+import functools
 import inspect
 import io
 import re
@@ -298,17 +299,31 @@ def _require_dash():
             Input, Output, State, MATCH, ALL)
 
 
-def _all_columns(nb):
+def _accepts_nb(func):
+    """Let ``func`` still take the notebook as ``nb=``, its old name, now that
+    the parameter is ``uc``."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        if 'nb' in kwargs:
+            if 'uc' in kwargs or args:
+                raise TypeError(f"{func.__name__}() got the notebook twice "
+                                f"(nb= is the old name of uc=)")
+            kwargs['uc'] = kwargs.pop('nb')
+        return func(*args, **kwargs)
+    return wrapper
+
+
+def _all_columns(uc):
     """Sorted union of column names across every dataset on the notebook."""
     cols = set()
-    for ds in nb.sets:
+    for ds in uc.sets:
         cols.update(str(c) for c in ds.columns)
     return sorted(cols)
 
 
-def _selected_indices(nb):
+def _selected_indices(uc):
     """Indices of currently-selected datasets."""
-    return [ds.index for ds in nb.sets if ds.select]
+    return [ds.index for ds in uc.sets if ds.select]
 
 
 def _passthrough_kwargs(method_fn, extra):
@@ -329,12 +344,13 @@ def _passthrough_kwargs(method_fn, extra):
             if k not in _CONTROL_KEYS and (accepts_var_kw or k in params)}
 
 
-def render_panel(nb, method, x, y, dataset_indices, suptitle=None, legend='above',
+@_accepts_nb
+def render_panel(uc, method, x, y, dataset_indices, suptitle=None, legend='above',
                  size=None, extra=None, z=None, darkmode=None):
     """Render one panel to a ``go.Figure`` using the notebook's plot methods.
 
-    Dispatches to ``nb.<method>`` with the given x/y/suptitle (and legend for the
-    methods that support it) and reads the figure from ``nb.last_fig`` (so it
+    Dispatches to ``uc.<method>`` with the given x/y/suptitle (and legend for the
+    methods that support it) and reads the figure from ``uc.last_fig`` (so it
     works even under ``static_images`` mode). On any error an empty figure
     carrying the error text is returned so one bad panel can't take down the
     board.
@@ -345,7 +361,7 @@ def render_panel(nb, method, x, y, dataset_indices, suptitle=None, legend='above
     accepts (see :func:`_passthrough_kwargs`) so it stays valid across plot-type
     switches and never overrides the live x/y/suptitle/legend controls.
 
-    ``darkmode`` overrides ``nb.darkmode`` for this render only (None leaves the
+    ``darkmode`` overrides ``uc.darkmode`` for this render only (None leaves the
     notebook's setting untouched) — it is how the board's theme switch restyles
     every figure without permanently flipping the user's notebook.
 
@@ -353,8 +369,8 @@ def render_panel(nb, method, x, y, dataset_indices, suptitle=None, legend='above
     otherwise mutate shared state: ``.select`` (which datasets are active),
     ``darkmode`` and the ``last_*`` plot memory (``last_x``/``last_y``/
     ``last_fig``/...). All of it is snapshotted and restored in ``finally``, so
-    interacting with the board never changes what a later ``nb.plot()`` cell
-    does. ``nb.last_fig`` is additionally cleared before dispatch so the
+    interacting with the board never changes what a later ``uc.plot()`` cell
+    does. ``uc.last_fig`` is additionally cleared before dispatch so the
     notebook's own ``_clear_last_fig`` cannot gut the user's previously cached
     figure in place.
 
@@ -385,23 +401,23 @@ def render_panel(nb, method, x, y, dataset_indices, suptitle=None, legend='above
     with _RENDER_LOCK:
         # Snapshot every piece of notebook state a render touches, so the user's
         # notebook is untouched after the board runs.
-        select_snapshot = [(ds, ds.select) for ds in nb.sets]
-        darkmode_snapshot = nb.darkmode
+        select_snapshot = [(ds, ds.select) for ds in uc.sets]
+        darkmode_snapshot = uc.darkmode
         # Panels are fixed-size cards (_stamp overwrites width/height), so a
         # figure grown to fit its whole legend would crush its plot area: keep
         # the scrolling legend here whatever legend_scroll says.
-        fit_snapshot = getattr(nb, '_legend_fit_enabled', True)
-        state_snapshot = {k: getattr(nb, k) for k in vars(nb)
+        fit_snapshot = getattr(uc, '_legend_fit_enabled', True)
+        state_snapshot = {k: getattr(uc, k) for k in vars(uc)
                           if k.startswith('last_')}
         try:
-            for ds in nb.sets:
+            for ds in uc.sets:
                 ds.select = ds.index in chosen
             if darkmode is not None:
-                nb.darkmode = bool(darkmode)
+                uc.darkmode = bool(darkmode)
             # Null last_fig first so the method's _clear_last_fig doesn't empty
             # (data=[], layout={}) the figure the user had cached before the board.
-            nb.last_fig = None
-            nb._legend_fit_enabled = False
+            uc.last_fig = None
+            uc._legend_fit_enabled = False
 
             # The y control is multi-select (a list), but some methods (e.g.
             # histogram) require a scalar y. Unwrap a single selection so every
@@ -410,7 +426,7 @@ def render_panel(nb, method, x, y, dataset_indices, suptitle=None, legend='above
             if isinstance(y, (list, tuple)) and len(y) == 1:
                 y = y[0]
 
-            method_fn = getattr(nb, method)
+            method_fn = getattr(uc, method)
             kwargs = _passthrough_kwargs(method_fn, extra)
 
             if method in _TABLE_METHODS:
@@ -447,7 +463,7 @@ def render_panel(nb, method, x, y, dataset_indices, suptitle=None, legend='above
                 kwargs['legend'] = legend
 
             method_fn(**kwargs)
-            fig = nb.last_fig
+            fig = uc.last_fig
             if fig is None:
                 return _stamp(_error_figure("No figure produced (no data / selection?)"), size)
             if not suptitle:
@@ -455,9 +471,9 @@ def render_panel(nb, method, x, y, dataset_indices, suptitle=None, legend='above
                 # explicit suptitle, unichart still auto-titles the figure
                 # ("x vs [y]"); blank it so the title isn't said twice.
                 fig.update_layout(title_text='')
-            # No defensive copy: the finally below restores nb.last_fig to the
+            # No defensive copy: the finally below restores uc.last_fig to the
             # snapshot, so this figure is detached from the notebook the moment we
-            # return. _clear_last_fig only guts whatever nb.last_fig points at, so
+            # return. _clear_last_fig only guts whatever uc.last_fig points at, so
             # it can never reach this one. (Skipping go.Figure(fig) avoids deep-
             # copying every trace, which is the per-render cost on large data.)
             return _stamp(fig, size)
@@ -466,16 +482,16 @@ def render_panel(nb, method, x, y, dataset_indices, suptitle=None, legend='above
         finally:
             for ds, was in select_snapshot:
                 ds.select = was
-            nb.darkmode = darkmode_snapshot
-            nb._legend_fit_enabled = fit_snapshot
+            uc.darkmode = darkmode_snapshot
+            uc._legend_fit_enabled = fit_snapshot
             # Drop any last_* attribute the render created (e.g. contour's
             # last_z on a notebook that had never plotted a contour), then
             # restore the snapshotted values.
-            for k in [k for k in vars(nb)
+            for k in [k for k in vars(uc)
                       if k.startswith('last_') and k not in state_snapshot]:
-                delattr(nb, k)
+                delattr(uc, k)
             for k, v in state_snapshot.items():
-                setattr(nb, k, v)
+                setattr(uc, k, v)
 
 
 def _stamp(fig, size):
@@ -753,7 +769,8 @@ def _normalize_y(y):
     return [str(y)]
 
 
-def build_app(nb, panels, ncols=2, width=600, height=420, title=None,
+@_accepts_nb
+def build_app(uc, panels, ncols=2, width=600, height=420, title=None,
               controls=True):
     """Build (but do not run) the Dash app for the given panels.
 
@@ -783,18 +800,18 @@ def build_app(nb, panels, ncols=2, width=600, height=420, title=None,
     (Dash, dcc, html, dash_table, no_update,
      Input, Output, State, MATCH, ALL) = _require_dash()
 
-    if not nb.sets:
+    if not uc.sets:
         raise ValueError("The notebook has no datasets loaded.")
     if not panels:
         raise ValueError("Provide at least one panel.")
 
-    col_options = _all_columns(nb)
-    default_selected = _selected_indices(nb)
+    col_options = _all_columns(uc)
+    default_selected = _selected_indices(uc)
     size = (width, height)
-    initial_theme = 'dark' if getattr(nb, 'darkmode', False) else 'light'
+    initial_theme = 'dark' if getattr(uc, 'darkmode', False) else 'light'
     board_title = title or 'unichart dashboard'
 
-    header = _header_div(html, dcc, nb, board_title, default_selected,
+    header = _header_div(html, dcc, uc, board_title, default_selected,
                          initial_theme, controls)
     grid = html.Div(
         [_panel_div(html, dcc, dash_table, i, panel, col_options, size,
@@ -808,16 +825,16 @@ def build_app(nb, panels, ncols=2, width=600, height=420, title=None,
     app.index_string = _index_string(initial_theme)
     app.layout = html.Div([header, grid], className='board')
 
-    _register_board_callbacks(app, nb, size)
+    _register_board_callbacks(app, uc, size)
     return app
 
 
-def _register_board_callbacks(app, nb, size):
+def _register_board_callbacks(app, uc, size):
     """Register every panel/board callback on ``app``.
 
     Every panel callback is keyed on a pattern-matching ``MATCH`` id, so one
     registration serves every card on the board regardless of how many there
-    are. ``nb`` is held by closure; ``size`` is the fixed (width, height) px of
+    are. ``uc`` is held by closure; ``size`` is the fixed (width, height) px of
     every panel figure.
     """
     (Dash, dcc, html, dash_table, no_update,
@@ -856,7 +873,7 @@ def _register_board_callbacks(app, nb, size):
     def _update_panel(method, x, y, z, legend, board_datasets, theme,
                       extra, pin):
         datasets = pin if pin is not None else board_datasets
-        fig = render_panel(nb, method, x, y, datasets, suptitle=None,
+        fig = render_panel(uc, method, x, y, datasets, suptitle=None,
                            legend=legend, size=size, extra=extra, z=z,
                            darkmode=(theme == 'dark'))
         if (method in _TABLE_METHODS and fig.data
@@ -1006,7 +1023,7 @@ def _dataset_chip(html, ds):
     )
 
 
-def _header_div(html, dcc, nb, board_title, default_selected, initial_theme,
+def _header_div(html, dcc, uc, board_title, default_selected, initial_theme,
                 controls=True):
     """The board header: title, the shared dataset picker, the theme switch and
     the whole-board CSV export. This is the single place data selection and
@@ -1020,7 +1037,7 @@ def _header_div(html, dcc, nb, board_title, default_selected, initial_theme,
     datasets = dcc.Checklist(
         id='board-datasets',
         options=[{'label': _dataset_chip(html, ds), 'value': ds.index}
-                 for ds in nb.sets],
+                 for ds in uc.sets],
         value=list(default_selected),
         className='chip-list',
     )
@@ -1232,7 +1249,7 @@ def _panel_div(html, dcc, dash_table, i, panel, col_options, size,
 # ---------------------------------------------------------------------------
 
 # Extensions the path box / upload box know how to read, mapped to the pandas
-# reader used for an uploaded byte buffer. Path loads go through nb.load(),
+# reader used for an uploaded byte buffer. Path loads go through uc.load(),
 # which does its own dispatch; this table is only for the upload branch.
 _UPLOAD_READERS = {
     '.csv': lambda buf, kw: pd.read_csv(buf, **kw),
@@ -1259,7 +1276,7 @@ def _upload_bytes(contents):
 def _df_from_upload(contents, filename):
     """Decode one ``dcc.Upload`` payload into a DataFrame.
 
-    The bytes are read in memory instead of through ``nb.load``, with the
+    The bytes are read in memory instead of through ``uc.load``, with the
     reader picked from the original filename's extension.
     """
     suffix = Path(filename).suffix.lower()
@@ -1277,7 +1294,7 @@ def _df_from_upload(contents, filename):
 _ID_LIKE = re.compile(r'^(set|setnumber|index|idx|id)$|(_id|_idx|_index)$', re.I)
 
 
-def _numeric_columns(nb):
+def _numeric_columns(uc):
     """Plottable (numeric) column names, in combined-frame order.
 
     Frame order — not alphabetical — because it mirrors the user's file, where
@@ -1285,22 +1302,22 @@ def _numeric_columns(nb):
     combined frame rather than ``ds[name]``, which copies the column; this runs
     on every panel add and must not scale with row count.
     """
-    if not nb.sets:
+    if not uc.sets:
         return []
-    owned = set(_all_columns(nb))
-    dtypes = nb.df.dtypes
+    owned = set(_all_columns(uc))
+    dtypes = uc.df.dtypes
     return [name for name in dtypes.index
             if name in owned and pd.api.types.is_numeric_dtype(dtypes[name])]
 
 
-def _default_panel_spec(nb):
+def _default_panel_spec(uc):
     """Seed a fresh panel with the first plausible x / y so it paints on add.
 
     Used when a board is asked for without panel specs — the ``unichart``
     command's ``--html`` with no ``--panel`` — so the export lands on a real
     chart instead of an empty grid.
     """
-    numeric = _numeric_columns(nb)
+    numeric = _numeric_columns(uc)
     if not numeric:
         return {'method': 'plot'}
     # Stable sort, so measurement columns keep their frame order and only the
@@ -1311,7 +1328,8 @@ def _default_panel_spec(nb):
     return {'method': 'plot', 'x': ranked[0], 'y': [ranked[1]]}
 
 
-def explore(nb=None, data=None, sessions=None, panels=None, title=None,
+@_accepts_nb
+def explore(uc=None, data=None, sessions=None, panels=None, title=None,
             port=8050, debug=False, open_browser=None, app_window=False,
             jupyter_mode=None, dark=None, **run_kwargs):
     """Launch the terminal explorer — a GUI for plotting on the fly.
@@ -1321,21 +1339,21 @@ def explore(nb=None, data=None, sessions=None, panels=None, title=None,
     the loaded datasets and a clickable cheat sheet; a chart pane showing the
     latest figure; and a Python terminal underneath. The notebook's methods are
     bound as bare names there, so ``plot(x='time', y='temp')`` works as written
-    and ``nb`` covers everything else.
+    and ``uc`` covers everything else.
 
     Parameters
     ----------
-    nb : UnichartNotebook, optional
+    uc : UnichartNotebook, optional
         The notebook to drive. Defaults to a fresh one. Passing your own shares
         state: what you load or restyle in the terminal is on that notebook
         afterwards, which is the point — the board is a view onto a live
         notebook, not a copy of one. Dark mode is switched on to match the
         board unless the notebook is already in it.
     data : str | DataFrame | list, optional
-        Loaded before the board opens, via ``nb.load``.
+        Loaded before the board opens, via ``uc.load``.
     sessions : str | Path | list, optional
         Session files (``.json``, or a PNG from ``save_png``) restored at
-        startup, as visible ``nb.load_session(...)`` commands — so the board
+        startup, as visible ``uc.load_session(...)`` commands — so the board
         opens on the plot the session recorded, in the theme it was saved in.
         Restored after ``data``, and before ``panels``.
     dark : bool, optional
@@ -1391,12 +1409,12 @@ def explore(nb=None, data=None, sessions=None, panels=None, title=None,
     --------
     >>> from unichart.dashboard import explore
     >>> explore(data='runs.csv')      # standalone
-    >>> explore(nb)                   # on a notebook you already have
-    >>> explore(nb, app_window=True)  # in its own desktop window
+    >>> explore(uc)                   # on a notebook you already have
+    >>> explore(uc, app_window=True)  # in its own desktop window
     """
     from .terminal import terminal
 
-    return terminal(uc=nb, data=data, sessions=sessions, panels=panels,
+    return terminal(uc=uc, data=data, sessions=sessions, panels=panels,
                     title=title, port=port, debug=debug,
                     open_browser=open_browser, app_window=app_window,
                     jupyter_mode=jupyter_mode, dark=dark, **run_kwargs)
@@ -1411,7 +1429,8 @@ def _in_notebook():
         return False
 
 
-def dashboard(nb, panels, ncols=2, width=600, height=420, title=None,
+@_accepts_nb
+def dashboard(uc, panels, ncols=2, width=600, height=420, title=None,
               controls=True, jupyter_mode='inline', port=8050, debug=False,
               **run_kwargs):
     """Build and launch an interactive Dash board combining unichart figures.
@@ -1422,7 +1441,7 @@ def dashboard(nb, panels, ncols=2, width=600, height=420, title=None,
 
     Parameters
     ----------
-    nb : UnichartNotebook
+    uc : UnichartNotebook
         The notebook whose datasets and plot methods drive the panels. Its
         current ``.select`` state seeds the header's dataset picker, and its
         ``darkmode`` seeds the theme switch.
@@ -1474,7 +1493,7 @@ def dashboard(nb, panels, ncols=2, width=600, height=420, title=None,
     dash.Dash
         The running app instance (useful for inspection / further wiring).
     """
-    app = build_app(nb, panels, ncols=ncols, width=width, height=height,
+    app = build_app(uc, panels, ncols=ncols, width=width, height=height,
                     title=title, controls=controls)
     # The inline iframe defaults to ~650px and would clip a multi-row board, so
     # size it to fit all rows plus the header (caller can override via
@@ -1489,7 +1508,8 @@ def dashboard(nb, panels, ncols=2, width=600, height=420, title=None,
     return app
 
 
-def to_html(nb, panels, path, ncols=2, width=600, height=420, title=None,
+@_accepts_nb
+def to_html(uc, panels, path, ncols=2, width=600, height=420, title=None,
             embed_js='cdn', global_select=True):
     """Write the board to a self-contained static HTML file.
 
@@ -1507,7 +1527,7 @@ def to_html(nb, panels, path, ncols=2, width=600, height=420, title=None,
     ``table`` panels are written as real HTML tables with click-to-sort
     column headers (a ``go.Table`` canvas can't take header clicks), scrolling
     inside their card past ``height``. Seed the slice first
-    (``nb.toggle_darkmode(True)``, dataset ``.select`` flags) if you want a
+    (``uc.toggle_darkmode(True)``, dataset ``.select`` flags) if you want a
     specific one — it becomes the file's initial state.
 
     Parameters mirror :func:`dashboard` (``ncols``, ``width``, ``height``,
@@ -1538,15 +1558,15 @@ def to_html(nb, panels, path, ncols=2, width=600, height=420, title=None,
     Rendering leaves the notebook untouched (``render_panel`` snapshots and
     restores ``.select`` / ``darkmode`` / ``last_*``). Returns ``path``.
     """
-    if not nb.sets:
+    if not uc.sets:
         raise ValueError("The notebook has no datasets loaded.")
     if not panels:
         raise ValueError("Provide at least one panel.")
 
-    theme = 'dark' if getattr(nb, 'darkmode', False) else 'light'
+    theme = 'dark' if getattr(uc, 'darkmode', False) else 'light'
     board_title = title or 'unichart dashboard'
-    default_selected = _selected_indices(nb)
-    all_indices = [ds.index for ds in nb.sets]
+    default_selected = _selected_indices(uc)
+    all_indices = [ds.index for ds in uc.sets]
 
     static_badge = ('<span class="pin-badge" title="This panel type cannot be '
                     're-filtered client-side; it always shows the datasets '
@@ -1566,10 +1586,10 @@ def to_html(nb, panels, path, ncols=2, width=600, height=420, title=None,
         # it isn't said twice.
         def _render(sel):
             return render_panel(
-                nb, method, panel.get('x'), panel.get('y'), sel,
+                uc, method, panel.get('x'), panel.get('y'), sel,
                 suptitle=None, legend=panel.get('legend', 'above'),
                 size=(width, height), extra=panel.get('kwargs'), z=z,
-                darkmode=nb.darkmode,
+                darkmode=uc.darkmode,
             )
 
         badge = ''
@@ -1645,7 +1665,7 @@ def to_html(nb, panels, path, ncols=2, width=600, height=420, title=None,
             f'<span class="chip-dot" style="background:'
             f'{_escape(str(ds.color))}"></span>'
             f'<span>{_escape(str(ds.title_format))}</span></label>'
-            for ds in nb.sets)
+            for ds in uc.sets)
         header_bits.append(
             '<div class="board-group"><span class="control-label">datasets'
             f'</span><div class="chip-list gsel">{chips}</div></div>')
