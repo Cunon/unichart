@@ -138,6 +138,18 @@ def _shutdown(delay=0.4, code=0):
     threading.Timer(delay, stop).start()
 
 
+def _ends_with_semicolon(source):
+    """True when the last token of ``source``, comments aside, is a ``;``."""
+    skip = {tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE, tokenize.INDENT,
+            tokenize.DEDENT, tokenize.ENDMARKER}
+    try:
+        tokens = [t for t in tokenize.generate_tokens(io.StringIO(source).readline)
+                  if t.type not in skip]
+    except (tokenize.TokenError, SyntaxError):
+        return False
+    return bool(tokens) and tokens[-1].string == ';'
+
+
 class _Quitter:
     """``exit`` / ``quit`` in the terminal's namespace.
 
@@ -431,7 +443,9 @@ class Session:
         if isinstance(last, ast.Expr):
             value = eval(compile(ast.Expression(body=last.value),
                                  '<terminal>', 'eval'), self.ns)
-            self._echo(value)
+            # A closing ';' hides the value, as in Jupyter — list_parms();
+            if not _ends_with_semicolon(source):
+                self._echo(value)
         else:
             exec(compile(ast.Module(body=[last], type_ignores=[]),
                          '<terminal>', 'exec'), self.ns)
@@ -478,6 +492,188 @@ def demo_frame(n=90, seed=0):
             'rpm': 900 + 4200 * rise * scale + rng.normal(0, 55, n),
         }))
     return pd.concat(frames, ignore_index=True)
+
+
+
+def battery_frame(seed=1):
+    """Four cells discharged at different C-rates, each logged every 20 s.
+
+    The runs end at different times, so they only line up against state of
+    charge — which is what ``table(x_in=...)`` and ``delta(align_on=...)`` are for.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    frames = []
+    for idx, c_rate in enumerate((0.5, 1.0, 2.0, 3.0)):
+        capacity = 5.0 * (1 - 0.035 * c_rate)              # Ah delivered
+        current = 5.0 * c_rate
+        t = np.arange(0.0, capacity / current * 3600, 20.0)
+        soc = 100 * (1 - current * t / 3600 / 5.0)
+        s = np.clip(soc / 100, 0, 1)
+        ocv = 3.35 + 0.75 * s - 0.25 * np.exp(-s / 0.06) + 0.1 * np.exp((s - 1) / 0.05)
+        temp = 25 + 6 * c_rate ** 1.5 * (1 - np.exp(-t / 900)) * (1 + 0.4 * (1 - s))
+        frames.append(pd.DataFrame({
+            'SETNUMBER': idx,
+            'TITLE': f'{c_rate:g}C discharge',
+            'time_s': t,
+            'soc_pct': soc.round(2),
+            'voltage_v': (ocv - current * 0.018 + rng.normal(0, 0.004, t.size)).round(4),
+            'current_a': np.full(t.size, current),
+            'temp_c': (temp + rng.normal(0, 0.15, t.size)).round(2),
+        }))
+    return pd.concat(frames, ignore_index=True)
+
+
+def compressor_frame(seed=2):
+    """A compressor map: four speed lines, each swept from surge to choke.
+
+    Scattered (flow, pressure ratio) points with an efficiency at each — the
+    shape ``contour``, ``hue`` and ``plot_marginal`` are built for.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    frames = []
+    for idx, speed in enumerate((70, 80, 90, 100)):
+        n = speed / 100
+        flow = np.linspace(4.0 * n ** 1.3, 7.2 * n ** 1.1, 22)
+        x = (flow - flow[0]) / (flow[-1] - flow[0])          # 0 surge, 1 choke
+        pr = 1 + 2.6 * n ** 2.2 * (1 - 0.55 * x ** 2.5)
+        eff = 86 - 4 * (1 - n) * 10 - 30 * (x - 0.45) ** 2 - 25 * (n - 0.88) ** 2
+        frames.append(pd.DataFrame({
+            'SETNUMBER': idx,
+            'TITLE': f'{speed}% speed',
+            'flow_kgs': (flow + rng.normal(0, 0.02, flow.size)).round(3),
+            'pressure_ratio': (pr + rng.normal(0, 0.01, flow.size)).round(3),
+            'efficiency_pct': (eff + rng.normal(0, 0.35, flow.size)).round(2),
+            'speed_pct': speed,
+        }))
+    return pd.concat(frames, ignore_index=True)
+
+
+def weather_frame(seed=3):
+    """A year of daily weather at four stations: one set per station, with
+    ``month`` and ``season`` columns to group by."""
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    day = np.arange(1, 366)
+    month = pd.to_datetime(day - 1, unit='D', origin='2025-01-01').month
+    season = np.array(['winter', 'spring', 'summer', 'autumn'])[(month % 12) // 3]
+    stations = [('Coastal', 14, 6, 3.2, 22), ('Inland', 12, 13, 1.8, 14),
+                ('Mountain', 4, 10, 2.6, 26), ('Desert', 22, 11, 0.3, 18)]
+    frames = []
+    for idx, (name, mean, swing, rain, wind) in enumerate(stations):
+        temp = mean - swing * np.cos(2 * np.pi * (day - 15) / 365)
+        wet = rng.random(day.size) < 0.25 + 0.15 * np.cos(2 * np.pi * day / 365)
+        frames.append(pd.DataFrame({
+            'SETNUMBER': idx,
+            'TITLE': name,
+            'day': day,
+            'month': month,
+            'season': season,
+            'temp_c': (temp + rng.normal(0, 2.5, day.size)).round(1),
+            'rain_mm': np.where(wet, rng.gamma(1.2, rain * 3, day.size), 0).round(1),
+            'wind_kmh': rng.gamma(4, wind / 4, day.size).round(1),
+        }))
+    return pd.concat(frames, ignore_index=True)
+
+
+# Example datasets offered on the sidebar. Each brings its own cheat sheet,
+# since snippets are only worth clicking if they run on the columns at hand.
+# Snippets are templates: {sets} is the range of set indices this example
+# landed on ('3:7' after three sets already loaded) and {s0}, {s1}, ... its
+# sets one by one. Sets a snippet creates (a delta, a combine) are selected by
+# what the call returns, not by guessing the index they will get.
+# A load appends, so whatever was loaded before is kept, just deselected.
+EXAMPLES = [
+    dict(key='engine', label='Engine warm-up', frame=demo_frame,
+         about='Three engine runs warming up over 30 s: time, temperature, pressure, rpm',
+         blurb="plot · by='sets' · plot_ymult · delta",
+         start=["plot(x='time', y=['temperature', 'pressure'])"],
+         snippets=[
+             ("plot(x='time', y=['temperature', 'pressure'])", True),
+             ("plot(x='time', y='rpm', by='sets')", True),
+             ("plot_ymult(x='time', y=['temperature', 'pressure', 'rpm'])", True),
+             ("select(delta(base_idx={s0}, study_indices=[{s1}, {s2}], "
+              "align_on='time', delta_parms=['temperature'])); "
+              "plot(x='time', y='DL_temperature')", True),
+             ("select([{s0}, {s1}])", False),
+             ("omit({s2})", False),
+             ("restore('{sets}')", False),
+             ("color({s0}, 'red')", False),
+             ("var_format('pressure', linestyle='--'); "
+              "plot(x='time', y='pressure')", True),
+             ("summary()", False),
+             ("list_sets()", False),
+         ]),
+    dict(key='battery', label='Battery discharge', frame=battery_frame,
+         about='Four cells discharged at 0.5C to 3C: time_s, soc_pct, voltage_v, temp_c',
+         blurb='table(x_in=) · plot_ymult · line · delta',
+         start=["plot(x='soc_pct', y='voltage_v')"],
+         snippets=[
+             ("plot(x='soc_pct', y='voltage_v')", True),
+             ("table(cols='voltage_v', x_col='soc_pct', x_in=[80, 50, 20], "
+              "sig_figs=4)", True),
+             ("plot_ymult(x='time_s', y=['voltage_v', 'temp_c'])", True),
+             ("plot(x='time_s', y=['voltage_v', 'temp_c'], by='sets')", True),
+             ("line('voltage_v', 3.2, label='cutoff'); "
+              "plot(x='soc_pct', y='voltage_v')", True),
+             ("select(delta(base_idx={s0}, study_indices=[{s3}], "
+              "align_on='soc_pct', delta_parms=['voltage_v'])); "
+              "plot(x='soc_pct', y='DL_voltage_v')", True),
+             ("summary(cols=['voltage_v', 'temp_c'])", True),
+             ("list_parms();", False),
+         ]),
+    dict(key='compressor', label='Compressor map', frame=compressor_frame,
+         about='Four compressor speed lines, surge to choke: flow_kgs, pressure_ratio, efficiency_pct',
+         blurb='contour · hue · reg_order · plot_marginal',
+         start=["marker('{sets}', 'o')",
+                "plot(x='flow_kgs', y='pressure_ratio')"],
+         snippets=[
+             ("plot(x='flow_kgs', y='pressure_ratio')", True),
+             ("select(combine_sets('{sets}', title='whole map')); "
+              "contour(x='flow_kgs', y='pressure_ratio', z='efficiency_pct')", True),
+             ("hue('{sets}', 'efficiency_pct'); "
+              "plot(x='flow_kgs', y='pressure_ratio')", True),
+             ("reg_order('{sets}', 2); plot(x='flow_kgs', y='efficiency_pct')", True),
+             ("plot_marginal(x='flow_kgs', y='efficiency_pct', marginal='box')", True),
+             ("linestyle('{sets}', '-')", False),
+             ("list_sets()", False),
+         ]),
+    dict(key='weather', label='Weather stations', frame=weather_frame,
+         about='A year of daily weather at four stations: day, month, season, temp_c, rain_mm, wind_kmh',
+         blurb='box · bar(agg=) · histogram · query',
+         start=["plot(x='day', y='temp_c')"],
+         snippets=[
+             ("plot(x='day', y='temp_c')", True),
+             ("box(x='season', y='temp_c')", True),
+             ("bar(x='month', y='rain_mm', agg='sum')", True),
+             ("histogram(x='wind_kmh', nbins=30)", True),
+             ("query('{sets}', 'season == \"summer\"'); plot(x='day', y='temp_c')", True),
+             ("query('{sets}', None)  # back to every row", True),
+             ("summary(cols=['temp_c', 'rain_mm'])", True),
+             ("list_sets()", False),
+         ]),
+]
+
+
+def _example_fields(first, count):
+    """Template fields for an example whose ``count`` sets start at ``first``."""
+    fields = {f's{i}': first + i for i in range(count)}
+    fields['sets'] = f'{first}:{first + count}'
+    return fields
+
+
+def example_commands(example, first, count):
+    """What loading ``example`` runs after its ``uc.load``, and its cheat sheet,
+    both with the set indices filled in."""
+    fields = _example_fields(first, count)
+    start = [f"select('{first}:{first + count}')"] if first else []
+    start += [cmd.format(**fields) for cmd in example['start']]
+    sheet = [(snippet.format(**fields), wide) for snippet, wide in example['snippets']]
+    return start, sheet
 
 
 # ---------------------------------------------------------------------------
@@ -683,6 +879,20 @@ body.term-dragging iframe {{ pointer-events: none; }}
 .term-drop b {{ color: {INK}; font-weight: 600; }}
 .term-drop .exts {{ font-size: 10.5px; margin-top: 6px; display: block; }}
 
+/* Example datasets: one button each, name over the methods it shows off. */
+.term-examples {{ display: flex; flex-direction: column; gap: 5px; margin-top: 10px; }}
+.term-examples-note {{ color: {MUTED}; font-size: 11px; }}
+.term-example {{
+  text-align: left; background: {BG}; color: {INK}; cursor: pointer;
+  border: 1px solid {HAIRLINE}; border-radius: 6px; padding: 6px 8px;
+  font-size: 12px; line-height: 1.35;
+  transition: border-color 120ms, background 120ms;
+}}
+.term-example:hover {{ border-color: {ACCENT}; background: rgba(59,130,246,0.10); }}
+.term-example b {{ font-weight: 600; display: block; }}
+.term-example span {{ color: {MUTED}; font-size: 10.5px; font-family: {MONO_FONT};
+                      display: block; margin-top: 2px; }}
+
 .term-set {{ display: flex; align-items: center; gap: 8px; padding: 4px 2px; }}
 .term-swatch {{ width: 11px; height: 11px; border-radius: 3px; flex: none; }}
 .term-set-idx {{ color: {MUTED}; font-variant-numeric: tabular-nums; }}
@@ -867,6 +1077,20 @@ def _dataset_rows(html, uc):
     return rows
 
 
+def _chips(html, sheet):
+    """Cheat-sheet buttons for ``sheet``, a list of (snippet, is_wide)."""
+    return [
+        html.Button(
+            # Highlighted the same way the transcript is, so a snippet
+            # looks identical before and after you run it.
+            [s for line in _code_spans(html, snippet) for s in line],
+            id={'type': 'term-chip', 'index': i}, n_clicks=0,
+            className='term-chip wide' if wide else 'term-chip',
+            title='Click to put this in the terminal')
+        for i, (snippet, wide) in enumerate(sheet)
+    ]
+
+
 def _sidebar(html, dcc, uc):
     return html.Div([
         html.Div([
@@ -880,6 +1104,16 @@ def _sidebar(html, dcc, uc):
                     html.Span('or a saved session — .json · .png',
                               className='exts'),
                 ])),
+            html.Div([
+                html.Span('…or try an example, with a cheat sheet to match:',
+                          className='term-examples-note'),
+            ] + [
+                html.Button([html.B(ex['label']), html.Span(ex['blurb'])],
+                            id={'type': 'term-example', 'index': i}, n_clicks=0,
+                            className='term-example',
+                            title=ex['about'])
+                for i, ex in enumerate(EXAMPLES)
+            ], className='term-examples'),
         ], className='term-section'),
 
         html.Div([
@@ -888,17 +1122,9 @@ def _sidebar(html, dcc, uc):
         ], className='term-section'),
 
         html.Div([
-            html.Span('Cheat sheet', className='term-label'),
-            html.Div([
-                html.Button(
-                    # Highlighted the same way the transcript is, so a snippet
-                    # looks identical before and after you run it.
-                    [s for line in _code_spans(html, snippet) for s in line],
-                    id={'type': 'term-chip', 'index': i}, n_clicks=0,
-                    className='term-chip wide' if wide else 'term-chip',
-                    title='Click to put this in the terminal')
-                for i, (snippet, wide) in enumerate(CHEAT_SHEET)
-            ], className='term-chips'),
+            html.Span('Cheat sheet', id='term-cheat-label', className='term-label'),
+            html.Div(_chips(html, CHEAT_SHEET), id='term-chips',
+                     className='term-chips'),
         ], className='term-section'),
 
         html.Div([
@@ -1021,9 +1247,6 @@ def build_terminal_app(uc, title=None, banner=True, startup=(),
                             className='term-btn',
                             title='Download the data, formatting and current '
                                   'plot as a session file you can reopen'),
-                html.Button('Load demo data', id='term-demo', n_clicks=0,
-                            className='term-btn',
-                            title='Load a three-run demo dataset'),
                 html.A('Gallery', href=gallery_href or GALLERY_URL,
                        target='_blank', className='term-link',
                        title='Example gallery — every plot type on one page, '
@@ -1075,6 +1298,9 @@ def build_terminal_app(uc, title=None, banner=True, startup=(),
 
         dcc.Store(id='term-entries', data=entries),
         dcc.Store(id='term-history', data=list(startup)),
+        # The cheat sheet on screen, so a chip click resolves to its own text
+        # after an example has swapped the sheet out.
+        dcc.Store(id='term-cheats', data=[list(c) for c in CHEAT_SHEET]),
         dcc.Download(id='term-save-download'),
         html.Div(id='term-resize-sink', className='hidden'),
         _quit_dialog(html) if allow_quit else None,
@@ -1139,7 +1365,7 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
 
     One callback owns the transcript, the chart, the dataset list and the input
     box, because every trigger — submitting a command, clicking a cheat-sheet
-    chip, dropping a file, loading the demo, saving the session — wants to write
+    chip, dropping a file, loading an example, saving the session — wants to write
     some subset of those four. Splitting them would mean two callbacks with the
     same Output, which Dash rejects at construction. Saving could have been a
     sibling callback, since ``dcc.Download`` is an Output of its own — but then
@@ -1156,11 +1382,15 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
         Output('term-history', 'data'),
         Output('term-upload', 'contents'),
         Output('term-save-download', 'data'),
+        Output('term-chips', 'children'),
+        Output('term-cheat-label', 'children'),
+        Output('term-cheats', 'data'),
         Input('term-submit', 'n_clicks'),
         Input('term-upload', 'contents'),
-        Input('term-demo', 'n_clicks'),
+        Input({'type': 'term-example', 'index': ALL}, 'n_clicks'),
         Input('term-save', 'n_clicks'),
         Input({'type': 'term-chip', 'index': ALL}, 'n_clicks'),
+        State('term-cheats', 'data'),
         State('term-input', 'value'),
         State('term-entries', 'data'),
         State('term-history', 'data'),
@@ -1168,26 +1398,28 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
         State('term-chart', 'figure'),
         prevent_initial_call=True,
     )
-    def _dispatch(submit_n, upload_contents, demo_n, save_n, chip_clicks,
-                  source, entries, history, upload_names, current_figure):
+    def _dispatch(submit_n, upload_contents, example_clicks, save_n, chip_clicks,
+                  cheats, source, entries, history, upload_names, current_figure):
         trigger = ctx.triggered_id
         entries = list(entries or [])
         history = list(history or [])
         download = no_update
+        sheet = no_update          # the cheat sheet changes only with an example
+        nothing = (no_update,) * 11
 
         # A chip only stages text in the input — the user still presses Enter,
         # so a mis-click is editable rather than immediately executed.
         if isinstance(trigger, dict) and trigger.get('type') == 'term-chip':
             if not any(chip_clicks or []):
-                return (no_update,) * 8
-            snippet = CHEAT_SHEET[trigger['index']][0]
+                return nothing
+            snippet = (cheats or CHEAT_SHEET)[trigger['index']][0]
             return (no_update, no_update, no_update, no_update,
-                    snippet, no_update, no_update, no_update)
+                    snippet) + (no_update,) * 6
 
         commands = []
         if trigger == 'term-upload':
             if not upload_contents:
-                return (no_update,) * 8
+                return nothing
             for contents, name in zip(upload_contents, upload_names or []):
                 try:
                     raw = _upload_bytes(contents)
@@ -1213,14 +1445,24 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
                 # load — and so re-running it from history actually works.
                 frame.to_csv(path, index=False)
                 commands.append(f'uc.load({str(path)!r})')
-        elif trigger == 'term-demo':
-            path = uploads / 'demo.csv'
-            demo_frame().to_csv(path, index=False)
+        elif isinstance(trigger, dict) and trigger.get('type') == 'term-example':
+            if not any(example_clicks or []):
+                return nothing
+            example = EXAMPLES[trigger['index']]
+            frame = example['frame']()
+            path = uploads / f"example-{example['key']}.csv"
+            frame.to_csv(path, index=False)
+            # Appended, not swapped in: what was loaded stays, deselected, and
+            # the example's snippets name the set indices it actually got.
+            first = len(uc.sets)
+            start, cheat_list = example_commands(example, first,
+                                                 frame['SETNUMBER'].nunique())
             commands.append(f'uc.load({str(path)!r})')
-            commands.append("plot(x='time', y=['temperature', 'pressure'])")
+            commands.extend(start)
+            sheet = cheat_list
         elif trigger == 'term-save':
             if not save_n or not uc.sets:
-                return (no_update,) * 8
+                return nothing
             # Written to the uploads dir and then handed to the browser: the
             # board is served to a browser, so "save" has to mean a download,
             # not a file left on whichever machine is running the server. Named
@@ -1230,7 +1472,7 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
             commands.append(f'uc.save_session({str(save_path)!r})')
         else:
             if not (source or '').strip():
-                return (no_update,) * 8
+                return nothing
             commands.append(source.strip())
 
         figure = current_figure
@@ -1246,8 +1488,13 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
         if trigger == 'term-save' and save_path.exists():
             download = dcc.send_file(str(save_path))
 
+        if sheet is no_update:
+            sheet_out = (no_update,) * 3
+        else:
+            sheet_out = (_chips(html, sheet), f"Cheat sheet · {example['label']}",
+                         [list(c) for c in sheet])
         return (entries, _entry_divs(html, entries), figure,
-                _dataset_rows(html, uc), '', history, None, download)
+                _dataset_rows(html, uc), '', history, None, download) + sheet_out
 
     # Enter runs, Shift+Enter adds a line, up/down walks history. All of it is
     # clientside: an arrow key must never cost a server round trip, and the

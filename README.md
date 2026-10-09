@@ -545,7 +545,7 @@ and a Python terminal underneath.
 from unichart.dashboard import explore
 
 explore(data='runs.csv')   # standalone — serves the board and opens your browser
-explore()                  # empty; drop a file on the sidebar, or hit "Load demo data"
+explore()                  # empty; drop a file on the sidebar, or pick an example
 uc.explore()               # on a notebook you already have (inline in Jupyter)
 uc.explore(app_window=True)  # in its own desktop window instead of a browser tab
 ```
@@ -573,7 +573,21 @@ sheet reads the way the library does, and `uc` covers everything else:
 - **Drag the pane edges** to resize: the sidebar's right edge and the divider
   between the chart and the terminal. Double-click an edge to reset it. Sizes
   are remembered per browser, and the chart reflows as you drag.
+- **Example datasets** under the drop zone, each picked to show off a family
+  of methods, with a cheat sheet that swaps to match:
+
+  | Example | Shape | Try |
+  |---|---|---|
+  | Engine warm-up | three runs over time | `plot`, `by='sets'`, `plot_ymult`, `delta` |
+  | Battery discharge | four C-rates, different lengths | `table(x_in=...)`, `plot_ymult`, `line`, `delta` |
+  | Compressor map | four speed lines of scattered points | `contour`, `hue`, `reg_order`, `plot_marginal` |
+  | Weather stations | a year of days at four sites | `box`, `bar(agg=...)`, `histogram`, `query` |
+
+  An example is appended to what is already loaded, not swapped in: your data
+  stays, deselected, and the example's snippets name the set numbers it landed
+  on.
 - A trailing expression echoes its value, like any REPL — `1 + 1` prints `2`.
+  End the line with `;` to hide it, as in Jupyter: `list_parms();`.
 - Plots go to the chart pane; `table()` / `summary()` / `list_parms()` render as
   their real sortable, filterable HTML tables inline in the transcript.
 - Errors show a traceback trimmed to the line you typed.
