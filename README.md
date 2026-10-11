@@ -204,7 +204,7 @@ uc.save_png_defaults(scale=2, embed_session='all')
 - **Ahead of the notebook-wide defaults.** A stored value counts as if it were
   typed into the call, so it outranks `set_default_format`, `uc.figsize`,
   `uc.ncols` and the remembered `last_x` / `last_y`. Those still fill whatever
-  is left.
+  is left (see [How the defaults combine](#how-the-defaults-combine)).
 - **Pairs.** A call that passes `ncols` or `nrows` skips the other's stored
   value. `sig_figs` / `decimals` work the same way, and storing one drops the
   other.
@@ -215,6 +215,88 @@ uc.save_png_defaults(scale=2, embed_session='all')
   value with no JSON form, such as a function, is left out with a warning.
   `reset_format('defaults')` or `set_default_format(reset=True)` clears every
   method's. Values are checked when the method runs, not when they are stored.
+
+### How the defaults combine
+
+There are two families of defaults. Some `set_default_format` arguments feed
+one family and some feed the other.
+
+**Call arguments** (`ncols`, `nrows`, `figsize`, `legend`, `hspace`,
+`barmode`, `agg`, `x`, …) are resolved on every call. The first layer that has
+a value wins:
+
+1. The argument as typed in the call.
+2. The method's `_defaults` sister (`plot_defaults`, `bar_defaults`, …). Its
+   values are put into the call as if you had typed them.
+3. The notebook-wide setting: `set_default_format(...)` or its attribute
+   spelling (`uc.ncols`, `uc.nrows`, `uc.hspace`, `uc.figsize`, …). For `x`
+   and `y`, the columns the last plot used. This layer reaches every method
+   that takes the argument, so `set_default_format(barmode='stack')` affects
+   both `bar` and `histogram`, while `bar_defaults(barmode='stack')` affects
+   only `bar`.
+4. The method's built-in value. The built-in can differ by method; for
+   example, `barmode` is `'group'` for `bar` but `'overlay'` for `histogram`.
+
+```python
+uc.ncols = 3                      # notebook-wide
+uc.plot_defaults(ncols=2)         # plot only
+uc.plot(x='t', y=['a', 'b', 'c', 'd'])            # 2 columns: plot_defaults outranks uc.ncols
+uc.bar(x='cfg', y=['a', 'b', 'c', 'd'])           # 3 columns: bar has no stored ncols
+uc.plot(x='t', y=['a', 'b', 'c', 'd'], ncols=1)   # 1 column, this call only
+```
+
+Points that follow from this order:
+
+- **`ncols` and `nrows` are resolved as a pair, across layers.** If one of them
+  comes from the call or the method layer, neither notebook-wide value is used.
+  With `uc.nrows = 3` and `uc.plot_defaults(ncols=2)`, a `plot` call gets
+  2 columns and as many rows as the panels need. It does not get a 2 × 3 grid.
+  The method layer treats `sig_figs` / `decimals` and `alpha` / `opacity`
+  the same way.
+- **An explicit `None` skips only the method layer.** `uc.plot(legend=None)`
+  ignores the `legend` stored by `plot_defaults` and uses
+  `set_default_format(legend=)` if that is set. The built-in is used only when
+  neither is set. So `None` means "as if `plot_defaults` didn't exist", not
+  "use the built-in". To get the built-in for one call, pass its value
+  (`legend='above'`).
+- **`uc.plot_size` beats `figsize`, even one typed in the call.** A pinned
+  plot-area width or height sets that dimension of the figure. `figsize`, from
+  any layer, controls only the dimensions left unpinned.
+- **Nested calls see only what they are passed.** `plot(by='ymult')` hands off
+  to `plot_ymult` without `plot_ymult_defaults`. The `plot` call's own layers
+  have already been resolved by then.
+
+**Dataset style** (`markersize`, `linestyle`, `linewidth`, `marker`, `alpha`,
+`fill`, `sig_figs` / `decimals`, …) is resolved per attribute when a trace is
+drawn:
+
+1. `var_format(column, ...)`: every line of that column.
+2. Per-dataset: `uc.markersize(0, 12)`, `uc.sig_figs(1, 4)`, ….
+3. `set_default_format(...)`. These values are copied into each dataset **as
+   it loads**, so changing them later doesn't restyle the sets already loaded.
+   After `uc.set_default_format(markersize=15)`, only sets you load from then
+   on get 15. The one-argument forms `uc.sig_figs(4)` and `uc.decimals(2)`
+   are the exceptions: they change the default and every loaded set too.
+
+The two families meet in a few places:
+
+- **`alpha`** is in both. `set_default_format(alpha=)` sets new datasets'
+  opacity and also the default `alpha` argument of `histogram` and
+  `plot_marginal`.
+- **A `sig_figs` or `decimals` call argument replaces every set's own
+  precision for that call.** Leave it out of `table()`, `summary()` and their
+  `_defaults` to let each set's precision show. Pass it, directly or through
+  `table_defaults(sig_figs=3)`, and every row uses the passed value.
+- **The plot style owns some defaults.** `set_plot_style` / `uc.plot_style`
+  install their own `markersize`, `hue_palette`, color map and font sizes,
+  replacing any earlier `set_default_format(markersize=)`. Call
+  `set_plot_style` first, then the defaults that should survive it.
+
+**Resets:** `reset_format('defaults')` and `set_default_format(reset=True)`
+clear both families' notebook-wide layers at once: `set_default_format`
+values, the attributes, every `_defaults` sister, `figsize` and the plot
+style. Loaded datasets keep their style until `reset_format('sets')`. To clear
+only one method's stored defaults, use `uc.plot_defaults(reset=True)`.
 
 ---
 
