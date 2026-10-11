@@ -13,9 +13,9 @@ session::
     unichart --gallery                    # open the example gallery and exit
 
 A FILE can also be a saved session — a ``.json`` from ``uc.save_session`` or a
-PNG from ``uc.save_png``, which carries its session in a metadata chunk. Those
-are restored rather than read as data, bringing back the datasets, the queries,
-the formatting and the plot itself::
+PNG from ``uc.save_png(..., embed_session='all')``, which carries its session
+in a metadata chunk. Those are restored rather than read as data, bringing back
+the datasets, the queries, the formatting and the plot itself::
 
     unichart plot.png                     # reopen the plot that PNG came from
     unichart board.json --info            # inspect a session without serving

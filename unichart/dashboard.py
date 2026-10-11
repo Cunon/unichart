@@ -1352,8 +1352,9 @@ def explore(uc=None, data=None, sessions=None, panels=None, title=None,
     data : str | DataFrame | list, optional
         Loaded before the board opens, via ``uc.load``.
     sessions : str | Path | list, optional
-        Session files (``.json``, or a PNG from ``save_png``) restored at
-        startup, as visible ``uc.load_session(...)`` commands — so the board
+        Session files (``.json``, or a PNG from ``save_png`` with
+        ``embed_session``) restored at startup, as visible
+        ``uc.load_session(...)`` commands — so the board
         opens on the plot the session recorded, in the theme it was saved in.
         Restored after ``data``, and before ``panels``.
     dark : bool, optional

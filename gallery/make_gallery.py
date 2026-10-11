@@ -250,8 +250,8 @@ SECTION_INTROS = {
           <dd>A copy of your own. The next unichart plot empties the figure it replaces,
             to free memory.</dd>
           <dt><code>uc.save_png()</code></dt>
-          <dd>Saves <code>last_fig</code>, edits made in place included, though the session
-            it embeds replays only the unichart call. Save a copy with
+          <dd>Saves <code>last_fig</code>, edits made in place included, though a session
+            embedded with <code>embed_session</code> replays only the unichart call. Save a copy with
             <code>fig.write_image()</code> or <code>fig.write_html()</code>.</dd>
         </dl>
       </div>

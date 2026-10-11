@@ -159,6 +159,42 @@ def test_summary_and_table_frames():
     assert isinstance(table, pd.DataFrame) and not table.empty
 
 
+def test_table_copy_query_button():
+    """table()'s toolbar gets a Copy query button, and the page gets each
+    column's query spelling and raw kind (its cells are display text by
+    then); summary() shares the widget but has no data columns to query."""
+    import unichart._core as core
+    nb = _notebook()
+    shown = []
+    real_display, core.display = core.display, shown.append
+    try:
+        with redirect_stdout(io.StringIO()):
+            nb.table(cols=['phase', 'rpm'])
+            nb.summary(cols=['rpm'])
+            odd = pd.DataFrame({'</script>': [1.0]})
+            nb._display_html_table(odd, query_cols=nb._query_columns(odd))
+    finally:
+        core.display = real_display
+    table_html, summary_html, odd_html = (obj.data for obj in shown)
+
+    assert '<button class="uc-query-btn"' in table_html
+    assert ('var QUERY_COLS = [{"ref": "Set", "kind": "num"}, '
+            '{"ref": "Dataset", "kind": "str"}, {"ref": "phase", "kind": "str"}, '
+            '{"ref": "rpm", "kind": "num"}];') in table_html
+    assert '<button class="uc-query-btn"' not in summary_html
+    assert 'var QUERY_COLS = null;' in summary_html
+    # A column name can't close the script tag early.
+    assert odd_html.count('</script>') == 1
+
+    frame = pd.DataFrame({'rpm': [1.0, None], 'Power (kW)': [1, 2],
+                          'class': ['001', None], 'ok': [True, False],
+                          'when': pd.to_datetime(['2024-01-05', None])})
+    assert UnichartNotebook._query_columns(frame) == [
+        {'ref': 'rpm', 'kind': 'num'}, {'ref': '`Power (kW)`', 'kind': 'num'},
+        {'ref': '`class`', 'kind': 'str'}, {'ref': 'ok', 'kind': 'bool'},
+        {'ref': 'when', 'kind': 'other'}]
+
+
 def test_styles_and_dark_mode():
     def call(nb):
         nb.set_plot_style('plotly')

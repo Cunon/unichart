@@ -107,6 +107,25 @@ def test_sniff_session_recognises_every_shape(tmp_path):
     assert read_png_session(str(plain_png)) is None
 
 
+def test_save_png_embeds_session_only_when_asked(tmp_path):
+    """save_png writes a plain image by default; embed_session opts in."""
+    nb, _ = _notebook(tmp_path)
+
+    class _Fig:  # stands in for the kaleido render
+        def write_image(self, filename, **kwargs):
+            Path(filename).write_bytes(_blank_png())
+
+    nb._full_legend_figure = lambda fig: _Fig()
+    plain, embedded = tmp_path / 'plain.png', tmp_path / 'embedded.png'
+    with redirect_stdout(io.StringIO()):
+        nb.save_png(str(plain))
+        nb.save_png(str(embedded), embed_session='all')
+
+    assert read_png_session(str(plain)) is None
+    session = read_png_session(str(embedded))
+    assert session['plot_call']['method'] == 'plot'
+
+
 # ---------------------------------------------------------------------------
 # The plot call now rides along in JSON
 # ---------------------------------------------------------------------------

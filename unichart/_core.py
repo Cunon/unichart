@@ -55,6 +55,7 @@ import contextlib
 import contextvars
 import gc
 import json
+import keyword
 import os
 import sys
 import base64
@@ -11494,7 +11495,17 @@ class UnichartNotebook:
               applied; a filtered column stays marked with an accent-colored
               ``⌕`` and header underline, and hovering ``⌕`` shows the
               active filter. Esc clears and closes a filter. The Copy button
-              copies only the rows currently shown.
+              copies only the rows currently shown. Next to it, ``Copy
+              query`` copies the active filters on all columns, AND-ed in
+              table order, as one :meth:`pandas.DataFrame.query` string,
+              ready for :meth:`query`: ``>5 & <20`` in ``power`` plus
+              ``idle, cruise`` in ``mode`` copies as ``power > 5 and power < 20 and
+              mode.str.contains("idle|cruise", case=False, na=False)``.
+              Text tests stay case-insensitive like the filter boxes
+              (``mode.str.lower() == "idle"``). ``Set`` and ``Dataset``
+              (and ``INTERPOLATED``/``METHOD``) exist only in the table, so
+              drop filters on those before passing the string to
+              :meth:`query`, which takes the sets as its first argument.
             - ``'df'``: return the assembled :class:`pandas.DataFrame`.
             - ``'md'``: return a GitHub-flavored Markdown string.
             - ``'fig'``: return the styled Plotly ``go.Figure`` (a ``go.Table``),
@@ -11734,6 +11745,8 @@ class UnichartNotebook:
         float_cols = (list(final_df.select_dtypes(include='float').columns)
                       if sig_figs is not None or decimals is not None or per_set_sig
                       else [])
+        # Same reason: the Copy query button needs each column's raw kind.
+        query_cols = self._query_columns(final_df) if output is None else None
 
         final_df = final_df.fillna('-')
 
@@ -11766,9 +11779,41 @@ class UnichartNotebook:
             return fig
 
         self._display_html_table(self._format_table_display(final_df),
-                                 title=title, max_rows=max_rows)
+                                 title=title, max_rows=max_rows,
+                                 query_cols=query_cols)
 
     table_defaults = _method_defaults_setter(table, "cols=['speed', 'power'], sig_figs=3")
+
+    @staticmethod
+    def _query_columns(frame):
+        """
+        Per-column facts the table's Copy query button needs and can't read
+        back from the displayed cells: ``ref``, the column as
+        :meth:`pandas.DataFrame.query` spells it (backtick-quoted unless a
+        plain identifier), and ``kind``: ``'num'``, ``'bool'``, ``'str'``
+        (``.str`` methods work as-is) or ``'other'`` (dates, mixed objects —
+        stringified first). Read from the raw frame, before ``fillna('-')``
+        turns a numeric column with gaps into an object one.
+        """
+        cols = []
+        for i, name in enumerate(frame.columns):
+            text = str(name)
+            ref = (text if text.isidentifier() and not keyword.iskeyword(text)
+                   else f"`{text}`")
+            values = frame.iloc[:, i]
+            if isinstance(values.dtype, pd.CategoricalDtype):
+                values = values.cat.categories
+            inferred = pd.api.types.infer_dtype(values, skipna=True)
+            if inferred == 'boolean':
+                kind = 'bool'
+            elif inferred in ('integer', 'floating', 'mixed-integer-float', 'decimal'):
+                kind = 'num'
+            elif inferred in ('string', 'empty'):
+                kind = 'str'
+            else:
+                kind = 'other'
+            cols.append({'ref': ref, 'kind': kind})
+        return cols
 
     def _set_display_fmt(self, sig_figs, decimals):
         """Formatter for one set's displayed values, from its ``sig_figs`` /
@@ -11872,7 +11917,8 @@ class UnichartNotebook:
         self.last_fig = fig
         return self._apply_fonts(fig)
 
-    def _display_html_table(self, display_df, title=None, max_rows=None):
+    def _display_html_table(self, display_df, title=None, max_rows=None,
+                            query_cols=None):
         """
         Render ``display_df`` (values already formatted for display) as the
         shared styled HTML table: click-to-sort headers, per-column ``⌕``
@@ -11880,7 +11926,11 @@ class UnichartNotebook:
         only), and a light/dark palette following ``self.darkmode``. Used by
         :meth:`table`, :meth:`summary`, :meth:`list_sets` and
         :meth:`list_parms`. ``max_rows`` caps the visible height at that many
-        rows, scrolling the rest under a pinned header.
+        rows, scrolling the rest under a pinned header. ``query_cols`` (from
+        :meth:`_query_columns`, one entry per column) adds a Copy query
+        button that copies the active filters as a ``DataFrame.query``
+        string; only :meth:`table` passes it, since the other tables' columns
+        aren't data columns.
         """
         header_size = self.table_header_size or 22
         cell_size = self.table_cell_size or 20
@@ -12005,7 +12055,10 @@ class UnichartNotebook:
                 return text.toLowerCase() === value.toLowerCase();
             }
 
-            // A single filter term. Accepts both the shorthand and
+            // Parse a single filter term into a node ({op: ...}). The row
+            // matcher (termMatches) and the Copy query writer (termQuery)
+            // both walk these, so a copied query can't drift from what the
+            // table shows. Accepts both the shorthand and
             // DataFrame.query-style forms:
             //   >10  >=10  <10  <=10  =10  ==10  !=10  5..20
             //   == "idle"   != 'idle'   "idle" (quoted = exact match)
@@ -12015,85 +12068,105 @@ class UnichartNotebook:
             // operator, `in`, or `not`. Unquoted terms containing `*`/`?`
             // are fnmatch-style wildcards matched against the whole cell
             // (`alt*` = starts with, `*ft` = ends with). Anything else is
-            // a case-insensitive substring match.
-            function matchesTerm(term, text, label) {
+            // a case-insensitive substring match. Returns null for an
+            // empty term.
+            function parseTerm(term, label) {
                 term = term.trim();
-                if (!term) return true;
                 if (label) {
                     term = term.replace(new RegExp(
                         "^" + reEsc(label) + "\\\\s*(?=[<>=!]|in\\\\b|not\\\\b)", "i"), "").trim();
-                    if (!term) return true;
                 }
+                if (!term) return null;
                 var m = term.match(/^not\\s+(.+)$/i);
-                if (m) return !matchesTerm(m[1], text, null);
+                if (m) {
+                    var inner = parseTerm(m[1], null);
+                    return inner && {op: "not", term: inner};
+                }
                 m = term.match(/^in\\s*[\\[(]([^\\])]*)[\\])]$/i);
                 if (m) {
-                    return splitTop(m[1], ",").some(function(item) {
-                        return eqMatch(unquote(item).text, text);
-                    });
+                    return {op: "in", values: splitTop(m[1], ",").map(function(item) {
+                        return unquote(item).text;
+                    })};
                 }
                 m = term.match(/^(==|!=|>=|<=|>|<|=)\\s*(.+)$/);
-                if (m) {
-                    var op = m[1];
-                    var val = unquote(m[2]).text;
-                    if (op === "=" || op === "==") return eqMatch(val, text);
-                    if (op === "!=") return !eqMatch(val, text);
-                    var num = parseFloat(text), v = parseFloat(val);
-                    if (isNaN(num) || isNaN(v)) return false;
-                    if (op === ">") return num > v;
-                    if (op === ">=") return num >= v;
-                    if (op === "<") return num < v;
-                    return num <= v;
-                }
+                if (m) return {op: m[1] === "=" ? "==" : m[1], value: unquote(m[2]).text};
                 m = term.match(/^(-?[0-9.]+)\\s*\\.\\.\\s*(-?[0-9.]+)$/);
-                if (m) {
+                if (m) return {op: "range", lo: m[1], hi: m[2]};
+                var uq = unquote(term);
+                if (uq.quoted) return {op: "==", value: uq.text};
+                if (term.indexOf("*") !== -1 || term.indexOf("?") !== -1) {
+                    var pattern = reEsc(term).replace(/\\\\\\*/g, ".*")
+                                             .replace(/\\\\\\?/g, ".");
+                    return {op: "like", text: term, pattern: pattern,
+                            re: new RegExp("^" + pattern + "$", "i")};
+                }
+                return {op: "has", text: term};
+            }
+
+            function termMatches(node, text) {
+                var op = node.op;
+                if (op === "not") return !termMatches(node.term, text);
+                if (op === "in") {
+                    return node.values.some(function(v) { return eqMatch(v, text); });
+                }
+                if (op === "==") return eqMatch(node.value, text);
+                if (op === "!=") return !eqMatch(node.value, text);
+                if (op === "range") {
                     var n = parseFloat(text);
                     if (isNaN(n)) return false;
-                    return n >= parseFloat(m[1]) && n <= parseFloat(m[2]);
+                    return n >= parseFloat(node.lo) && n <= parseFloat(node.hi);
                 }
-                var uq = unquote(term);
-                if (uq.quoted) return eqMatch(uq.text, text);
-                if (term.indexOf("*") !== -1 || term.indexOf("?") !== -1) {
-                    var wild = new RegExp(
-                        "^" + reEsc(term).replace(/\\\\\\*/g, ".*")
-                                         .replace(/\\\\\\?/g, ".") + "$", "i");
-                    return wild.test(text);
+                if (op === "like") return node.re.test(text);
+                if (op === "has") {
+                    return text.toLowerCase().indexOf(node.text.toLowerCase()) !== -1;
                 }
-                return text.toLowerCase().indexOf(term.toLowerCase()) !== -1;
+                var num = parseFloat(text), v = parseFloat(node.value);
+                if (isNaN(num) || isNaN(v)) return false;
+                if (op === ">") return num > v;
+                if (op === ">=") return num >= v;
+                if (op === "<") return num < v;
+                return num <= v;
             }
 
             // A column's filter box can combine terms: "|" or "," separate
             // OR alternatives, and "&" joins AND terms within an
             // alternative, e.g. ">=5 & <20" or "idle, cruise". The
             // DataFrame.query keywords `and`/`or` (surrounded by spaces)
-            // work as synonyms. Empty alternatives (a trailing comma while
-            // typing) are ignored, so an all-empty filter matches
-            // everything.
-            function matches(filter, text, label) {
-                if (!filter.trim()) return true;
+            // work as synonyms. Parsed into a list of alternatives, each a
+            // list of AND-ed term nodes. Empty alternatives (a trailing
+            // comma while typing) are dropped, so an all-empty filter
+            // parses to [] and matches everything.
+            function parseFilter(filter, label) {
                 filter = filter.replace(/\\s+and\\s+/gi, " & ")
                                .replace(/\\s+or\\s+/gi, " | ");
-                var anyGroup = false, matched = false;
+                var groups = [];
                 splitTop(filter, "|,").forEach(function(group) {
                     var terms = splitTop(group, "&").map(function(t) {
-                        return t.trim();
+                        return parseTerm(t, label);
                     }).filter(Boolean);
-                    if (!terms.length) return;
-                    anyGroup = true;
-                    if (terms.every(function(t) { return matchesTerm(t, text, label); })) {
-                        matched = true;
-                    }
+                    if (terms.length) groups.push(terms);
                 });
-                return anyGroup ? matched : true;
+                return groups;
+            }
+
+            function matches(groups, text) {
+                return !groups.length || groups.some(function(terms) {
+                    return terms.every(function(node) { return termMatches(node, text); });
+                });
             }
 
             var filterInputs = [];
             var filterBtns = [];
+            function parsedFilters() {
+                return filterInputs.map(function(inp, i) {
+                    return parseFilter(inp.value, headers[i].getAttribute("data-uc-label"));
+                });
+            }
             function applyFilters() {
+                var parsed = parsedFilters();
                 Array.prototype.forEach.call(tbody.querySelectorAll("tr"), function(tr) {
-                    var show = filterInputs.every(function(inp, i) {
-                        return matches(inp.value, tr.cells[i].textContent.trim(),
-                                       headers[i].getAttribute("data-uc-label"));
+                    var show = parsed.every(function(groups, i) {
+                        return matches(groups, tr.cells[i].textContent.trim());
                     });
                     tr.style.display = show ? "" : "none";
                 });
@@ -12279,9 +12352,155 @@ class UnichartNotebook:
                     }
                 });
             }
+
+            // Copy query button (table() only): every column's active
+            // filter, collapsed ones included, written out as one pandas
+            // DataFrame.query string from the same parsed nodes the rows
+            // were filtered with. The cells are display text, so Python
+            // passes what they can't tell us per column: `ref`, the name as
+            // query spells it (backticked where needed), and the raw
+            // column's `kind` -- "num", "bool", "str" (.str works as-is) or
+            // "other" (dates, mixed objects: stringified first). The table
+            // matches text case-insensitively, so text tests fold case
+            // whenever the typed value has letters; numbers and codes stay
+            // plain (`rpm == 2500`, `code == "001"`). JSON string syntax is
+            // valid Python string-literal syntax, hence JSON.stringify.
+            var QUERY_COLS = __QUERY_COLS__;
+            var NUM_RE = /^[-+]?([0-9]+\\.?[0-9]*|\\.[0-9]+)(e[-+]?[0-9]+)?$/i;
+
+            function cased(s) { return s.toLowerCase() !== s.toUpperCase(); }
+
+            // A filter value as a Python number literal, or null. `loose`
+            // reads it the way the table's numeric comparisons do
+            // (parseFloat: "5kW" -> 5); otherwise it must be all number.
+            function pyNum(s, loose) {
+                var n = (loose || NUM_RE.test(s.trim())) ? parseFloat(s) : NaN;
+                return isFinite(n) ? String(n) : null;
+            }
+
+            function eqLit(v, kind) {
+                if (kind === "bool" && /^(true|false)$/i.test(v)) {
+                    return v.toLowerCase() === "true" ? "True" : "False";
+                }
+                return (kind !== "str" && pyNum(v, false)) || JSON.stringify(v);
+            }
+
+            function strOf(col) {
+                return col.ref + (col.kind === "str" ? ".str" : '.astype("str").str');
+            }
+
+            function termQuery(node, col) {
+                var op = node.op, ref = col.ref;
+                if (op === "not") return "not (" + termQuery(node.term, col) + ")";
+                if (op === "in" || op === "==" || op === "!=") {
+                    var vals = op === "in" ? node.values : [node.value];
+                    var fold = col.kind === "str" && vals.some(cased);
+                    var lits = vals.map(function(v) {
+                        return fold ? JSON.stringify(v.toLowerCase()) : eqLit(v, col.kind);
+                    });
+                    var lhs = fold ? ref + ".str.lower()" : ref;
+                    if (op !== "in") return lhs + " " + op + " " + lits[0];
+                    return fold ? lhs + ".isin([" + lits.join(", ") + "])"
+                                : lhs + " in [" + lits.join(", ") + "]";
+                }
+                if (op === "range") {
+                    return (pyNum(node.lo, true) || JSON.stringify(node.lo)) + " <= " + ref +
+                           " <= " + (pyNum(node.hi, true) || JSON.stringify(node.hi));
+                }
+                if (op === "like") {
+                    return strOf(col) + ".fullmatch(" + JSON.stringify(node.pattern) +
+                           (cased(node.text) ? ", case=False" : "") + ", na=False)";
+                }
+                if (op === "has") {
+                    return strOf(col) + ".contains(" + JSON.stringify(node.text) +
+                           (cased(node.text) ? ", case=False" : "") +
+                           ", na=False, regex=False)";
+                }
+                var loose = col.kind === "num" || col.kind === "bool";
+                return ref + " " + op + " " +
+                       (pyNum(node.value, loose) || JSON.stringify(node.value));
+            }
+
+            // One column's filter. `nested` (other columns are filtered too)
+            // brackets an OR so the AND joining the columns can't split it.
+            function filterQuery(groups, col, nested) {
+                // Plain substrings OR-ed together ("idle, cruise") read best
+                // as a single regex alternation.
+                if (groups.length > 1 && groups.every(function(terms) {
+                    return terms.length === 1 && terms[0].op === "has";
+                })) {
+                    var texts = groups.map(function(terms) { return terms[0].text; });
+                    return strOf(col) + ".contains(" +
+                           JSON.stringify(texts.map(function(t) { return reEsc(t); }).join("|")) +
+                           (texts.some(cased) ? ", case=False" : "") + ", na=False)";
+                }
+                var alts = groups.map(function(terms) {
+                    var q = terms.map(function(node) {
+                        return termQuery(node, col);
+                    }).join(" and ");
+                    return (groups.length > 1 && terms.length > 1) ? "(" + q + ")" : q;
+                });
+                var q = alts.join(" or ");
+                return (nested && alts.length > 1) ? "(" + q + ")" : q;
+            }
+
+            var qbtn = container.querySelector(".uc-query-btn");
+            if (qbtn && QUERY_COLS) {
+                // Pin the width so the shorter flash messages don't shrink it.
+                qbtn.style.minWidth = qbtn.offsetWidth + "px";
+                var qflash = function(msg, ok) {
+                    qbtn.textContent = msg;
+                    qbtn.classList.toggle("uc-copied", ok);
+                    setTimeout(function() {
+                        qbtn.textContent = "Copy query";
+                        qbtn.classList.remove("uc-copied");
+                    }, 1500);
+                };
+                qbtn.addEventListener("click", function() {
+                    var active = [];
+                    parsedFilters().forEach(function(groups, i) {
+                        if (groups.length) active.push({groups: groups, col: QUERY_COLS[i]});
+                    });
+                    if (!active.length) { qflash("No filter", false); return; }
+                    var query = active.map(function(a) {
+                        return filterQuery(a.groups, a.col, active.length > 1);
+                    }).join(" and ");
+                    // The async clipboard API is missing outside secure
+                    // contexts (a notebook served over plain http), so fall
+                    // back to a selected textarea + execCommand.
+                    var legacy = function() {
+                        var ta = document.createElement("textarea");
+                        ta.value = query;
+                        ta.style.position = "fixed";
+                        ta.style.opacity = "0";
+                        document.body.appendChild(ta);
+                        ta.select();
+                        var ok = false;
+                        try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+                        document.body.removeChild(ta);
+                        qflash(ok ? "Copied \\u2713" : "Copy failed", ok);
+                    };
+                    if (navigator.clipboard) {
+                        navigator.clipboard.writeText(query).then(function() {
+                            qflash("Copied \\u2713", true);
+                        }, legacy);
+                    } else {
+                        legacy();
+                    }
+                });
+            }
         })();
         </script>
         """.replace("__UID__", table_uid).replace("__MAX_ROWS__", str(max_rows or 0))
+        # Last, so nothing inside a column name gets taken for a placeholder;
+        # escaping '<' keeps a name like '</script>' from closing the tag.
+        sort_script = sort_script.replace(
+            "__QUERY_COLS__", json.dumps(query_cols).replace("<", "\\u003c"))
+
+        query_btn = ("""
+                    <button class="uc-query-btn" type="button"
+                            title="Copy the column filters as a pandas DataFrame.query string (e.g. for uc.query)"
+                            >Copy query</button>""" if query_cols else "")
 
         # All CSS is scoped under this render's #id so it can't restyle other
         # tables in the notebook (or be restyled by a later chart.table()
@@ -12292,7 +12511,7 @@ class UnichartNotebook:
             <div class="uc-table-holder">
                 <div class="uc-table-toolbar">
                     <button class="uc-copy-btn" type="button"
-                            title="Copy table to clipboard (paste into Excel)">Copy</button>
+                            title="Copy table to clipboard (paste into Excel)">Copy</button>{query_btn}
                 </div>
                 <div class="uc-table-wrap">
                     {html_table}
@@ -12307,7 +12526,8 @@ class UnichartNotebook:
             text-align: left;
             margin-bottom: 4px;
         }}
-        #{table_uid} .uc-copy-btn {{
+        #{table_uid} .uc-copy-btn,
+        #{table_uid} .uc-query-btn {{
             background-color: {pal['th_bg']};
             color: {pal['text']};
             border: 1px solid {pal['wrap_border']};
@@ -12319,8 +12539,11 @@ class UnichartNotebook:
             user-select: none;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
         }}
-        #{table_uid} .uc-copy-btn:hover {{ background-color: {pal['th_hover']}; }}
-        #{table_uid} .uc-copy-btn.uc-copied {{
+        #{table_uid} .uc-query-btn {{ margin-left: 4px; }}
+        #{table_uid} .uc-copy-btn:hover,
+        #{table_uid} .uc-query-btn:hover {{ background-color: {pal['th_hover']}; }}
+        #{table_uid} .uc-copy-btn.uc-copied,
+        #{table_uid} .uc-query-btn.uc-copied {{
             color: {pal['copied']};
             border-color: {pal['copied']};
         }}
@@ -12453,7 +12676,7 @@ class UnichartNotebook:
 
     @_uses_method_defaults
     def save_png(self, filename="plot.png", scale=3, width=None, height=None,
-                 embed_session='all', parms=None):
+                 embed_session=False, parms=None):
         """
         Save the last generated plot to a PNG file.
         Requires the 'kaleido' package to be installed.
@@ -12462,24 +12685,26 @@ class UnichartNotebook:
         would scroll, the image is made taller instead (the plot area keeps its
         size). Passing ``height`` overrides that and can clip the legend again.
 
-        By default the image also carries everything needed to remake the
-        plot: the full plotting session (every set's rows, queries and
-        formatting, the notebook-level formatting) plus the plotting call
-        that produced the figure, stored as a PNG text chunk. Image viewers
-        ignore it; ``uc.load_session('plot.png')`` (or
+        By default the image is plain. With ``embed_session`` it also carries
+        everything needed to remake the plot: the full plotting session
+        (every set's rows, queries and formatting, the notebook-level
+        formatting) plus the plotting call that produced the figure, stored
+        as a PNG text chunk. Image viewers ignore it;
+        ``uc.load_session('plot.png')`` (or
         ``UnichartNotebook.from_session('plot.png')``) reads it back and
         replots. :func:`read_png_session` shows what an image contains.
 
         Parameters
         ----------
-        embed_session : 'all' | True | False
-            ``'all'`` (default): embed every set's rows so the image is fully
-            self-contained. ``True``: like :meth:`save_session` — sets loaded
-            from a file that still exists are stored as a file reference
-            (smaller image, but replotting needs the file). ``False``: plain
-            image, no metadata. Ignored when ``filename`` isn't a PNG.
+        embed_session : False | 'all' | True
+            ``False`` (default): plain image, no metadata. ``'all'``: embed
+            every set's rows so the image is fully self-contained. ``True``:
+            like :meth:`save_session` — sets loaded from a file that still
+            exists are stored as a file reference (smaller image, but
+            replotting needs the file). Ignored when ``filename`` isn't a PNG.
         parms : str | list of str, optional
-            Whitelist of columns to embed, as in :meth:`save_session`: only
+            With ``embed_session``, a whitelist of columns to embed, as in
+            :meth:`save_session`: only
             these columns are stored for embedded sets (the plotted columns
             and any a set's query/hue/style needs are always kept), so a wide
             table doesn't bloat the image. Default: every column.
@@ -12505,7 +12730,7 @@ class UnichartNotebook:
         except Exception as e:
             print(f"Error saving image: {e}")
 
-    save_png_defaults = _method_defaults_setter(save_png, "scale=2, embed_session=False")
+    save_png_defaults = _method_defaults_setter(save_png, "scale=2, embed_session='all'")
 
     def _embed_png_session(self, filename, embed_data, image_kwargs, parms=None):
         """Write the current session + last plot call into the PNG at

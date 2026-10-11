@@ -195,7 +195,7 @@ uc.plot_defaults(reset=True)        # drop them all
 
 uc.bar_defaults(x='config', agg='sum', barmode='stack')
 uc.histogram_defaults(nbins=40, histnorm='percent')
-uc.save_png_defaults(scale=2, embed_session=False)
+uc.save_png_defaults(scale=2, embed_session='all')
 ```
 
 - **The call wins.** An argument the call passes, by keyword, positionally or
@@ -296,11 +296,13 @@ uc.var_format(['CHT1', 'CHT2'], reset=True)           # drop all their overrides
 - `set_static_images(True)` / `save_png(...)` — render flat PNGs inline (keeps
   notebook file size down) or export a high-resolution PNG (needs `kaleido`:
   `pip install "unichart[png]"`).
-  Every saved PNG also carries the full plotting session (data, queries,
-  formatting and the plot call) in a metadata chunk, so
+  Saved PNGs are plain images by default. `save_png(..., embed_session='all')`
+  also stores the full plotting session (data, queries, formatting and the
+  plot call) in a metadata chunk, so
   `UnichartNotebook.from_session('plot.png')` or `uc.load_session('plot.png')`
   remakes the plot from the image alone; `read_png_session('plot.png')` shows
-  what is embedded, `save_png(..., embed_session=False)` writes a plain image.
+  what is embedded (`embed_session=True` stores file references instead of
+  rows where it can).
   `parms=['x', 'y']` whitelists the columns embedded (plotted, query and hue
   columns are always kept) so a wide table doesn't bloat the file.
 - `save_session(path)` / `load_session(path)` — the same session as a
@@ -637,8 +639,8 @@ sheet reads the way the library does, and `uc` covers everything else:
 - Errors show a traceback trimmed to the line you typed.
 - Dropping a file loads it through a visible `uc.load(...)` command, so the
   transcript is a real record of the session. Drop a **saved session** —
-  `.json` or a `save_png` image — and it restores through an equally visible
-  `uc.load_session(...)`, bringing its datasets, formatting and plot back. The
+  `.json` or a `save_png(..., embed_session='all')` image — and it restores
+  through an equally visible `uc.load_session(...)`, bringing its datasets, formatting and plot back. The
   file's contents decide, not its extension, so a data `.json` still loads as
   data.
 - **✕ close** in the top bar shuts the board down: it asks first, then stops
@@ -678,9 +680,9 @@ unichart runs.csv --html board.html     # write a static board instead of servin
 ```
 
 A `FILE` can also be a **saved session** — a `.json` from `save_session`, or a
-PNG from `save_png`, which carries its session in a metadata chunk. Those are
-restored rather than read as data, so the datasets, queries, formatting *and the
-plot* come back:
+PNG from `save_png(..., embed_session='all')`, which carries its session in a
+metadata chunk. Those are restored rather than read as data, so the datasets,
+queries, formatting *and the plot* come back:
 
 ```bash
 unichart plot.png                       # reopen the plot that PNG came from
