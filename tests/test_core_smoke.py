@@ -12,6 +12,7 @@ Runs under pytest, and standalone (``python tests/test_core_smoke.py``) for
 environments without it.
 """
 
+import inspect
 import io
 import json
 import re
@@ -256,13 +257,16 @@ def test_plot_default_attributes():
         other.set_default_format(**{attr: good})
         assert getattr(other, attr) == good, attr
         setattr(nb, attr, good)
-        assert nb.plot_defaults[attr] == good, attr
+        assert nb._plot_defaults[attr] == good, attr
         for bad in bads:
             _refuses(nb, attr, bad)
 
     fresh = _session_copy(nb)
     for attr, (good, _) in PLOT_DEFAULT_ATTRS.items():
         assert getattr(fresh, attr) == good, attr
+    # The store's session key is 'plot_defaults', now also a method's name:
+    # restoring it must not shadow the method.
+    assert fresh.plot_defaults() == {}
 
     nb.hspace = None
     assert nb.hspace is None and nb.vspace == '40px'
@@ -451,6 +455,239 @@ def test_session_skips_a_bad_attribute_value():
     assert 'session value for figsize ignored' in out.getvalue()
     assert fresh.figsize == (12, 8)
     assert fresh.legend_size == 14.0
+
+
+# ---------------------------------------------------------------------------
+# Method defaults: plot_defaults() and its siblings
+# ---------------------------------------------------------------------------
+
+DEFAULTED_METHODS = PLOT_METHODS + ['summary', 'save_png']
+
+
+def _call(nb, method, *args, **kwargs):
+    """Run ``nb.<method>(...)`` quietly; return the arguments it recorded."""
+    with redirect_stdout(io.StringIO()):
+        getattr(nb, method)(*args, **kwargs)
+    return nb._last_plot_call['kwargs']
+
+
+def _n_panels(fig):
+    return sum(1 for key in fig.layout.to_plotly_json()
+               if re.fullmatch(r'xaxis\d*', key))
+
+
+def test_every_defaulted_method_has_a_sister():
+    """<method>_defaults takes its method's arguments, plus reset, and help()
+    shows them, listed under their own category."""
+    nb = _notebook()
+    for method in DEFAULTED_METHODS:
+        own = inspect.signature(getattr(nb, method)).parameters
+        sister = inspect.signature(getattr(nb, f'{method}_defaults')).parameters
+        assert [p for p in sister if p != 'reset'] == list(own), method
+        assert sister['reset'].kind is inspect.Parameter.KEYWORD_ONLY, method
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        nb.help('plot_defaults')
+    assert "plot_defaults(x=None, y=None, by='vars', " in out.getvalue()
+    assert 'reset=False' in out.getvalue()
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        nb.help()
+    listed = out.getvalue().split('\nMethod defaults\n')[1].split('\nStyling')[0]
+    for method in DEFAULTED_METHODS:
+        assert f'  • {method}_defaults(' in listed, method
+
+
+def test_method_defaults_fill_only_what_a_call_leaves_out():
+    nb = _notebook()
+    nb.plot_defaults(x='time_s', y=['rpm', 'cht_c'], legend='right')
+    nb.plot_defaults(ncols=2)                      # calls add up
+    assert nb.plot_defaults() == {'x': 'time_s', 'y': ['rpm', 'cht_c'],
+                                  'legend': 'right', 'ncols': 2}
+    call = _call(nb, 'plot')
+    assert (call['x'], call['y'], call['legend'], call['ncols']) == (
+        'time_s', ['rpm', 'cht_c'], 'right', 2)
+
+    # Passed arguments win: positionally, by keyword, and as None.
+    call = _call(nb, 'plot', 'rpm', 'torque_nm', legend='off', ncols=None)
+    assert (call['x'], call['y'], call['legend']) == ('rpm', 'torque_nm', 'off')
+    assert 'ncols' not in call
+
+    # ncols/nrows resolve as a pair: a passed nrows skips the stored ncols.
+    call = _call(nb, 'plot', nrows=1)
+    assert call['nrows'] == 1 and 'ncols' not in call
+
+    # The positional spelling stores the same thing.
+    other = _notebook()
+    other.plot_defaults('time_s', 'rpm')
+    assert other.plot_defaults() == {'x': 'time_s', 'y': 'rpm'}
+
+
+def test_method_defaults_outrank_the_notebook_wide_ones():
+    per_call = _grid_domains(_draw(lambda nb: nb.plot(**GRID)))
+
+    def stored(nb):
+        nb.ncols = 1                               # every plot method
+        nb.plot_defaults(ncols=2)                  # plot alone
+        nb.plot(x=GRID['x'], y=GRID['y'])
+    assert _grid_domains(_draw(stored)) == per_call
+
+
+def test_only_the_called_method_fills_in():
+    """plot(by='ymult') hands off to plot_ymult without plot_ymult's stored
+    defaults, and a method that raised leaves defaults working."""
+    nb = _notebook()
+    nb.plot_ymult_defaults(legend_group_by='vars')
+    call = _call(nb, 'plot', x='time_s', y=['rpm', 'cht_c'], by='ymult')
+    assert nb._last_plot_call['method'] == 'plot_ymult'
+    assert 'legend_group_by' not in call
+    assert _call(nb, 'plot_ymult')['legend_group_by'] == 'vars'
+
+    nb.bar_defaults(agg='max')
+    try:
+        with redirect_stdout(io.StringIO()):
+            nb.bar(x='phase', y='no_such_column')
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('bar drew a column no dataset has')
+    assert _call(nb, 'bar', x='phase', y='fuel_kgh')['agg'] == 'max'
+
+
+def test_method_defaults_clearing_and_checks():
+    nb = _notebook()
+    nb.plot_defaults(legend='right', ncols=2, by='sets')
+    nb.plot_defaults(legend=None, by='vars')       # plot's own defaults
+    nb.plot_defaults(ncols='reset')
+    assert nb.plot_defaults() == {}
+    nb.plot_defaults(x='time_s', suptitle='Run')
+    nb.plot_defaults(reset=True, y='rpm')          # cleared first, then stored
+    assert nb.plot_defaults() == {'y': 'rpm'}
+
+    # Stored and returned values are copies.
+    cols = ['rpm']
+    nb.table_defaults(cols=cols)
+    cols.append('eta_pct')
+    nb.table_defaults()['cols'].append('cht_c')
+    assert nb.table_defaults() == {'cols': ['rpm']}
+
+    # sig_figs and decimals are alternatives.
+    nb.table_defaults(sig_figs=3)
+    nb.table_defaults(decimals=2)
+    assert nb.table_defaults() == {'cols': ['rpm'], 'decimals': 2}
+    try:
+        nb.table_defaults(sig_figs=3, decimals=2)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('stored both sig_figs and decimals')
+    with redirect_stdout(io.StringIO()):
+        frame = nb.table(sig_figs=4, output='df')  # skips the stored decimals
+    assert isinstance(frame, pd.DataFrame)
+
+    # What the method wouldn't take is refused, and nothing is stored.
+    for bad in (lambda: nb.bar_defaults(legend='right'),
+                lambda: nb.summary_defaults(1, 2, 3, 4, 5, 6, 7)):
+        try:
+            bad()
+        except TypeError as exc:
+            assert '_defaults()' in str(exc)
+        else:
+            raise AssertionError('took an argument its method refuses')
+    assert nb.bar_defaults() == nb.summary_defaults() == {}
+
+    # Applied-format resets leave them; resetting the defaults clears them.
+    nb.box_defaults(points='all')
+    with redirect_stdout(io.StringIO()):
+        nb.reset_format()
+    assert nb.box_defaults() == {'points': 'all'}
+    with redirect_stdout(io.StringIO()):
+        nb.reset_format('defaults')
+    assert nb.box_defaults() == nb.plot_defaults() == nb.table_defaults() == {}
+    nb.box_defaults(points='all')
+    with redirect_stdout(io.StringIO()):
+        nb.set_default_format(reset=True)
+    assert nb.box_defaults() == {}
+
+
+def test_method_defaults_in_sessions():
+    """Sessions keep them, minus values with no JSON form (with a warning), and
+    replay the saved plot as it was called, not with the stored defaults."""
+    nb = _notebook()
+    nb.plot_defaults(by='sets')
+    with redirect_stdout(io.StringIO()):
+        nb.plot(x='time_s', y='rpm', by='vars')    # overrides the stored by
+    assert _n_panels(nb.last_fig) == 1
+    nb.table_defaults(cols=['rpm'], sig_figs=3)
+    nb.bar_defaults(agg=max)                       # a function: no JSON form
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / 'session.json'
+        out = io.StringIO()
+        with redirect_stdout(out):
+            nb.save_session(path)
+        assert 'bar_defaults(agg=...) not saved' in out.getvalue()
+        session = json.loads(path.read_text(encoding='utf-8'))
+        state = session['notebook']
+        assert state['method_defaults'] == {
+            'plot': {'by': 'sets'}, 'table': {'cols': ['rpm'], 'sig_figs': 3}}
+        assert state['plot_defaults']['ncols'] is None  # the older store, as before
+
+        with redirect_stdout(io.StringIO()):
+            fresh = UnichartNotebook()
+            fresh.set_copy_buttons(False)
+            fresh.load_session(path)
+        assert fresh.plot_defaults() == {'by': 'sets'}
+        assert fresh.table_defaults() == {'cols': ['rpm'], 'sig_figs': 3}
+        assert fresh.bar_defaults() == {}
+        assert _n_panels(fresh.last_fig) == 1      # by='vars', as called
+
+        # From a newer unichart: what this one can't take is skipped, alone.
+        state['method_defaults'] = {'bar': {'agg': 'sum', 'legend': 'right'},
+                                    'teleport': {'x': 1}}
+        path.write_text(json.dumps(session), encoding='utf-8')
+        out = io.StringIO()
+        with redirect_stdout(out):
+            newer = UnichartNotebook()
+            newer.load_session(path, replay=False)
+        assert 'bar_defaults(legend=) ignored' in out.getvalue()
+        assert "defaults for 'teleport' ignored" in out.getvalue()
+        assert newer.bar_defaults() == {'agg': 'sum'}
+
+
+def test_warnings_still_point_at_the_callers_line():
+    """The defaults wrapper adds a frame, which the warnings aimed at the
+    user's line step past. A DeprecationWarning only shows by default when it
+    points at __main__."""
+    nb = _notebook()
+    nb.sets[0]['only_in_set_0'] = 1.0
+    with warnings.catch_warnings(record=True) as caught, \
+            redirect_stdout(io.StringIO()):
+        warnings.simplefilter('always')
+        nb.histogram(x='cht_c', opacity=0.5)
+        nb.bar(x='phase', y='fuel_kgh', by='sets', color='red')
+        nb.bar(x='phase', y='only_in_set_0')
+    expected = ("'opacity' is deprecated", "bar(by='sets') colors bars",
+                "'only_in_set_0' is missing")
+    for text in expected:
+        hits = [w for w in caught if text in str(w.message)]
+        assert hits, f'no warning saying {text!r}'
+        assert all(Path(w.filename).resolve() == Path(__file__).resolve()
+                   for w in hits), (text, [w.filename for w in hits])
+
+
+def test_board_controls_win_over_method_defaults():
+    """A board panel passes its x / y / legend controls, so stored defaults
+    fill only the rest."""
+    nb = _notebook()
+    nb.plot_defaults(x='rpm', legend='off', suptitle='Stored title')
+    with redirect_stdout(io.StringIO()):
+        render_panel(nb, 'plot', 'time_s', ['cht_c'], dataset_indices=[0, 1],
+                     legend='right')
+    call = nb._last_plot_call['kwargs']
+    assert (call['x'], call['legend'], call['suptitle']) == (
+        'time_s', 'right', 'Stored title')
 
 
 BOARD_PANELS = [

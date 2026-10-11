@@ -51,12 +51,15 @@ import re
 import inspect
 from scipy.interpolate import griddata
 import functools
+import contextlib
+import contextvars
 import gc
 import json
 import os
 import sys
 import base64
 import struct
+import textwrap
 import zlib
 from datetime import datetime
 from pathlib import Path
@@ -4886,17 +4889,17 @@ def _font_size_value(name, value):
 
 
 def _plot_default_attr(key, check, doc):
-    """A notebook attribute over ``plot_defaults[key]``, the store that
+    """A notebook attribute over ``_plot_defaults[key]``, the store that
     ``set_default_format`` writes, so sessions save it and
     ``reset_format('defaults')`` clears it. ``check(key, value)`` raises on a
     bad value before anything changes; ``None`` clears the setting."""
     def fget(self):
-        return self.plot_defaults.get(key)
+        return self._plot_defaults.get(key)
 
     def fset(self, value):
         if value is not None:
             check(key, value)
-        self.plot_defaults[key] = value
+        self._plot_defaults[key] = value
 
     return property(fget, fset, doc=doc)
 
@@ -4916,6 +4919,209 @@ def _font_size_attr(key, arg):
         f"``set_font_sizes({arg}=)``: a size in px, or a name such as "
         "``'large'``. ``None`` (or ``'reset'``) goes back to the plot style's "
         "own size."))
+
+
+# ---------------------------------------------------------------------------
+# Method defaults: plot_defaults(), bar_defaults(), ...
+# ---------------------------------------------------------------------------
+# A method decorated with _uses_method_defaults gets a <name>_defaults sister,
+# built by _method_defaults_setter, that stores arguments for it in
+# self._method_defaults[name]. A later call fills whatever it leaves out from
+# there.
+
+# Set while such a method runs, so the ones it calls in turn (plot(by='ymult')
+# hands off to plot_ymult) take only what they are passed instead of adding
+# their own stored defaults. load_session sets it too, to replay a recorded
+# call as it ran: the record already holds the defaults that call used.
+_IN_DEFAULTED_CALL = contextvars.ContextVar('unichart_in_defaulted_call',
+                                            default=False)
+
+# Arguments a call resolves together. A call that passes one of a group takes
+# none of the group's stored defaults: a one-off nrows= mustn't pull in a stored
+# ncols= (the way _resolve_grid pairs the set_default_format ones), and
+# decimals= mustn't meet a stored sig_figs=, which the method would refuse.
+_LINKED_ARGS = (('ncols', 'nrows'), ('sig_figs', 'decimals'), ('alpha', 'opacity'))
+
+# The linked groups that are two spellings of one setting: storing one drops
+# the other, and storing both in one call is refused.
+_ALTERNATIVE_ARGS = (('sig_figs', 'decimals'), ('alpha', 'opacity'))
+
+_METHOD_DEFAULTS_DOC = """\
+Set defaults for ``{name}``'s arguments, used when a call leaves them out.
+
+Takes every argument :meth:`{name}` takes, positionally too, and stores it
+for later calls; calls add up, each changing only what it passes. A
+``{name}`` call fills each argument it leaves out from here, while one it
+passes, ``None`` included, wins for that call. A stored value reaches
+``{name}`` as if typed into the call, so it outranks the notebook-wide
+defaults (``set_default_format``, ``uc.figsize``, ``uc.ncols``, ...) and the
+remembered ``last_x`` / ``last_y``, which still fill whatever is left.
+
+{details}
+
+Parameters
+----------
+reset : bool
+    Drop every stored ``{name}`` default first. To drop just one, pass it as
+    ``'reset'`` or as ``{name}``'s own default (``None`` for most);
+    ``reset_format('defaults')`` drops every method's.
+
+Called with no arguments, returns the stored defaults as a dict. Sessions
+keep them, leaving out (with a warning) any value with no JSON form, such as
+a function.
+
+Example::
+
+    uc.{name}_defaults({example})
+    uc.{name}_defaults()               # what is stored, as a dict
+    uc.{name}_defaults(reset=True)     # back to the built-ins
+"""
+
+
+@contextlib.contextmanager
+def _no_method_defaults():
+    """Run the block with stored method defaults switched off."""
+    token = _IN_DEFAULTED_CALL.set(True)
+    try:
+        yield
+    finally:
+        _IN_DEFAULTED_CALL.reset(token)
+
+
+def _is_signature_default(value, prm):
+    """Whether ``value`` is the default of signature parameter ``prm``. An
+    array or Series never is, nor is a value whose ``==`` gives no plain
+    answer."""
+    if prm.default is prm.empty:
+        return False
+    try:
+        return value is prm.default or (
+            not isinstance(value, (np.ndarray, pd.Series))
+            and bool(value == prm.default))
+    except (TypeError, ValueError):
+        return False
+
+
+def _call_args(sig, args, kwargs):
+    """The arguments a call to ``sig`` passes, by name, with ``self`` left out
+    and the entries of a ``**kwargs`` parameter flattened in. Raises TypeError
+    for a call ``sig`` refuses."""
+    passed = {}
+    for name, value in sig.bind_partial(*args, **kwargs).arguments.items():
+        if sig.parameters[name].kind is inspect.Parameter.VAR_KEYWORD:
+            passed.update(value)
+        elif name != 'self':
+            passed[name] = value
+    return passed
+
+
+def _uses_method_defaults(func):
+    """Decorator for a public method with a ``<name>_defaults`` sister: every
+    argument a call leaves out is filled from the ones stored there. One the
+    call passes, positionally or as ``None``, is the user's and wins."""
+    name = func.__name__
+    sig = inspect.signature(func)
+
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        if _IN_DEFAULTED_CALL.get():
+            return func(self, *args, **kwargs)
+        stored = self._method_defaults.get(name)
+        if stored:
+            try:
+                passed = _call_args(sig, (self, *args), kwargs)
+            except TypeError:
+                passed = None         # a call the method refuses: let it say so
+            if passed is not None:
+                skip = set(passed).union(
+                    *(g for g in _LINKED_ARGS if not passed.keys().isdisjoint(g)))
+                # Copies, so a method that edits a list argument in place
+                # can't change the stored default.
+                kwargs = {**{k: copy.deepcopy(v) for k, v in stored.items()
+                             if k not in skip}, **kwargs}
+        with _no_method_defaults():
+            return func(self, *args, **kwargs)
+
+    wrapper._takes_method_defaults = True
+    return wrapper
+
+
+def _method_defaults_setter(method, example, note=''):
+    """Build ``<name>_defaults`` for a method decorated with
+    :func:`_uses_method_defaults`. It takes the method's own arguments and
+    stores them in ``self._method_defaults[name]``. Its signature is the
+    method's plus ``reset``, so help() and tab completion offer the same
+    arguments. ``example`` (sample arguments) and ``note`` (a sentence about
+    this method, reflowed with the rest) go into its docstring."""
+    name = method.__name__
+    sig = inspect.signature(method)
+    params = sig.parameters
+    if not getattr(method, '_takes_method_defaults', False):
+        raise TypeError(f"{name}_defaults needs {name} decorated with "
+                        "@_uses_method_defaults, or nothing reads what it stores")
+    if 'reset' in params or any(p.kind is p.VAR_POSITIONAL for p in params.values()):
+        raise TypeError(f"{name}_defaults can't mirror {name}{sig}: its own reset= "
+                        "would clash, and *args can't be stored")
+
+    def clears(key, value):
+        # 'reset', or the method's own default, drops a stored value.
+        return ((isinstance(value, str) and value == 'reset')
+                or (key in params and _is_signature_default(value, params[key])))
+
+    def setter(self, *args, reset=False, **kwargs):
+        try:
+            given = _call_args(sig, (self, *args), kwargs)
+        except TypeError as exc:
+            raise TypeError(f"{name}_defaults(): {exc}") from None
+        if not given and not reset:
+            return copy.deepcopy(self._method_defaults.get(name, {}))
+        for group in _ALTERNATIVE_ARGS:
+            both = [k for k in group if k in given and not clears(k, given[k])]
+            if len(both) > 1:
+                raise ValueError(f"Pass either {' or '.join(both)}, not both.")
+        store = {} if reset else dict(self._method_defaults.get(name, {}))
+        for key, value in given.items():
+            store.pop(key, None)
+            if clears(key, value):
+                continue
+            for group in _ALTERNATIVE_ARGS:
+                if key in group:
+                    for other in group:
+                        store.pop(other, None)
+            store[key] = copy.deepcopy(value)
+        if store:
+            self._method_defaults[name] = store
+        else:
+            self._method_defaults.pop(name, None)
+
+    details = []
+    for group in _LINKED_ARGS:
+        if all(a in params for a in group):
+            a, b = (f"``{g}``" for g in group)
+            skips = "a call that passes one skips the other's stored value."
+            if group in _ALTERNATIVE_ARGS:
+                details.append(f"{a} and {b} are alternatives: storing one "
+                               f"drops the other, and {skips}")
+            else:
+                details.append(f"{a} and {b} go together: {skips}")
+    if any(p.kind is p.VAR_KEYWORD for p in params.values()):
+        details.append(f"Names beyond ``{name}``'s own are passed on through "
+                       "its ``**kwargs``.")
+    if note:
+        details.append(note)
+    details.append(f"Values are checked when ``{name}`` runs, not here.")
+
+    shown = list(params.values())
+    at = next((i for i, p in enumerate(shown) if p.kind is p.VAR_KEYWORD), len(shown))
+    shown.insert(at, inspect.Parameter('reset', inspect.Parameter.KEYWORD_ONLY,
+                                       default=False))
+    setter.__signature__ = sig.replace(parameters=shown)
+    setter.__name__ = f'{name}_defaults'
+    setter.__qualname__ = f'{method.__qualname__}_defaults'
+    setter.__doc__ = _METHOD_DEFAULTS_DOC.format(
+        name=name, example=example, details=textwrap.fill(' '.join(details), 76))
+    setter._defaults_for = name
+    return setter
 
 
 class UnichartNotebook:
@@ -4994,12 +5200,19 @@ class UnichartNotebook:
         # wins over the stored default. Cleared by set_default_format(reset=True).
         # hspace, vspace, ncols, nrows, legend_scroll and suppress_legends are
         # also attributes (uc.ncols = 2), properties over this dict.
-        self.plot_defaults = {
+        self._plot_defaults = {
             'legend': None, 'suppress_legends': None, 'legend_scroll': None,
             'ncols': None, 'nrows': None, 'hspace': None, 'vspace': None,
             'barmode': None, 'agg': None, 'histfunc': None,
             'histnorm': None, 'alpha': None, 'boxmode': None, 'points': None,
         }
+
+        # Per-method argument defaults, {method: {arg: value}}, set via the
+        # <method>_defaults sisters (plot_defaults, bar_defaults, ...). They
+        # fill the arguments a call leaves out, so they outrank _plot_defaults
+        # and the other notebook-wide settings. See _uses_method_defaults;
+        # cleared by reset_format('defaults').
+        self._method_defaults = {}
 
         # Plot Decorations
         self.plot_title = None
@@ -5658,14 +5871,16 @@ class UnichartNotebook:
     )
 
     # Notebook-level formatting captured by save_session. plot_style,
-    # default_format and plot_size are handled separately (style install order
-    # matters, default_format carries the _MARKER_BY_INDEX sentinel, and
-    # plot_size is saved in two units: see _build_session).
+    # default_format, plot_size and the two defaults stores are handled
+    # separately (style install order matters, default_format carries the
+    # _MARKER_BY_INDEX sentinel, plot_size is saved in two units, and
+    # plot_defaults is the session key for _plot_defaults now that the name is
+    # a method: see _build_session).
     _SESSION_NB_ATTRS = (
         'darkmode', 'suptitle', 'footer', 'plot_title', 'x_label', 'y_label',
         'display_parms', 'axis_limits', 'lines', 'highlights',
         'parm_description_dict', 'variable_formats', 'color_map', 'marker_map',
-        'figsize', 'plot_defaults', 'plot_size_per_subplot',
+        'figsize', 'plot_size_per_subplot',
         'grid_format', 'watermark_format',
         'suptitle_size', 'footer_size', 'legend_size', 'axes_title_size',
         'axes_tick_size', 'subplot_title_size', 'colorbar_size', 'hover_size',
@@ -5709,16 +5924,40 @@ class UnichartNotebook:
                 call.update(frame_locals.get(name) or {})
                 continue
             value = frame_locals.get(name)
-            if prm.default is not prm.empty:
-                try:
-                    if value is prm.default or (
-                            not isinstance(value, (np.ndarray, pd.Series))
-                            and value == prm.default):
-                        continue
-                except (TypeError, ValueError):
-                    pass
+            if _is_signature_default(value, prm):
+                continue
             call[name] = value
         self._last_plot_call = {'method': method, 'kwargs': call}
+
+    def _session_method_defaults(self):
+        """``_method_defaults`` as saved in a session: only values that come
+        back from JSON as data (a tuple returns as a list). Saving the rest
+        through ``_session_json_default``'s ``str`` fallback would plant a
+        string the method can't use in every later call, so each is left out
+        with a warning instead."""
+        def strict(o):
+            if isinstance(o, np.generic):
+                return o.item()
+            if isinstance(o, np.ndarray):
+                return o.tolist()
+            if isinstance(o, Path):
+                return str(o)
+            raise TypeError(type(o).__name__)
+
+        saved = {}
+        for method, stored in self._method_defaults.items():
+            keep = {}
+            for arg, value in stored.items():
+                try:
+                    json.dumps(value, default=strict)
+                except (TypeError, ValueError):
+                    print(f"Warning: {method}_defaults({arg}=...) not saved: "
+                          f"a {type(value).__name__} has no JSON form")
+                    continue
+                keep[arg] = value
+            if keep:
+                saved[method] = keep
+        return saved
 
     def _set_source_frame(self, ds):
         """This set's rows, unmasked, restricted to its own columns — what an
@@ -5961,6 +6200,8 @@ class UnichartNotebook:
             set_entries.append(entry)
 
         nb_state = {a: getattr(self, a, None) for a in self._SESSION_NB_ATTRS}
+        nb_state['plot_defaults'] = dict(self._plot_defaults)
+        nb_state['method_defaults'] = self._session_method_defaults()
         nb_state['plot_style'] = getattr(self, 'plot_style', None)
         # plot_size is saved twice: in inches under 'plot_size_in', which is what
         # load_session reads, and in px under 'plot_size', the key and unit
@@ -6042,7 +6283,10 @@ class UnichartNotebook:
             else:
                 kwargs = dict(call.get('kwargs') or {})
                 try:
-                    result = method(**kwargs)
+                    # As recorded: the record already holds the stored
+                    # defaults the call used, and today's mustn't add more.
+                    with _no_method_defaults():
+                        result = method(**kwargs)
                 except Exception as exc:                      # noqa: BLE001
                     # JSON has no type for a tuple limit or a numpy scalar, and
                     # _session_json_default falls back to str(o) — so a kwarg can
@@ -6178,6 +6422,27 @@ class UnichartNotebook:
                         setattr(self, attr, nb_state[attr])
                     except (TypeError, ValueError) as exc:
                         print(f"Warning: session value for {attr} ignored ({exc})")
+            if isinstance(nb_state.get('plot_defaults'), dict):
+                self._plot_defaults = {**dict.fromkeys(self._plot_defaults),
+                                       **nb_state['plot_defaults']}
+            # Through each <method>_defaults, one value at a time, so a name
+            # this unichart doesn't take (a session from a newer one) costs
+            # only itself.
+            if isinstance(nb_state.get('method_defaults'), dict):
+                self._method_defaults = {}
+                for method, stored in nb_state['method_defaults'].items():
+                    setter = getattr(self, f'{method}_defaults', None)
+                    if (getattr(setter, '_defaults_for', None) != method
+                            or not isinstance(stored, dict)):
+                        print(f"Warning: session defaults for {method!r} ignored "
+                              f"(no {method}_defaults here)")
+                        continue
+                    for arg, value in stored.items():
+                        try:
+                            setter(**{arg: value})
+                        except (TypeError, ValueError) as exc:
+                            print(f"Warning: session value for "
+                                  f"{method}_defaults({arg}=) ignored ({exc})")
             # plot_size: inches under 'plot_size_in'. A session saved before that
             # key existed has only the px value, under 'plot_size'.
             if 'plot_size_in' in nb_state or 'plot_size' in nb_state:
@@ -7367,12 +7632,13 @@ class UnichartNotebook:
                 setattr(ds, attr, value)
 
     def _reset_defaults(self):
-        """Restore default_format, figsize, and the per-call plot defaults to
-        built-ins. Shared by set_default_format(reset=True) and
-        reset_format('defaults')."""
+        """Restore default_format, figsize, the per-call plot defaults and
+        every ``<method>_defaults`` store to built-ins. Shared by
+        set_default_format(reset=True) and reset_format('defaults')."""
         self.default_format = dict(_DATASET_FORMAT_DEFAULTS)
         self.figsize = _DEFAULT_FIGSIZE
-        self.plot_defaults = {k: None for k in self.plot_defaults}
+        self._plot_defaults = {k: None for k in self._plot_defaults}
+        self._method_defaults = {}
         # The plot style is a default too (it drives color_map, default_format
         # and the font-size fallbacks), so a defaults reset returns to the
         # shipped style. Loaded datasets are left alone; reset_format('sets')
@@ -7390,9 +7656,10 @@ class UnichartNotebook:
         scope names
         to reset only those.
         The *defaults themselves* (``set_default_format`` state, figsize,
-        per-call plot defaults, the ``set_plot_style`` look) are only reset when
-        you ask for ``'defaults'`` explicitly, or reset everything with
-        ``'all'``.
+        per-call plot defaults, what ``plot_defaults`` and the other
+        ``<method>_defaults`` stored, the ``set_plot_style`` look) are only
+        reset when you ask for ``'defaults'`` explicitly, or reset everything
+        with ``'all'``.
 
         Parameters
         ----------
@@ -7482,7 +7749,7 @@ class UnichartNotebook:
         done = []
         if 'defaults' in active:
             self._reset_defaults()
-            done.append("style/plot defaults")
+            done.append("style/plot/method defaults")
         if 'sets' in active:
             targets = self._get_uset_slice(uset_slice)
             for ds in targets:
@@ -7521,12 +7788,12 @@ class UnichartNotebook:
 
     def _apply_default(self, key, value, builtin):
         """Resolve a per-call plotting arg: an explicit ``value`` (not None) wins;
-        else the stored ``self.plot_defaults[key]`` if set; else the method's own
+        else the stored ``self._plot_defaults[key]`` if set; else the method's own
         ``builtin``. Lets each method keep its native default while sharing one
         notebook-level override (e.g. barmode's built-in differs per method)."""
         if value is not None:
             return value
-        stored = self.plot_defaults.get(key)
+        stored = self._plot_defaults.get(key)
         return stored if stored is not None else builtin
 
     @staticmethod
@@ -7541,16 +7808,18 @@ class UnichartNotebook:
                 raise ValueError(f"Column {col!r} not found in any selected dataset "
                                  f"({', '.join(lacking)}).")
             if lacking:
+                # stacklevel 4: past bar and its _uses_method_defaults
+                # wrapper, to the caller's line.
                 warnings.warn(f"Column {col!r} is missing from dataset(s) "
                               f"{', '.join(lacking)}; drawn only where present.",
-                              UserWarning, stacklevel=3)
+                              UserWarning, stacklevel=4)
 
     def _resolve_grid(self, ncols, nrows):
         """Apply the standing ncols/nrows default only when neither was passed,
         resolving them as a pair so a one-off ``ncols=`` doesn't pull the default
         ``nrows``. Returns ``(ncols, nrows)``."""
         if ncols is None and nrows is None:
-            dn, dr = self.plot_defaults.get('ncols'), self.plot_defaults.get('nrows')
+            dn, dr = self._plot_defaults.get('ncols'), self._plot_defaults.get('nrows')
             if dn is not None or dr is not None:
                 return dn, dr
         return ncols, nrows
@@ -7698,7 +7967,8 @@ class UnichartNotebook:
         defaults** (figsize, legend, suppress_legends, legend_scroll, ncols, nrows,
         hspace, vspace, barmode, agg, histfunc, histnorm, points, boxmode) seed the matching argument of the
         plot methods whenever a call doesn't pass its own value; an explicit
-        per-call argument always wins. Only the values you pass change; others
+        per-call argument always wins, and so does one stored for that method
+        alone by ``plot_defaults`` / ``bar_defaults`` / ... Only the values you pass change; others
         persist — except ``sig_figs`` and ``decimals``, two spellings of one
         knob, which clear each other. Color remains controlled by ``color_map``.
 
@@ -7707,8 +7977,9 @@ class UnichartNotebook:
         (``uc.ncols = 2``), which is how to clear just one (``uc.ncols = None``).
 
         ``reset=True`` restores *all* of the above — per-dataset styles, figsize,
-        and the per-call defaults — to their built-ins, and ignores other args
-        (equivalent to ``reset_format('defaults')``).
+        and the per-call defaults — to their built-ins, clears what every
+        ``<method>_defaults`` stored, and ignores other args (equivalent to
+        ``reset_format('defaults')``).
 
         Parameters
         ----------
@@ -7782,7 +8053,7 @@ class UnichartNotebook:
         """
         if reset:
             self._reset_defaults()
-            print("Default format, figsize, and plot defaults reset to built-ins.")
+            print("Default format, figsize, plot and method defaults reset to built-ins.")
             return
 
         # Validate everything into locals first; commit only at the end so a bad
@@ -7888,7 +8159,7 @@ class UnichartNotebook:
         if new_figsize is not None:
             self.figsize = new_figsize
         self.default_format.update(updates)
-        self.plot_defaults.update(pd_updates)
+        self._plot_defaults.update(pd_updates)
 
     def reg_info(self, uset_slice=None):
         """Print the regression type, equation, and fit stats (R², RMSE, MAE) for each dataset."""
@@ -10161,6 +10432,7 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Main Plot Function
     # ------------------------------------------------------------------
+    @_uses_method_defaults
     def plot(self, x=None, y=None, by='vars', figsize=None, ncols=None, nrows=None,
                 subplot_titles=None, suptitle=None, footer=None, suppress_legends=None,
                 legend=None, hspace=None, vspace=None, **kwargs):
@@ -10308,9 +10580,16 @@ class UnichartNotebook:
                                           t=_top))
         return self._finalize(fig, suppress_legends, footer=footer or self.footer)
 
+    plot_defaults = _method_defaults_setter(
+        plot, "x='time', legend='right', ncols=2",
+        note="``by='ymult'`` and ``by='marginal'`` hand off without "
+             "``plot_ymult``'s or ``plot_marginal``'s stored defaults: only "
+             "the method you call fills in.")
+
     # ------------------------------------------------------------------
     # Multi-Y plot wrapper
     # ------------------------------------------------------------------
+    @_uses_method_defaults
     def plot_ymult(self, x=None, y=None, suptitle=None, footer=None, figsize=None,
                      legend=None, legend_group_by='sets', suppress_legends=None,
                      style_by=None):
@@ -10408,6 +10687,11 @@ class UnichartNotebook:
 
         return self._finalize(fig, suppress_legends, footer=footer or self.footer)
 
+    plot_ymult_defaults = _method_defaults_setter(
+        plot_ymult, "x='time', style_by='color'",
+        note="``plot(by='ymult')`` doesn't use these: only the method you call "
+             "fills in.")
+
     # ------------------------------------------------------------------
     # Interactive Dash dashboard wrapper
     # ------------------------------------------------------------------
@@ -10460,6 +10744,7 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Marginal distribution plot wrapper
     # ------------------------------------------------------------------
+    @_uses_method_defaults
     def plot_marginal(self, x=None, y=None, by='vars', marginal=None, marginal_x=None,
                       marginal_y=None, marginal_size=None, nbins=None, bin_size=None,
                       bin_start=None, bin_end=None, histnorm=None, alpha=None, color=None,
@@ -10583,10 +10868,15 @@ class UnichartNotebook:
                                           t=_top))
         return self._finalize(fig, suppress_legends, footer=footer or self.footer)
 
+    plot_marginal_defaults = _method_defaults_setter(
+        plot_marginal, "marginal='box', nbins=30",
+        note="``plot(by='marginal')`` doesn't use these: only the method you "
+             "call fills in.")
 
     # ------------------------------------------------------------------
     # The bar Command
     # ------------------------------------------------------------------
+    @_uses_method_defaults
     def bar(self, x=None, y=None, markers=None, by='vars', barmode=None, agg=None,
             color=None, suptitle=None, footer=None, figsize=None, ncols=None, nrows=None, suppress_legends=None,
             hspace=None, vspace=None):
@@ -10681,15 +10971,17 @@ class UnichartNotebook:
             ignored = [name for name, val in (('x', x), ('barmode', barmode),
                                               ('color', color), ('ncols', ncols),
                                               ('nrows', nrows)) if val is not None]
+            # stacklevel 3: past the _uses_method_defaults wrapper, to the
+            # caller's line.
             if ignored:
                 warnings.warn(f"bar(by='dataset_x') ignores {', '.join(ignored)}: "
                               "the datasets are the x categories, each variable has "
                               "its own axis and color, and there is a single panel.",
-                              UserWarning, stacklevel=2)
+                              UserWarning, stacklevel=3)
         elif by in ('sets', 'datasets') and color is not None:
             warnings.warn("bar(by='sets') colors bars by variable and ignores color=; "
                           "use var_format(<variable>, color=...) instead.",
-                          UserWarning, stacklevel=2)
+                          UserWarning, stacklevel=3)
 
         barmode = self._apply_default('barmode', barmode, 'group')
         agg = self._apply_default('agg', agg, 'mean')
@@ -10793,9 +11085,12 @@ class UnichartNotebook:
 
         return fig
 
+    bar_defaults = _method_defaults_setter(bar, "barmode='stack', agg='sum'")
+
     # ------------------------------------------------------------------
     # The box Command
     # ------------------------------------------------------------------
+    @_uses_method_defaults
     def box(self, x=None, y=None, by='vars', boxmode=None, points=None, notched=False,
                 color=None, suptitle=None, footer=None, figsize=None, ncols=None, nrows=None, suppress_legends=None,
                 hspace=None, vspace=None):
@@ -10881,9 +11176,12 @@ class UnichartNotebook:
 
         return fig
 
+    box_defaults = _method_defaults_setter(box, "points='all', notched=True")
+
     # ------------------------------------------------------------------
     # The histogram Command
     # ------------------------------------------------------------------
+    @_uses_method_defaults
     def histogram(self, x=None, y=None, histfunc=None, by='vars', nbins=None,
                     bin_size=None, bin_start=None, bin_end=None,
                     histnorm=None, barmode=None, alpha=None,
@@ -10898,7 +11196,9 @@ class UnichartNotebook:
         """
         if figsize is None: figsize = self.figsize
         if opacity is not None:
-            warnings.warn("'opacity' is deprecated, use 'alpha'", DeprecationWarning, stacklevel=2)
+            # stacklevel 3: past the _uses_method_defaults wrapper, to the
+            # caller's line (only warnings aimed at __main__ show by default).
+            warnings.warn("'opacity' is deprecated, use 'alpha'", DeprecationWarning, stacklevel=3)
             alpha = opacity
         histfunc = self._apply_default('histfunc', histfunc, 'sum')
         histnorm = self._apply_default('histnorm', histnorm, '')
@@ -10947,10 +11247,13 @@ class UnichartNotebook:
                                               [(xi, None) for xi in x_list])
 
         return self._finalize(fig, suppress_legends, footer=footer or self.footer)
-        
+
+    histogram_defaults = _method_defaults_setter(histogram, "nbins=40, histnorm='percent'")
+
     # ------------------------------------------------------------------
     # The contour Command
     # ------------------------------------------------------------------
+    @_uses_method_defaults
     def contour(self, x=None, y=None, z=None, by='vars', contours_coloring='fill',
                     colorscale=None, interpolate=True, interp_res=100, interp_method='linear',
                     ncontours=None, overlay_sets=None,
@@ -11039,6 +11342,8 @@ class UnichartNotebook:
 
         return fig
 
+    contour_defaults = _method_defaults_setter(contour, "colorscale='Viridis', ncontours=20")
+
     def table_read(self, uset_slice, x_col, y_col, x_in,
                    kind=None, fill_value='extrapolate', bounds_error=False):
         """Interpolate y values at ``x_in`` from the selected dataset(s).
@@ -11108,8 +11413,9 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # The table Command
     # ------------------------------------------------------------------
+    @_uses_method_defaults
     def table(self, cols=None, title=None, x_col=None, x_in=None, kind=None,
-              sig_figs=None, decimals=None, output=None):
+              sig_figs=None, decimals=None, output=None, max_rows=None):
         """
         Build a table of column values from the currently selected datasets.
 
@@ -11196,6 +11502,14 @@ class UnichartNotebook:
               Useful for embedding the table alongside other figures (e.g. in a
               dashboard panel) without triggering the HTML display side
               effect.
+        max_rows : int, optional
+            Cap how tall the displayed HTML table is: only this many rows
+            are visible at once and the rest scroll inside the table, with
+            the header row pinned at the top. Every row is still there, so
+            sorting, filtering and Copy cover the whole table. Applies to
+            the default display only; ``output='df'``, ``'md'`` and
+            ``'fig'`` always return every row. Left out, the table shows
+            all rows.
 
         Interpolation mode details
         --------------------------
@@ -11245,6 +11559,10 @@ class UnichartNotebook:
         Show every float to two decimal places instead::
 
             chart.table(cols=['speed', 'power'], decimals=2)
+
+        Keep a long table short in the notebook (scroll for the rest)::
+
+            chart.table(max_rows=15)
         """
         if output is not None and output not in ('df', 'md', 'fig'):
             print(f"Unknown output mode '{output}'. Use None, 'df', 'md', or 'fig'.")
@@ -11259,6 +11577,10 @@ class UnichartNotebook:
             return
         if sig_figs is not None and decimals is not None:
             print("Pass either sig_figs or decimals, not both.")
+            return
+        if max_rows is not None and (not isinstance(max_rows, int) or
+                                     isinstance(max_rows, bool) or max_rows < 1):
+            print("max_rows must be a positive integer.")
             return
         combined_dfs = []
 
@@ -11444,7 +11766,9 @@ class UnichartNotebook:
             return fig
 
         self._display_html_table(self._format_table_display(final_df),
-                                 title=title)
+                                 title=title, max_rows=max_rows)
+
+    table_defaults = _method_defaults_setter(table, "cols=['speed', 'power'], sig_figs=3")
 
     def _set_display_fmt(self, sig_figs, decimals):
         """Formatter for one set's displayed values, from its ``sig_figs`` /
@@ -11548,14 +11872,15 @@ class UnichartNotebook:
         self.last_fig = fig
         return self._apply_fonts(fig)
 
-    def _display_html_table(self, display_df, title=None):
+    def _display_html_table(self, display_df, title=None, max_rows=None):
         """
         Render ``display_df`` (values already formatted for display) as the
         shared styled HTML table: click-to-sort headers, per-column ``⌕``
         filter boxes, a Copy-to-clipboard button (TSV + HTML, visible rows
         only), and a light/dark palette following ``self.darkmode``. Used by
         :meth:`table`, :meth:`summary`, :meth:`list_sets` and
-        :meth:`list_parms`.
+        :meth:`list_parms`. ``max_rows`` caps the visible height at that many
+        rows, scrolling the rest under a pinned header.
         """
         header_size = self.table_header_size or 22
         cell_size = self.table_cell_size or 20
@@ -11887,6 +12212,24 @@ class UnichartNotebook:
             table.querySelector("thead").appendChild(filterRow);
             restripe();
 
+            // max_rows: cap the visible height at the header plus the first
+            // N body rows, measured after render so it follows the actual
+            // font sizes and padding. Rows past N scroll inside the wrapper
+            // (the header is sticky), and stay in the DOM so sort, filter and
+            // Copy still cover the whole table.
+            var maxRows = __MAX_ROWS__;
+            var bodyRows = tbody.querySelectorAll("tr");
+            if (maxRows > 0 && bodyRows.length > maxRows) {
+                var wrap = container.querySelector(".uc-table-wrap");
+                var cap = bodyRows[maxRows].getBoundingClientRect().top
+                        - table.getBoundingClientRect().top;
+                if (wrap && cap > 0) {
+                    wrap.style.maxHeight = cap + "px";
+                    wrap.style.overflowY = "auto";
+                    wrap.classList.add("uc-scroll");
+                }
+            }
+
             // Copy button: puts the table on the clipboard as displayed —
             // current sort order, filtered-out rows skipped — as both TSV
             // (text/plain) and a clean HTML table
@@ -11938,7 +12281,7 @@ class UnichartNotebook:
             }
         })();
         </script>
-        """.replace("__UID__", table_uid)
+        """.replace("__UID__", table_uid).replace("__MAX_ROWS__", str(max_rows or 0))
 
         # All CSS is scoped under this render's #id so it can't restyle other
         # tables in the notebook (or be restyled by a later chart.table()
@@ -12089,12 +12432,26 @@ class UnichartNotebook:
         #{table_uid} tbody tr.uc-odd td {{ background-color: {pal['row_odd']}; }}
         #{table_uid} tbody tr.uc-even td {{ background-color: {pal['row_even']}; }}
         #{table_uid} tbody tr:hover td {{ background-color: {pal['row_hover']}; }}
+        /* max_rows scroll mode: sticky header. Collapsed borders don't
+           travel with a sticky header (rows bleed past its edges and the
+           underline vanishes); cells only draw right/bottom borders, so
+           separate borders with no spacing look the same. */
+        #{table_uid} .uc-scroll table {{
+            border-collapse: separate;
+            border-spacing: 0;
+        }}
+        #{table_uid} .uc-scroll thead {{
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }}
         </style>
         {sort_script}
         """
 
         display(HTML(styled_html))
 
+    @_uses_method_defaults
     def save_png(self, filename="plot.png", scale=3, width=None, height=None,
                  embed_session='all', parms=None):
         """
@@ -12147,6 +12504,8 @@ class UnichartNotebook:
             print(f"Error saving image (ensure 'kaleido' is installed): {e}")
         except Exception as e:
             print(f"Error saving image: {e}")
+
+    save_png_defaults = _method_defaults_setter(save_png, "scale=2, embed_session=False")
 
     def _embed_png_session(self, filename, embed_data, image_kwargs, parms=None):
         """Write the current session + last plot call into the PNG at
@@ -12386,6 +12745,7 @@ class UnichartNotebook:
 
         return filtered_cols
 
+    @_uses_method_defaults
     def summary(self, cols=None, title=None, sig_figs=None, decimals=None,
                 output=None, print_table=None):
         """
@@ -12585,6 +12945,8 @@ class UnichartNotebook:
         return df if return_df else None
         return df
 
+    summary_defaults = _method_defaults_setter(summary, "sig_figs=3")
+
     # Method groupings for help(). A method left out of every list still shows,
     # under "Other" (help() fills that bucket by set-difference), so a newly
     # added method is never silently hidden; names here that no longer exist are
@@ -12598,6 +12960,11 @@ class UnichartNotebook:
         ("Plotting",         ['plot', 'plot_ymult', 'plot_marginal', 'plot_type',
                               'bar', 'box', 'contour', 'histogram', 'line', 'highlight',
                               'save_png', 'dashboard']),
+        ("Method defaults",  ['plot_defaults', 'plot_ymult_defaults',
+                              'plot_marginal_defaults', 'bar_defaults',
+                              'box_defaults', 'histogram_defaults',
+                              'contour_defaults', 'table_defaults',
+                              'summary_defaults', 'save_png_defaults']),
         ("Styling & format", ['color', 'marker', 'markersize', 'alpha',
                               'alpha_marker', 'alpha_line', 'fill',
                               'linestyle', 'linewidth', 'edgewidth', 'hue',

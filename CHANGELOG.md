@@ -10,3 +10,8 @@ First release on PyPI.
 - `unichart` command (also `python -m unichart`): open the explorer on a data or
   session file, or print `--info` / write `--html` without serving.
 - Sessions save to JSON or embed in PNGs, and restore with `load_session`.
+- `plot_defaults()` and its siblings (`bar_defaults()`, `table_defaults()`,
+  `save_png_defaults()`, ...) store default arguments for their method; a later
+  call uses them for whatever it leaves out. `uc.plot_defaults` used to be the
+  dict `set_default_format` writes, which is now internal (older sessions still
+  load).

@@ -175,6 +175,47 @@ uc.histogram(x='error', nbins=40, histnorm='probability')
 uc.contour(x='rpm', y='torque', z='efficiency', overlay_sets=[1, 2])
 ```
 
+### Defaults per method
+
+Every plotting method has a `_defaults` sister that takes the same arguments
+and stores them for later calls: `plot_defaults`, `plot_ymult_defaults`,
+`plot_marginal_defaults`, `bar_defaults`, `box_defaults`,
+`histogram_defaults`, `contour_defaults` and `table_defaults`, plus
+`summary_defaults` and `save_png_defaults`. Each later call fills in whatever
+it leaves out from what is stored, so the arguments that stay the same are
+typed once:
+
+```python
+uc.plot_defaults(x='time', ncols=2, legend='right')
+uc.plot(y=['temp', 'pressure'])     # x='time', ncols=2, legend='right'
+uc.plot(y='temp', legend='off')     # legend='off' for this call only
+uc.plot_defaults(ncols=None)        # drop one stored value ('reset' works too)
+uc.plot_defaults()                  # what is stored: {'x': 'time', 'legend': 'right'}
+uc.plot_defaults(reset=True)        # drop them all
+
+uc.bar_defaults(x='config', agg='sum', barmode='stack')
+uc.histogram_defaults(nbins=40, histnorm='percent')
+uc.save_png_defaults(scale=2, embed_session=False)
+```
+
+- **The call wins.** An argument the call passes, by keyword, positionally or
+  as `None`, is used for that call only. Calls to a `_defaults` method add up:
+  each changes only the arguments it passes.
+- **Ahead of the notebook-wide defaults.** A stored value counts as if it were
+  typed into the call, so it outranks `set_default_format`, `uc.figsize`,
+  `uc.ncols` and the remembered `last_x` / `last_y`. Those still fill whatever
+  is left.
+- **Pairs.** A call that passes `ncols` or `nrows` skips the other's stored
+  value. `sig_figs` / `decimals` work the same way, and storing one drops the
+  other.
+- **Only the method you call.** `plot(by='ymult')` hands off to `plot_ymult`
+  without `plot_ymult_defaults`. Dashboard panels pass their own `x`, `y` and
+  `legend`, so only the other stored values reach a panel.
+- **Kept and cleared.** Sessions (JSON and PNG) save the stored defaults; a
+  value with no JSON form, such as a function, is left out with a warning.
+  `reset_format('defaults')` or `set_default_format(reset=True)` clears every
+  method's. Values are checked when the method runs, not when they are stored.
+
 ---
 
 ## Styling & formatting
@@ -228,6 +269,9 @@ uc.var_format(['CHT1', 'CHT2'], reset=True)           # drop all their overrides
 - `set_default_format(...)` — persistent defaults (markersize, linestyle,
   sig_figs/decimals, legend, grid, subplot spacing, barmode, agg, alpha, …)
   applied to future plots/datasets.
+- `plot_defaults(...)`, `bar_defaults(...)`, … — standing arguments for one
+  method, ahead of the notebook-wide ones (see
+  [Defaults per method](#defaults-per-method)).
 - The common settings are also attributes, checked as you assign them:
   `uc.figsize = (10, 6)`, `uc.plot_size = (4, 3)` (both in inches),
   `uc.ncols` / `uc.nrows`, `uc.hspace` / `uc.vspace`,

@@ -190,6 +190,8 @@ SECTIONS = [
     ("fields", "Fields and tables", "Scattered data as a surface, and numbers as numbers."),
     ("analysis", "Analysis", "Differences against a baseline, and fits through the cloud."),
     ("looks", "Looks", "The same figures, restyled."),
+    ("defaults", "Set it once", "Store the arguments you keep typing, one method "
+                                "at a time."),
     ("plotly", "Modify figures with Plotly", "Every figure is plain Plotly underneath: "
                                              "take it and change anything."),
 ]
@@ -197,8 +199,36 @@ SECTIONS = [
 # Prose drawn between a section's heading and its first card. The plotly one
 # states library behaviour no card can show: _clear_last_fig emptying the
 # previous figure, and save_png writing last_fig while the session it embeds
-# replays only the plot call. Keep it in step with those.
+# replays only the plot call. The defaults one restates the <method>_defaults
+# rules (see _method_defaults_setter). Keep each in step with the code.
 SECTION_INTROS = {
+    "defaults": """\
+      <div class="primer">
+        <p>
+          Each plotting method has a sister that stores arguments for it:
+          <code>plot_defaults</code>, <code>bar_defaults</code>,
+          <code>histogram_defaults</code> and the rest, through
+          <code>table_defaults</code>, <code>summary_defaults</code> and
+          <code>save_png_defaults</code>. It takes the same arguments as its method,
+          and every later call fills in whatever it leaves out.
+        </p>
+        <dl>
+          <dt><code>uc.plot(…, legend='off')</code></dt>
+          <dd>An argument the call passes wins for that call only,
+            <code>None</code> included.</dd>
+          <dt><code>uc.plot_defaults()</code></dt>
+          <dd>What is stored, as a dict. Calls add up: each changes only the
+            arguments it passes.</dd>
+          <dt><code>uc.plot_defaults(legend=None)</code></dt>
+          <dd>Drops one stored value, as <code>'reset'</code> does.
+            <code>reset=True</code> drops them all, and
+            <code>uc.reset_format('defaults')</code> clears every method's.</dd>
+          <dt><code>uc.set_default_format(…)</code></dt>
+          <dd>The notebook-wide defaults, <code>uc.ncols</code> and the like still
+            apply underneath: a stored value counts as typed into the call.</dd>
+        </dl>
+      </div>
+""",
     "plotly": """\
       <div class="primer">
         <p>
@@ -452,6 +482,23 @@ EXAMPLES = [
         dark=True,
     ),
 
+    dict(
+        section="defaults", id="defaults-plot", api="uc.plot_defaults",
+        title="Say it once",
+        blurb="Store the arguments you keep typing. Every later plot call fills in "
+              "whatever it leaves out, so each call names only what changes.",
+        code="uc.plot_defaults(x='time_s', ncols=2, hspace=110, legend='right')\n"
+             "uc.plot(y=['cht_c', 'egt_c'])   # x, grid and legend from the defaults",
+    ),
+    dict(
+        section="defaults", id="defaults-override", api="uc.bar_defaults",
+        title="The call still wins",
+        blurb="Each method keeps its own defaults, and an argument the call passes "
+              "is used for that call alone: the stored max is back on the next bar.",
+        code="uc.bar_defaults(x='phase', y='egt_c', agg='max')\n"
+             "uc.bar(agg='mean')              # this call only",
+    ),
+
     # Each ends with a bare `fig`: the line that draws it in a notebook cell.
     dict(
         section="plotly", id="go-layout", api="fig.update_layout · fig.update_traces",
@@ -538,9 +585,9 @@ def render_example(ex: dict, df: pd.DataFrame, static: bool = False) -> dict:
         import unichart._core as core
         show_table = uc._display_html_table
 
-        def _display_html_table(display_df, title=None):
+        def _display_html_table(display_df, title=None, **kwargs):
             built.append(uc._build_table_figure(display_df, title=title))
-            show_table(display_df, title=title)
+            show_table(display_df, title=title, **kwargs)
         uc._display_html_table = _display_html_table
         patch = _patched(core, "display", lambda obj, *a, **k: shown.append(obj))
     else:

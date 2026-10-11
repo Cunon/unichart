@@ -6,3 +6,4 @@ dist/
 *.egg-info/
 .venv/
 .pytest_cache/
+CHANGELOG.md
