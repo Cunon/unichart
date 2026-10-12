@@ -66,9 +66,11 @@ def _blank_png():
 class _Args:
     """Stands in for the argparse namespace ``_split_files`` reads."""
 
-    def __init__(self, files, combine=False, set_col=None, name_col=None):
+    def __init__(self, files, combine=False, set_col=None, name_col=None,
+                 reader=None):
         self.files = [str(f) for f in files]
         self.combine, self.set_col, self.name_col = combine, set_col, name_col
+        self.reader = reader
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +309,7 @@ def test_terminal_restores_sessions_as_startup_commands(tmp_path):
         def run(self, **kwargs):
             pass
 
-    def fake_build(notebook, title=None, startup=(), allow_quit=None):
+    def fake_build(notebook, title=None, startup=(), allow_quit=None, staged=()):
         captured['startup'] = list(startup)
         captured['darkmode_before_startup'] = notebook.darkmode
         return _StubApp()
@@ -343,7 +345,7 @@ def test_terminal_leaves_the_theme_alone_without_dark(tmp_path):
         def run(self, **kwargs):
             pass
 
-    def fake_build(notebook, title=None, startup=(), allow_quit=None):
+    def fake_build(notebook, title=None, startup=(), allow_quit=None, staged=()):
         captured['startup'] = list(startup)
         return _StubApp()
 

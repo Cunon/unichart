@@ -45,9 +45,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from ._core import sniff_session
-from .dashboard import (_df_from_upload, _pick_port, _require_dash,
-                                _upload_bytes)
+from ._core import _READER_STUB_BODY, _reader_name, sniff_session
+from .dashboard import (_UPLOAD_READERS, _df_from_upload, _pick_port,
+                        _require_dash, _upload_bytes)
 
 # ---------------------------------------------------------------------------
 # Palette — sampled from the web version. Dark only, on purpose: this board
@@ -106,6 +106,40 @@ def _uploads_dir():
 def _slug(text):
     """A filename-safe stub of a board title, for the session it downloads."""
     return re.sub(r'[^A-Za-z0-9._-]+', '-', str(text)).strip('-').lower() or 'unichart'
+
+
+def _reader_template(paths):
+    """Terminal input that reads files unichart has no reader for.
+
+    One stub reader per extension, registered so the next file of that type
+    loads with no questions, then one load per file. It is staged in the input
+    rather than run: the stub is only a guess at the format, so the user edits
+    it until it returns the right DataFrame, then presses Enter. A file with no
+    extension can't be registered for, so its reader is passed to its load.
+    """
+    defs, registers, loads = [], [], []
+    for path in paths:
+        suffix = Path(path).suffix.lower()
+        name = _reader_name(suffix)
+        stub = (f"def {name}(path):\n"
+                f"    return {_READER_STUB_BODY}  # edit to fit the file")
+        if stub not in defs:
+            defs.append(stub)
+            if suffix:
+                registers.append(f"uc.register_reader({suffix!r}, {name})")
+        loads.append(f"uc.load({str(path)!r})" if suffix
+                     else f"uc.load({str(path)!r}, reader={name})")
+    return '\n\n'.join(defs) + '\n\n' + '\n'.join(registers + loads)
+
+
+def _staged_note(path):
+    """The transcript line that points at a reader staged for ``path``."""
+    name, suffix = Path(path).name, Path(path).suffix.lower()
+    what = (f"unichart has no reader for {suffix} files" if suffix
+            else "unichart can't tell what kind of file this is")
+    return (f"{name}: {what}. A reader is staged below — a function that "
+            f"takes the file's path and returns a DataFrame. Edit it to parse "
+            f"the file, then press Enter.")
 
 
 # ---------------------------------------------------------------------------
@@ -1103,6 +1137,8 @@ def _sidebar(html, dcc, uc):
                               className='exts'),
                     html.Span('or a saved session — .json · .png',
                               className='exts'),
+                    html.Span('any other type: write its reader',
+                              className='exts'),
                 ])),
             html.Div([
                 html.Span('…or try an example, with a cheat sheet to match:',
@@ -1193,12 +1229,16 @@ def _entry_divs(html, entries):
 
 
 def build_terminal_app(uc, title=None, banner=True, startup=(),
-                       allow_quit=None):
+                       allow_quit=None, staged=()):
     """Build (but do not run) the terminal explorer.
 
     ``startup`` is a sequence of commands run before the first paint — how the
     CLI's ``--panel`` specs and ``explore(panels=...)`` are honored, so they
     land in the transcript exactly as if they had been typed.
+
+    ``staged`` are files unichart has no reader for. The board opens with a
+    reader for them waiting in the input (see :func:`_reader_template`), the
+    same as when such a file is dropped.
 
     ``allow_quit`` offers the top bar's close button, and makes ``exit()`` in
     the terminal mean it. It defaults to "unless we are in a Jupyter kernel",
@@ -1226,6 +1266,8 @@ def build_terminal_app(uc, title=None, banner=True, startup=(),
         entries.extend(_result_entries(result))
         if result and result.get('figure') is not None:
             figure = _fit(result['figure'])
+    staged = [str(p) for p in staged]
+    entries += [{'kind': 'out', 'text': _staged_note(p)} for p in staged]
 
     app = Dash(__name__, title=board_title,
                update_title=None, suppress_callback_exceptions=True)
@@ -1282,7 +1324,8 @@ def build_terminal_app(uc, title=None, banner=True, startup=(),
                         html.Div([
                             html.Div(id='term-mirror', className='term-mirror'),
                             dcc.Textarea(
-                                id='term-input', value='',
+                                id='term-input',
+                                value=_reader_template(staged) if staged else '',
                                 className='term-input',
                                 placeholder='uc.help()  ·  Enter runs · '
                                             'Shift+Enter for a new line · '
@@ -1417,6 +1460,7 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
                     snippet) + (no_update,) * 6
 
         commands = []
+        staged = []                # dropped files waiting on a reader
         if trigger == 'term-upload':
             if not upload_contents:
                 return nothing
@@ -1435,6 +1479,20 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
                 if sniff_session(raw) is not None:
                     path.write_bytes(raw)
                     commands.append(f'uc.load_session({str(path)!r})')
+                    continue
+                # A type with a reader registered on the notebook (a built-in
+                # one it overrides included), or one the board can't read in
+                # memory, goes to disk as it came. It loads through the
+                # notebook's reader, or with none, a reader is staged in the
+                # input for the user to finish — the board asking for one.
+                suffix = path.suffix.lower()
+                if suffix in uc._custom_readers or suffix not in _UPLOAD_READERS:
+                    path.write_bytes(raw)
+                    if uc._reader_for(path)[0] is not None:
+                        commands.append(f'uc.load({str(path)!r})')
+                    else:
+                        staged.append(str(path))
+                        entries.append({'kind': 'out', 'text': _staged_note(path)})
                     continue
                 try:
                     frame = _df_from_upload(contents, name)
@@ -1494,7 +1552,9 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
             sheet_out = (_chips(html, sheet), f"Cheat sheet · {example['label']}",
                          [list(c) for c in sheet])
         return (entries, _entry_divs(html, entries), figure,
-                _dataset_rows(html, uc), '', history, None, download) + sheet_out
+                _dataset_rows(html, uc),
+                _reader_template(staged) if staged else '',
+                history, None, download) + sheet_out
 
     # Enter runs, Shift+Enter adds a line, up/down walks history. All of it is
     # clientside: an arrow key must never cost a server round trip, and the
@@ -1925,8 +1985,17 @@ def terminal(uc=None, data=None, sessions=None, panels=None, title=None,
         uc.toggle_darkmode(True)
 
     startup = []
+    staged = []
     if data is not None:
-        uc.load(data)
+        # A file unichart has no reader for doesn't fail the launch: the board
+        # opens with a reader for it staged in the input, as a drop would.
+        items = list(data) if isinstance(data, (list, tuple)) else [data]
+        unread = [isinstance(d, (str, Path)) and Path(d).is_file()
+                  and uc._reader_for(d)[0] is None for d in items]
+        staged = [str(d) for d, u in zip(items, unread) if u]
+        readable = [d for d, u in zip(items, unread) if not u]
+        if readable:
+            uc.load(readable)
     # Sessions restore as startup commands rather than here, for three reasons:
     # the restore lands in the transcript like every other action on this board;
     # the plot call it replays paints the chart pane, which otherwise opens blank
@@ -1945,7 +2014,7 @@ def terminal(uc=None, data=None, sessions=None, panels=None, title=None,
     # is the one layout decision that depends on where we are running.
     in_notebook = _in_notebook()
     app = build_terminal_app(uc, title=title, startup=[c for c in startup if c],
-                             allow_quit=not in_notebook)
+                             allow_quit=not in_notebook, staged=staged)
     # A standalone window is a browser window either way, so asking for one
     # from a kernel means the external board rather than the inline iframe.
     standalone = app_window or not in_notebook

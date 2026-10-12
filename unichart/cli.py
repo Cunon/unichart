@@ -21,6 +21,14 @@ the datasets, the queries, the formatting and the plot itself::
     unichart board.json --info            # inspect a session without serving
     unichart runs.csv --panel plot:time:temp --save-session board.json
 
+Any other file type needs a reader: a Python function that takes the file's
+path and returns a DataFrame. Name one with ``--reader``, or just open the
+file. The explorer then starts with a reader staged in its terminal, to finish
+and run::
+
+    unichart run1.dat --reader readers.py:read_dat
+    unichart run1.dat                     # the explorer asks for a reader
+
 Tab completion is built in — ``eval "$(unichart --completion bash)"`` (or
 ``zsh``) in your shell rc file completes the flags, and completes ``--panel``
 method / x / y / z fields against the real column names of the data files
@@ -512,7 +520,8 @@ def build_parser():
 
     p.add_argument('files', nargs='*', metavar='FILE',
                    help='data file(s) to load: .csv .tsv .txt .xlsx .xls '
-                        '.json .parquet. Omit to open an empty explorer.')
+                        '.json .parquet, or any other type with --reader. '
+                        'Omit to open an empty explorer.')
     p.add_argument('--version', action='version',
                    version=f'unichart {__version__}')
     p.add_argument('--gallery', action='store_true',
@@ -529,6 +538,14 @@ def build_parser():
                            'of this column')
     load.add_argument('--name-col', metavar='COL', dest='name_col',
                       help='take dataset names from this column')
+    load.add_argument('--reader', metavar='SPEC',
+                      help='read the data FILE(s) with your own function, '
+                           'which takes the file path and returns a '
+                           'DataFrame: SCRIPT.py:FUNC or MODULE:FUNC. For a '
+                           'type unichart cannot read itself, the explorer '
+                           'keeps it for dropped files of that type. Without '
+                           'it, such a type opens the explorer with a reader '
+                           'staged to finish')
 
     board = p.add_argument_group('board')
     board.add_argument('--panel', action='append', default=[], metavar='SPEC',
@@ -601,27 +618,95 @@ def _split_files(args):
         else:
             data.append(name)
 
-    # --combine / --set-col / --name-col describe how to read a data file. A
-    # session already records how its sets were built, so with nothing else on
-    # the line these flags have nothing to act on — say so rather than accepting
-    # them and quietly doing nothing.
+    # --combine / --set-col / --name-col / --reader describe how to read a
+    # data file. A session already records how its sets were built, so with
+    # nothing else on the line these flags have nothing to act on — say so
+    # rather than accepting them and quietly doing nothing.
     if sessions and not data:
         for flag, value in (('--combine', args.combine),
                             ('--set-col', args.set_col),
-                            ('--name-col', args.name_col)):
+                            ('--name-col', args.name_col),
+                            ('--reader', args.reader)):
             if value:
                 raise CliError(f'{flag} applies to data files, not sessions')
     return data, sessions
 
 
-def _load(uc, files, args):
-    """Load the data FILEs onto the notebook."""
+def _load_reader(spec):
+    """The function a ``--reader`` SPEC names: ``SCRIPT.py:FUNC`` or ``MODULE:FUNC``.
+
+    Split on the last ':' so a Windows path (``C:\\x\\readers.py:read``)
+    keeps its drive letter.
+    """
+    import importlib
+    import importlib.util
+
+    target, sep, name = spec.rpartition(':')
+    if not (sep and target and name):
+        raise CliError(f'--reader {spec!r}: expected SCRIPT.py:FUNC or MODULE:FUNC')
+    try:
+        if target.endswith('.py'):
+            if not os.path.isfile(target):
+                raise CliError(f'--reader: no such file: {target}')
+            mod_spec = importlib.util.spec_from_file_location(
+                '_unichart_reader', target)
+            module = importlib.util.module_from_spec(mod_spec)
+            mod_spec.loader.exec_module(module)
+        else:
+            module = importlib.import_module(target)
+    except CliError:
+        raise
+    except Exception as exc:                              # noqa: BLE001
+        raise CliError(f'--reader: could not load {target}: {exc}') from exc
+    func = getattr(module, name, None)
+    if not callable(func):
+        raise CliError(f'--reader: {target} has no function {name!r}')
+    return func
+
+
+def _stage_unreadable(uc, files, args, serving):
+    """Split the data FILEs into (load now, stage on the board).
+
+    A FILE that unichart has no reader for still opens the explorer, with a
+    reader for it staged in the terminal input. That is how the board asks for
+    one. Nothing else can ask. ``--info``, ``--html`` and ``--save-session``
+    have no board, and ``--combine``, ``--set-col`` and ``--name-col``
+    describe a read that has to happen at startup, so those say what is
+    missing instead.
+    """
+    if args.reader:
+        return files, []
+    unread = [f for f in files if uc._reader_for(f)[0] is None]
+    if not unread:
+        return files, []
+    flag = next((flag for flag, value in (('--combine', args.combine),
+                                          ('--set-col', args.set_col),
+                                          ('--name-col', args.name_col))
+                 if value), None)
+    if not serving or flag:
+        why = f' ({flag} reads every FILE at startup)' if serving else ''
+        raise CliError(f'no reader for {unread[0]}{why}: pass --reader '
+                       f'SCRIPT.py:FUNC, a function that takes the file path '
+                       f'and returns a DataFrame')
+    return [f for f in files if f not in unread], unread
+
+
+def _load(uc, files, args, reader=None):
+    """Load the data FILEs onto the notebook, through ``reader`` if given."""
     if not files:
         return
+    if reader is not None:
+        # Registered for the types unichart can't read itself, so the board
+        # loads a file of the same type dropped there later instead of
+        # asking for a reader again.
+        for name in files:
+            if uc._reader_for(name)[0] is None and os.path.splitext(name)[1]:
+                uc.register_reader(os.path.splitext(name)[1], reader)
     sources = files if len(files) > 1 else files[0]
     try:
         uc.load(sources, set_idx_column=args.set_col,
-                set_name_column=args.name_col, combined=args.combine)
+                set_name_column=args.name_col, combined=args.combine,
+                reader=reader)
     except Exception as exc:                              # noqa: BLE001
         raise CliError(f'could not read the data: {exc}') from exc
 
@@ -771,12 +856,14 @@ def main(argv=None):
         data_files, session_files = _split_files(args)
 
         uc = UnichartNotebook()
-        _load(uc, data_files, args)
+        serving = not (args.info or args.html or args.save_session)
+        data_files, staged = _stage_unreadable(uc, data_files, args, serving)
+        _load(uc, data_files, args,
+              _load_reader(args.reader) if args.reader else None)
 
         # Serving defers the sessions to the board (see _load_sessions); every
         # other action has no board to defer to and restores them here, after
         # the data so the session's own formatting is the one that sticks.
-        serving = not (args.info or args.html or args.save_session)
         if not serving:
             # --info reads the recorded call out of the file itself, so redrawing
             # the plot here would be work nothing looks at.
@@ -813,7 +900,10 @@ def main(argv=None):
         # one chart pane that fills its own space, so they are not forwarded.
         # --dark is passed through rather than applied above: a restored session
         # carries its own theme and would otherwise overwrite the flag.
-        explore(uc, sessions=session_files or None, panels=panels or None,
+        # A staged FILE goes in as data=, which the board stages rather than
+        # loads — see _stage_unreadable.
+        explore(uc, data=staged or None,
+                sessions=session_files or None, panels=panels or None,
                 title=args.title, port=args.port,
                 dark=True if args.dark else None,
                 open_browser=not args.no_browser,

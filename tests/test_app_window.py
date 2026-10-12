@@ -60,7 +60,7 @@ def _terminal(in_notebook=False, **kwargs):
         def run(self, **run_kwargs):
             captured['run'] = run_kwargs
 
-    def fake_build(notebook, title=None, startup=(), allow_quit=None):
+    def fake_build(notebook, title=None, startup=(), allow_quit=None, staged=()):
         captured['allow_quit'] = allow_quit
         return _StubApp()
 

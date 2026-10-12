@@ -4814,6 +4814,21 @@ def sniff_session(source):
         return None
 
 
+# The body a suggested reader starts from, for a file type unichart has no
+# reader for (see UnichartNotebook._no_reader_message and the explorer's drop
+# zone). Whitespace-separated columns are the usual shape of the formats that
+# end up here (.dat, .out, rig logs), and an explicit sep shows what to change
+# when they're not. pandas' sep=None sniffing was tried and is worse: it splits
+# runs of spaces into empty "Unnamed" columns.
+_READER_STUB_BODY = "pd.read_csv(path, sep=r'\\s+')"
+
+
+def _reader_name(suffix):
+    """``read_dat`` for ``'.dat'`` — the name a suggested reader gets."""
+    stem = re.sub(r'\W', '_', suffix.lstrip('.').lower())
+    return f"read_{stem}" if stem else "read_file"
+
+
 # ---------------------------------------------------------------------------
 # Notebook settings as attributes (uc.figsize, uc.hspace, uc.legend_size, ...)
 # ---------------------------------------------------------------------------
@@ -4953,7 +4968,9 @@ Set defaults for ``{name}``'s arguments, used when a call leaves them out.
 Takes every argument :meth:`{name}` takes, positionally too, and stores it
 for later calls; calls add up, each changing only what it passes. A
 ``{name}`` call fills each argument it leaves out from here, while one it
-passes, ``None`` included, wins for that call. A stored value reaches
+passes wins for that call. A passed ``None`` skips only what is stored here:
+the notebook-wide default, if set, still applies, else the built-in. To get
+the built-in for one call, pass its value. A stored value reaches
 ``{name}`` as if typed into the call, so it outranks the notebook-wide
 defaults (``set_default_format``, ``uc.figsize``, ``uc.ncols``, ...) and the
 remembered ``last_x`` / ``last_y``, which still fill whatever is left.
@@ -5154,6 +5171,10 @@ class UnichartNotebook:
         # Column-ownership reconciliation state; see _reconcile_columns.
         self._cols_snapshot = self._combined_df.columns
         self._known_cols = set(self._combined_df.columns)
+        # Readers added with register_reader, by lowercase extension. Per
+        # notebook on purpose: _FILE_READERS is class-level, so writing there
+        # would leak one notebook's reader into every other in the kernel.
+        self._custom_readers = {}
 
         # State Memory
         self.last_x = None
@@ -5628,9 +5649,12 @@ class UnichartNotebook:
     _DIALOG_PROGRAMS = ('zenity', 'qarma')
 
     @classmethod
-    def _dialog_argv(cls, program):
-        """Build the argv that asks ``program`` for a multi-select open dialog."""
-        patterns = [f"*{ext}" for ext in cls._FILE_READERS]
+    def _dialog_argv(cls, program, exts=()):
+        """Build the argv that asks ``program`` for a multi-select open dialog.
+
+        ``exts`` are extensions beyond the built-in ones to offer as data files
+        (the notebook's :meth:`register_reader` types)."""
+        patterns = [f"*{ext}" for ext in dict.fromkeys((*cls._FILE_READERS, *exts))]
         # The default separator is '|', which is a legal filename character, so
         # ask for newlines instead.
         return [program, '--file-selection', '--multiple', '--separator=\n',
@@ -5639,7 +5663,7 @@ class UnichartNotebook:
                 '--file-filter=All files | *']
 
     @classmethod
-    def _pick_files_native(cls):
+    def _pick_files_native(cls, exts=()):
         """Pick files with an OS dialog program instead of tkinter.
 
         Returns the chosen paths, an empty tuple when the dialog was cancelled,
@@ -5654,7 +5678,7 @@ class UnichartNotebook:
             exe = shutil.which(program)
             if exe is None:
                 continue
-            argv = cls._dialog_argv(program)
+            argv = cls._dialog_argv(program, exts)
             argv[0] = exe
             try:
                 proc = subprocess.run(argv, capture_output=True, text=True)
@@ -5704,8 +5728,11 @@ class UnichartNotebook:
                 + ". Or pass a filepath: load('data.csv').")
 
     @classmethod
-    def _pick_files(cls):
+    def _pick_files(cls, exts=()):
         """Open the OS file-chooser and return the selected paths as a tuple.
+
+        ``exts`` are extra extensions for its "Data files" filter, as in
+        :meth:`_dialog_argv`.
 
         Returns an empty tuple when the dialog is cancelled. Raises
         ``RuntimeError`` when no dialog can be opened at all — tkinter missing
@@ -5722,13 +5749,13 @@ class UnichartNotebook:
             import tkinter
             from tkinter import filedialog
         except ImportError as e:
-            picked = cls._pick_files_native()
+            picked = cls._pick_files_native(exts)
             if picked is not None:
                 return picked
             raise RuntimeError(
                 cls._no_picker_message(f"tkinter is unavailable ({e})")) from None
 
-        patterns = " ".join(f"*{ext}" for ext in cls._FILE_READERS)
+        patterns = " ".join(f"*{ext}" for ext in dict.fromkeys((*cls._FILE_READERS, *exts)))
         root = None
         tcl_error = None
         try:
@@ -5757,7 +5784,7 @@ class UnichartNotebook:
                     pass
 
         if tcl_error is not None:
-            picked = cls._pick_files_native()
+            picked = cls._pick_files_native(exts)
             if picked is not None:
                 return picked
             raise RuntimeError(cls._no_picker_message(
@@ -5767,7 +5794,7 @@ class UnichartNotebook:
         return tuple(paths) if paths else ()
 
     def load(self, source=None, title=None, set_name_column=None, set_idx_column=None,
-             load_cols_as_vars=False, combined=False, read_kwargs=None):
+             load_cols_as_vars=False, combined=False, read_kwargs=None, reader=None):
         """Load datasets from DataFrames, filepaths, dicts, or numpy arrays.
 
         Called with no ``source`` (or ``source=None``), opens the OS file
@@ -5779,15 +5806,26 @@ class UnichartNotebook:
         (``read_kwargs`` is passed through to the pandas reader). For a list, ``combined=True``
         merges everything into one set while ``combined=False`` loads each separately. A file's
         title defaults to its filename when no title or SETNUMBER/INDEX split column is present.
+
+        Any other file type needs a reader: a function that takes the file's
+        path and returns a DataFrame. Pass it as ``reader=`` for this call (it
+        then reads every file in ``source``, whatever the extension, and gets
+        ``read_kwargs`` as keyword arguments), or give it to
+        :meth:`register_reader` once to read that extension from then on. A
+        file with no reader raises a ``ValueError`` whose message is a reader
+        to start from.
         """
         if source is None:
-            source = self._pick_files()
+            source = self._pick_files(tuple(self._custom_readers))
             if not source:
                 print("No files selected.")
                 return
+        if reader is not None and not callable(reader):
+            raise TypeError(f"reader must be a function that takes a file path "
+                            f"and returns a DataFrame, got {type(reader).__name__}")
 
         sources = list(source) if isinstance(source, (list, tuple)) else [source]
-        coerced = [self._coerce_to_df(s, read_kwargs) for s in sources]
+        coerced = [self._coerce_to_df(s, read_kwargs, reader) for s in sources]
 
         def resolve_title(frame, default_title):
             if title is not None or set_idx_column is not None:
@@ -5796,7 +5834,7 @@ class UnichartNotebook:
                 return None
             return default_title
 
-        def annotate(created, src_path):
+        def annotate(created, src_path, custom):
             # File-backed sets remember where they came from so save_session
             # can store a reference instead of embedding the rows.
             if src_path is None:
@@ -5806,44 +5844,158 @@ class UnichartNotebook:
                 if ds._source is not None:
                     ds._source['path'] = str(src_path)
                     ds._source['read_kwargs'] = dict(read_kwargs) if read_kwargs else None
+                    # Read by the user's function, which a session can't
+                    # store — save_session embeds these rows instead.
+                    ds._source['reader'] = custom
 
         if combined:
-            frame = pd.concat([df for df, _, _ in coerced], ignore_index=True)
-            default_title = next((dt for _, dt, _ in coerced if dt), None)
+            frame = pd.concat([df for df, _, _, _ in coerced], ignore_index=True)
+            default_title = next((dt for _, dt, _, _ in coerced if dt), None)
             created = self.load_df(frame, title=resolve_title(frame, default_title),
                                    set_name_column=set_name_column, set_idx_column=set_idx_column,
                                    load_cols_as_vars=load_cols_as_vars)
             # A combined load is only reproducible from a single source file.
             if len(coerced) == 1:
-                annotate(created, coerced[0][2])
+                annotate(created, coerced[0][2], coerced[0][3])
             return
 
-        for frame, default_title, src_path in coerced:
+        for frame, default_title, src_path, custom in coerced:
             created = self.load_df(frame, title=resolve_title(frame, default_title),
                                    set_name_column=set_name_column, set_idx_column=set_idx_column,
                                    load_cols_as_vars=load_cols_as_vars)
-            annotate(created, src_path)
+            annotate(created, src_path, custom)
 
-    def _coerce_to_df(self, source, read_kwargs=None):
-        """Coerce a single source into a (DataFrame, default_title, path) triple.
-        default_title is the filename stem for file inputs; path is the resolved
-        source file, or None for in-memory sources."""
+    def register_reader(self, ext, func=None):
+        """Teach :meth:`load` to read a file type: ``func(path)`` returns its DataFrame.
+
+        From then on every ``load`` of a file ending in ``ext`` goes through
+        ``func`` — in this notebook, and on an explorer board driving it, where
+        dropped files of that type load too. ``func`` gets the path as a
+        ``str`` (plus any ``read_kwargs`` given to ``load``, as keyword
+        arguments) and returns a DataFrame; a dict, Series or numpy array is
+        turned into one. Registering a built-in extension such as ``'.csv'``
+        replaces the built-in reader for this notebook.
+
+        Parameters
+        ----------
+        ext : str | list of str
+            Extension(s) to read with ``func`` — ``'.dat'``, ``'dat'`` and
+            ``'*.dat'`` all mean the same; case is ignored.
+        func : callable, optional
+            The reader. Omit it to use ``register_reader`` as a decorator.
+
+        Returns
+        -------
+        callable
+            ``func``, so the decorator form leaves the function usable.
+
+        Examples
+        --------
+        >>> def read_dat(path):
+        ...     return pd.read_csv(path, sep=r'\\s+', comment='#')
+        >>> uc.register_reader('.dat', read_dat)
+        >>> uc.load('run1.dat')
+
+        >>> @uc.register_reader(['.log', '.out'])
+        ... def read_log(path):
+        ...     return pd.read_fwf(path, skiprows=3)
+        """
+        exts = [ext] if isinstance(ext, str) else list(ext)
+        keys = []
+        for e in exts:
+            key = str(e).strip().lstrip('*').lower()
+            if key and not key.startswith('.'):
+                key = '.' + key
+            if key in ('', '.'):
+                raise ValueError(
+                    "register_reader needs an extension such as '.dat'; for a "
+                    "file with none, pass the function to load(path, reader=...)")
+            keys.append(key)
+        if func is None:
+            def decorate(fn):
+                return self.register_reader(keys, fn)
+            return decorate
+        if not callable(func):
+            raise TypeError(f"register_reader needs a function that takes a file "
+                            f"path and returns a DataFrame, got {type(func).__name__}")
+        for key in keys:
+            self._custom_readers[key] = func
+        return func
+
+    def _reader_for(self, path, reader=None):
+        """The ``(read(path, kw), custom)`` pair :meth:`load` would use for ``path``.
+
+        ``reader`` (the user's function for one load) wins, then the
+        notebook's :meth:`register_reader` readers, then the built-ins.
+        ``custom`` says the user's function does the reading. Returns
+        ``(None, False)`` when nothing reads this file type — the explorer
+        asks for exactly that before loading a file.
+        """
+        func = reader or self._custom_readers.get(Path(path).suffix.lower())
+        if func is None:
+            return self._FILE_READERS.get(Path(path).suffix.lower()), False
+
+        def read(p, kw):
+            result = func(str(p), **kw)
+            if isinstance(result, pd.DataFrame):
+                return result
+            if isinstance(result, pd.Series):
+                return result.to_frame()
+            if isinstance(result, (dict, np.ndarray)):
+                return pd.DataFrame(result)
+            name = getattr(func, '__name__', 'the reader')
+            raise TypeError(f"{name}() returned {type(result).__name__} for "
+                            f"{Path(p).name}; a reader must return a DataFrame")
+        return read, True
+
+    def _no_reader_message(self, path):
+        """The unknown-file-type error, written as a reader to start from.
+
+        This is the "ask": rather than only naming what is supported, it hands
+        over a function the user can paste, edit and pass back (the stub's
+        body is ``_READER_STUB_BODY``).
+        """
+        path = Path(path)
+        suffix = path.suffix.lower()
+        name = _reader_name(suffix)
+        lines = [
+            (f"unichart has no reader for '{suffix}' files ({path.name})."
+             if suffix else
+             f"unichart can't tell what kind of file {path.name} is (it has "
+             f"no extension)."),
+            "Give it one: a function that takes the file's path and returns a "
+            "DataFrame. For example:",
+            "",
+            f"    def {name}(path):",
+            f"        return {_READER_STUB_BODY}   # edit to parse the file",
+            "",
+            f"    uc.load({str(path)!r}, reader={name})   # this load only",
+        ]
+        if suffix:
+            lines.append(f"    uc.register_reader({suffix!r}, {name})"
+                         f"   # every {suffix} file from now on")
+        lines += ["", f"Built-in types: {', '.join(self._FILE_READERS)}."]
+        return "\n".join(lines)
+
+    def _coerce_to_df(self, source, read_kwargs=None, reader=None):
+        """Coerce a single source into a (DataFrame, default_title, path, custom)
+        tuple. default_title is the filename stem for file inputs; path is the
+        resolved source file, or None for in-memory sources; custom is True when
+        a user-supplied reader read the file (see :meth:`_reader_for`)."""
         if isinstance(source, pd.DataFrame):
-            return self._dedupe_columns(source).copy(), None, None
+            return self._dedupe_columns(source).copy(), None, None, False
         if isinstance(source, (str, Path)):
             path = Path(source)
             if not path.is_file():
                 raise FileNotFoundError(f"No such file: {path}")
-            reader = self._FILE_READERS.get(path.suffix.lower())
-            if reader is None:
-                raise ValueError(
-                    f"Unsupported file type '{path.suffix}' for {path}; "
-                    f"supported: {', '.join(self._FILE_READERS)}")
-            return reader(path, read_kwargs or {}), path.stem, path.resolve()
+            read, custom = self._reader_for(path, reader)
+            if read is None:
+                raise ValueError(self._no_reader_message(source))
+            return read(path, read_kwargs or {}), path.stem, path.resolve(), custom
         if isinstance(source, dict):
-            return pd.DataFrame(source), None, None
+            return pd.DataFrame(source), None, None, False
         if isinstance(source, np.ndarray):
-            return pd.DataFrame(source), None, None
+            return pd.DataFrame(source), None, None, False
         raise TypeError(
             f"load() cannot handle source of type {type(source).__name__}; "
             f"pass a DataFrame, filepath, dict, or numpy array.")
@@ -6069,7 +6221,9 @@ class UnichartNotebook:
             ``True`` (default): embed the rows of any set that cannot be
             reproduced from a file — in-memory loads, derived sets (delta/
             combine), df-replaced sets, sets with added or overwritten
-            columns, or sets whose source file has gone missing. ``False``: save file references
+            columns, sets read by your own reader (``load(reader=...)``,
+            :meth:`register_reader`), or sets whose source file has gone
+            missing. ``False``: save file references
             only; non-reproducible sets are skipped with a warning. ``'all'``:
             embed every set's rows, making the session file fully
             self-contained (survives source-file edits/deletion).
@@ -6157,6 +6311,11 @@ class UnichartNotebook:
                 if file_ok and src.get('modified'):
                     # A loaded column was overwritten through the write APIs
                     # (ds[col]=..., set_column, add_column) — embed instead.
+                    file_ok = False
+                if file_ok and src.get('reader'):
+                    # Read by a user's function (load(reader=...) or
+                    # register_reader), which can't be stored, so a reload
+                    # couldn't read the file — embed instead.
                     file_ok = False
                 if file_ok and src.get('read_kwargs'):
                     try:
@@ -13177,7 +13336,8 @@ class UnichartNotebook:
     # added method is never silently hidden; names here that no longer exist are
     # simply skipped.
     _HELP_CATEGORIES = [
-        ("Loading & data",   ['load', 'load_df', 'load_clipboard', 'combine_sets',
+        ("Loading & data",   ['load', 'register_reader', 'load_df',
+                              'load_clipboard', 'combine_sets',
                               'combine', 'add_column', 'set_column',
                               'save_session', 'load_session']),
         ("Selection",        ['select', 'selected', 'omit', 'query', 'restore',

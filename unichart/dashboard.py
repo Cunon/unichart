@@ -1350,7 +1350,9 @@ def explore(uc=None, data=None, sessions=None, panels=None, title=None,
         notebook, not a copy of one. Dark mode is switched on to match the
         board unless the notebook is already in it.
     data : str | DataFrame | list, optional
-        Loaded before the board opens, via ``uc.load``.
+        Loaded before the board opens, via ``uc.load``. A file unichart has no
+        reader for (see ``uc.register_reader``) is not loaded: the board opens
+        with a reader for it staged in the terminal input, to edit and run.
     sessions : str | Path | list, optional
         Session files (``.json``, or a PNG from ``save_png`` with
         ``embed_session``) restored at startup, as visible

@@ -101,7 +101,7 @@ def test_terminal_tells_the_board_whether_it_owns_the_process(tmp_path=None):
     from unichart import dashboard
     seen = {}
 
-    def fake_build(notebook, title=None, startup=(), allow_quit=None):
+    def fake_build(notebook, title=None, startup=(), allow_quit=None, staged=()):
         seen['allow_quit'] = allow_quit
         return type('_Stub', (), {'run': lambda self, **kw: None})()
 

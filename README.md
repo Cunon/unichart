@@ -129,6 +129,19 @@ uc.delta(base_idx=0, study_indices='all', delta_parms='temperature')
   (`combined=True` concatenates them into one). Auto-detects `SETNUMBER` /
   `INDEX` / `TITLE` columns if you don't name them.
 - `load(source, ...)` — load from a file path (CSV/Excel/etc.) or other source.
+- `register_reader(ext, func)` / `load(path, reader=func)` — read any other file
+  type with your own function: it takes the file's path and returns a
+  DataFrame. Register it once to read that extension from then on, or pass it
+  for one load. Loading a type with no reader raises an error that spells out a
+  reader to start from:
+
+  ```python
+  def read_dat(path):
+      return pd.read_csv(path, sep=r'\s+', comment='#')
+
+  uc.register_reader('.dat', read_dat)
+  uc.load('run1.dat')
+  ```
 - `load_clipboard()` — pull a table straight from the system clipboard.
 - `add_column`, `set_column`, `combine_sets` / `combine`, `clear_data` — manage
   the shared frame after loading.
@@ -725,6 +738,10 @@ sheet reads the way the library does, and `uc` covers everything else:
   through an equally visible `uc.load_session(...)`, bringing its datasets, formatting and plot back. The
   file's contents decide, not its extension, so a data `.json` still loads as
   data.
+- Drop a file of a type unichart can't read and a reader for it is staged in
+  the input: a stub function plus the `uc.register_reader(...)` and
+  `uc.load(...)` that use it. Edit the stub to parse the file and press Enter;
+  later drops of that type then load straight away.
 - **✕ close** in the top bar shuts the board down: it asks first, then stops
   the server and ends the process — so `unichart runs.csv` in a shell returns
   to the prompt without a `Ctrl-C`. Typing `exit()` in the terminal pane does
@@ -773,12 +790,25 @@ unichart runs.csv board.json            # data first, then the session on top
 unichart runs.csv --panel plot:time:temp --save-session board.json
 ```
 
+Any other file type needs a reader, a Python function that takes the file's
+path and returns a DataFrame. Name one with `--reader` (from a script or an
+importable module), or just open the file and the explorer starts with a reader
+staged for you to finish. `--info`, `--html` and `--save-session` have no
+explorer to ask from, so there an unreadable file is an error that points at
+`--reader`:
+
+```bash
+unichart run1.dat --reader readers.py:read_dat
+unichart run1.dat                       # the explorer asks for a reader
+```
+
 Data files load first (as one batch, so `--combine` still means what it says),
 then sessions in the order given — so a session's own formatting is the one that
 sticks, and any `--panel` draws on top of the restored state. A session records
 its own theme, which the explorer honours; `--dark` overrides it. `--combine`,
-`--set-col` and `--name-col` describe how to *read* a data file, so passing one
-with nothing but a session on the line is an error rather than a no-op.
+`--set-col`, `--name-col` and `--reader` describe how to *read* a data file, so
+passing one with nothing but a session on the line is an error rather than a
+no-op.
 
 Seed the board with panels (repeat `--panel`, as `method:x:y[,y2][:z]`). For
 the GUI each one is replayed as a startup command in the transcript; for
