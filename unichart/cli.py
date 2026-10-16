@@ -68,9 +68,10 @@ GALLERY_URL = 'https://cunon.github.io/unichart/'
 # form is clearer than any flag encoding would be.
 PANEL_HELP = (
     "add a panel, as method:x:y[,y2][:z] (repeatable). method is one of "
-    "plot, plot_ymult, plot_marginal, bar, box, histogram, contour, table. "
+    "plot, plot_ymult, plot_marginal, bar, box, histogram, contour, polar, table "
+    "(polar: x is the angle, y the radius, a z makes it a contour map). "
     "Examples: plot:time:temp  |  plot:time:temp,press  |  "
-    "contour:rpm:torque:eff  |  histogram:temp"
+    "contour:rpm:torque:eff  |  polar:angle:radius:pt  |  histogram:temp"
 )
 
 
@@ -131,7 +132,11 @@ _WORDBREAKS = ':='
 # from-scratch user who hasn't installed the extra. Kept honest by a check
 # against PLOT_METHODS in the test suite.
 COMPLETION_METHODS = ('plot', 'plot_ymult', 'plot_marginal', 'bar', 'box',
-                      'histogram', 'contour', 'table')
+                      'histogram', 'contour', 'polar', 'table')
+
+# The panel methods that take a z (dashboard._Z_METHODS, spelled out for the
+# same reason).
+_COMPLETION_Z_METHODS = ('contour', 'polar')
 
 _DATA_SUFFIXES = ('.csv', '.tsv', '.txt', '.xlsx', '.xls', '.json', '.parquet')
 
@@ -245,8 +250,8 @@ def _complete_panel(spec, columns):
     elif len(fields) == 3:                                 # y, possibly a list
         done, sep, partial = last.rpartition(',')
         values = [done + sep + c for c in _match(columns, partial)]
-    elif len(fields) == 4:                                 # z — contour only
-        values = _match(columns, last) if head[0] == 'contour' else []
+    elif len(fields) == 4:                                 # z — contour and polar only
+        values = _match(columns, last) if head[0] in _COMPLETION_Z_METHODS else []
     else:
         return []
     return [':'.join(head + [value]) for value in values]

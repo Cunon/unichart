@@ -614,6 +614,36 @@ def weather_frame(seed=3):
     return pd.concat(frames, ignore_index=True)
 
 
+def survey_frame(seed=4):
+    """An inlet total-pressure survey at three throttle settings: rakes every
+    30 degrees round the duct, five probes from hub to tip. A strut at 210
+    degrees leaves a wake that deepens with the airflow — the shape ``polar``
+    and its contour map are built for."""
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    angle = np.repeat(np.arange(0.0, 360.0, 30.0), 5)        # 12 rakes ...
+    radius = np.tile(np.linspace(40.0, 90.0, 5), 12)          # ... x 5 probes, mm
+    span = (radius - 40.0) / 50.0                             # 0 at the hub, 1 at the tip
+    off = (angle - 210.0 + 180.0) % 360.0 - 180.0             # degrees from the strut
+    frames = []
+    for idx, (name, flow) in enumerate((('Idle', 0.35), ('Cruise', 0.75),
+                                        ('Max power', 1.0))):
+        loss = flow ** 2 * (3.2 * np.exp(-(off / 28.0) ** 2) * (0.5 + 0.5 * span)
+                            + 1.6 * (span - 0.45) ** 2
+                            + 0.35 * np.cos(np.radians(2 * (angle - 40.0))))
+        frames.append(pd.DataFrame({
+            'SETNUMBER': idx,
+            'TITLE': name,
+            'angle_deg': angle,
+            'radius_mm': radius,
+            'pt_kpa': (101.3 - loss + rng.normal(0, 0.03, angle.size)).round(3),
+            'tt_c': (15 + 6 * flow + 4 * flow * span * np.exp(-((angle - 110.0) / 35.0) ** 2)
+                     + rng.normal(0, 0.15, angle.size)).round(2),
+        }))
+    return pd.concat(frames, ignore_index=True)
+
+
 # Example datasets offered on the sidebar. Each brings its own cheat sheet,
 # since snippets are only worth clicking if they run on the columns at hand.
 # Snippets are templates: {sets} is the range of set indices this example
@@ -688,6 +718,27 @@ EXAMPLES = [
              ("query('{sets}', 'season == \"summer\"'); plot(x='day', y='temp_c')", True),
              ("query('{sets}', None)  # back to every row", True),
              ("summary(cols=['temp_c', 'rain_mm'])", True),
+             ("list_sets()", False),
+         ]),
+    dict(key='survey', label='Inlet survey', frame=survey_frame,
+         about='An inlet pressure survey, rakes round a duct at three throttle settings: '
+               'angle_deg, radius_mm, pt_kpa, tt_c',
+         blurb='polar · contour map · spokes · query',
+         start=["polar(x='angle_deg', y='radius_mm', z='pt_kpa', by='sets', ncols=3)"],
+         snippets=[
+             ("polar(x='angle_deg', y='radius_mm', z='pt_kpa', by='sets', ncols=3)", True),
+             ("select({s2}); polar(x='angle_deg', y='radius_mm', z='pt_kpa', "
+              "interp_method='cubic')", True),
+             ("line('angle_deg', 210, label='strut'); polar(x='angle_deg', "
+              "y='radius_mm', z='pt_kpa', by='sets', ncols=3, "
+              "direction='clockwise')", True),
+             ("query('{sets}', 'radius_mm == 90'); scale('pt_kpa', (97, 101.5)); "
+              "polar(x='angle_deg', y='pt_kpa')", True),
+             ("linestyle('{sets}', '-')", False),
+             ("query('{sets}', None); scale('pt_kpa', None)  # every row, auto range", True),
+             ("polar(x='angle_deg', y='radius_mm', z=['pt_kpa', 'tt_c'], by='sets', "
+              "ncols=3)", True),
+             ("summary(cols=['pt_kpa', 'tt_c'])", True),
              ("list_sets()", False),
          ]),
 ]
@@ -1846,7 +1897,7 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
             return 'term-modal closing'
         if trigger == 'term-quit':
             return 'term-modal'
-        # Cancelled — and anything unexpected is read as a cancel, because the
+        # Canceled — and anything unexpected is read as a cancel, because the
         # one branch that ends the process should only ever be reached by the
         # button that says so.
         return 'term-modal hidden'

@@ -147,6 +147,44 @@ def _lag(x: np.ndarray, alpha: float) -> np.ndarray:
     return out
 
 
+# --------------------------------------------------------------------------
+# A second frame, for the polar cards: a total-pressure survey of the cowl's
+# cooling-air inlet, the same four runs at full power. A rake of five probes
+# is swung round the inlet in 10 degree steps; the oil cooler behind it, at
+# 200 degrees, leaves a wake that deepens with the airflow.
+# --------------------------------------------------------------------------
+
+SURVEY_CSV = os.path.join(HERE, "cowl_survey.csv")
+
+# Per run: cooling-air flow against the baseline's, and the total pressure
+# ahead of the inlet (denser air on the cold day).
+SURVEY_RUNS = {"Baseline": (1.00, 101.3), "Cold day": (1.05, 101.9),
+               "Hot day": (0.92, 100.7), "Tuned map": (1.12, 101.3)}
+
+
+def build_survey(seed: int = 11) -> pd.DataFrame:
+    """The survey of the four runs: 36 angles x 5 radii each."""
+    rng = np.random.default_rng(seed)
+    angle = np.repeat(np.arange(0.0, 360.0, 10.0), 5)
+    radius = np.tile(np.linspace(40.0, 90.0, 5), 36)
+    span = (radius - 40.0) / 50.0                          # 0 inner probe, 1 outer
+    behind = (angle - 200.0 + 180.0) % 360.0 - 180.0       # degrees from the cooler
+    frames = []
+    for i, (name, *_) in enumerate(RUNS):
+        flow, ahead = SURVEY_RUNS[name]
+        loss = flow ** 2 * (2.4 * np.exp(-(behind / 32.0) ** 2) * (0.4 + 0.6 * span)
+                            + 1.2 * (span - 0.5) ** 2
+                            + 0.25 * np.cos(np.radians(2 * (angle - 60.0))))
+        frames.append(pd.DataFrame({
+            "angle_deg": angle,
+            "radius_mm": radius,
+            "pt_kpa": (ahead - loss + rng.normal(0, 0.02, angle.size)).round(3),
+            "run_id": i,
+            "run_name": name,
+        }))
+    return pd.concat(frames, ignore_index=True)
+
+
 # The setup shown once at the top of the page. `fresh_uc` runs exactly this.
 SETUP_CODE = """\
 from unichart import UnichartNotebook
@@ -174,6 +212,26 @@ def fresh_uc(df: pd.DataFrame) -> UnichartNotebook:
     return uc
 
 
+# What the polar cards run after the setup above, shown in their section's
+# primer. `fresh_survey_uc` runs exactly this.
+SURVEY_CODE = """\
+# 4 runs x 36 angles x 5 radii
+survey = pd.read_csv('cowl_survey.csv')
+uc.clear_data()
+uc.load_df(survey, set_idx_column='run_id',
+                   set_name_column='run_name')
+"""
+
+
+def fresh_survey_uc(df: pd.DataFrame, survey: pd.DataFrame) -> UnichartNotebook:
+    """A notebook set up as above, then holding the survey instead."""
+    uc = fresh_uc(df)
+    with contextlib.redirect_stdout(io.StringIO()):
+        uc.clear_data()
+        uc.load_df(survey, set_idx_column="run_id", set_name_column="run_name")
+    return uc
+
+
 # --------------------------------------------------------------------------
 # The gallery itself. Each entry's `code` is executed verbatim and shown
 # verbatim; `uc` is a notebook freshly loaded with the frame above, and `df`
@@ -185,9 +243,15 @@ SECTIONS = [
     ("inspect", "Look inside", "What is loaded, what each run holds, and how to get "
                                "at the numbers. These print the same tables you get "
                                "in a notebook."),
+    ("columns", "Make your own columns", "Define a column, or change one you loaded, "
+                                         "in every run or only some."),
     ("shape", "Slice and shape", "Choose what is drawn before you worry about how it looks."),
+    ("legend", "Your own legend entries", "Keys for what no run draws: a convention, "
+                                          "a shaded band, a note."),
     ("dist", "Distributions", "When the spread matters more than the trace."),
     ("fields", "Fields and tables", "Scattered data as a surface, and numbers as numbers."),
+    ("round", "In the round", "Angle and radius on polar axes, read off a survey taken "
+                              "round an inlet."),
     ("analysis", "Analysis", "Differences against a baseline, and fits through the cloud."),
     ("looks", "Looks", "The same figures, restyled."),
     ("defaults", "Set it once", "Store the arguments you keep typing, one method "
@@ -197,11 +261,106 @@ SECTIONS = [
 ]
 
 # Prose drawn between a section's heading and its first card. The plotly one
-# states library behaviour no card can show: _clear_last_fig emptying the
+# states library behavior no card can show: _clear_last_fig emptying the
 # previous figure, and save_png writing last_fig while the session it embeds
 # replays only the plot call. The defaults one restates the <method>_defaults
-# rules (see _method_defaults_setter). Keep each in step with the code.
+# rules (see _method_defaults_setter). The columns one restates the write
+# paths (add_column, set_column, Dataset.__setitem__) and what each formula
+# is handed. The round one holds the survey and SURVEY_CODE, which build()
+# writes in for its markers. The legend one restates legend_entry's rules
+# (see its docstring). Keep each in step with the code.
 SECTION_INTROS = {
+    "round": """\
+      <div class="primer">
+        <div>
+          <p>
+            These cards read a second frame, written next to this page as
+            <code>cowl_survey.csv</code>: a total-pressure survey of the cowl's
+            cooling-air inlet, from the same four runs at full power. A rake of
+            five probes was swung round the inlet in 10&deg; steps, and the oil
+            cooler sits behind it at 200&deg;. In <code>uc.polar</code>,
+            <code>x</code> is the angle and <code>y</code> the radius.
+          </p>
+          <dl>
+            <dt>angle_deg</dt><dd>rake angle, 0–350</dd>
+            <dt>radius_mm</dt><dd>probe radius, 40–90</dd>
+            <dt>pt_kpa</dt><dd>total pressure</dd>
+            <dt>run_id</dt><dd>0–3, the four runs</dd>
+          </dl>
+        </div>
+        <div class="code">
+          <button class="copy" type="button" data-copy="<!--SURVEY_RAW-->">Copy</button>
+          <pre><code><!--SURVEY--></code></pre>
+        </div>
+      </div>
+""",
+    "legend": """\
+      <div class="primer">
+        <p>
+          <code>uc.legend_entry</code> adds a legend entry that no dataset draws. Its
+          text is its name, and it is listed with the runs on every plot until you
+          remove it. <code>marker</code> and <code>linestyle</code> take Matplotlib
+          shorthand (<code>'o'</code>, <code>'--'</code>) or any Plotly name
+          (<code>'circle-open'</code>, <code>'longdash'</code>), and
+          <code>'none'</code> turns either off.
+        </p>
+        <dl>
+          <dt><code>uc.legend_entry('X', color=…)</code></dt>
+          <dd>Makes the entry, or edits it if it exists, changing only the arguments
+            you pass. A new entry draws a solid line, unless you give it a marker and
+            no <code>linestyle</code>. With no <code>color</code> it takes the
+            legend's text color.</dd>
+          <dt><code>rename='Y'</code></dt>
+          <dd>New text, same place in the legend.</dd>
+          <dt><code>position='start'</code></dt>
+          <dd>Lists it before the runs instead of after them.</dd>
+          <dt><code>color='reset'</code></dt>
+          <dd>Puts one argument back to its default.</dd>
+          <dt><code>uc.legend_entry('X', 'reset')</code></dt>
+          <dd>Removes the entry (<code>'clear'</code> works too). <code>'all'</code>
+            in place of a name edits or removes every entry, and
+            <code>reset_format()</code> clears them with the rest.</dd>
+          <dt><code>uc.legend_entry()</code></dt>
+          <dd>What is stored, as a dict. The entries are saved with the session, and
+            <code>legend='off'</code> leaves them out with the rest of the
+            legend.</dd>
+        </dl>
+      </div>
+""",
+    "columns": """\
+      <div class="primer">
+        <p>
+          Every run lives in one combined frame, <code>uc.df</code>. Write to it
+          through these three calls and a new column plots, filters and tabulates
+          like a loaded one, and <code>save_session</code> keeps it. The same calls
+          update a column that already exists.
+        </p>
+        <dl>
+          <dt><code>uc.add_column(name, fn)</code></dt>
+          <dd>Every run. <code>fn</code> gets <code>uc.df</code>: all the runs stacked,
+            every row, whatever the queries. Right for row-by-row math.</dd>
+          <dt><code>uc.set_column(sets, name, fn)</code></dt>
+          <dd>The runs you name, <code>'all'</code> included. <code>fn</code> gets one
+            Dataset at a time, so <code>d.title</code> can pick a per-run constant and
+            <code>max</code>, <code>mean</code> or <code>diff</code> stay inside the run.
+            Runs left out don't get the column, and plots of it skip them.</dd>
+          <dt><code>ds[name] = …</code></dt>
+          <dd>One run, <code>ds = uc.sets[i]</code>: the same write as
+            <code>uc.set_column(i, name, lambda d: …)</code>.</dd>
+          <dt>Before a query</dt>
+          <dd><code>ds[…]</code> and a <code>set_column</code> formula read only the rows
+            a run's query keeps, and write NaN into the rows it hides, overwriting
+            loaded values there too. Make and fix columns first, or clear the filter
+            with <code>uc.query('all')</code>. <code>add_column</code> sees every row
+            and is safe.</dd>
+          <dt>Not <code>ds.df[name] = …</code></dt>
+          <dd><code>ds.df</code> is a copy, and the write is lost without a word.
+            Editing <code>uc.df</code> in place (<code>uc.df.loc[…] = …</code>) does
+            change the plots, but goes untracked, so a saved session can come back
+            without it.</dd>
+        </dl>
+      </div>
+""",
     "defaults": """\
       <div class="primer">
         <p>
@@ -343,6 +502,50 @@ EXAMPLES = [
     ),
 
     dict(
+        section="columns", id="add-column", api="uc.add_column",
+        title="One formula, every run",
+        blurb="add_column writes the whole frame at once. Give it a name that "
+              "already exists and it updates that column in every run instead: "
+              "here, a calibration offset for the whole test stand.",
+        code="uc.add_column('power_hp', lambda d: d['power_kw'] * 1.341)\n"
+             "uc.add_column('egt_f', lambda d: d['egt_c'] * 9 / 5 + 32)\n"
+             "uc.add_column('cht_c', lambda d: d['cht_c'] + 1.5)   # updates all four\n"
+             "uc.plot(x='time_s', y=['power_hp', 'egt_f'], hspace=110)",
+    ),
+    dict(
+        section="columns", id="set-column", api="uc.set_column(…, fn)",
+        title="A constant for each run",
+        blurb="set_column calls its formula once per run, with that run's Dataset, "
+              "so a lookup on d.title brings in what the file never held. Take out "
+              "each day's air temperature and the four CHT traces close up.",
+        code="oat = {'Baseline': 15, 'Cold day': -5, 'Hot day': 35, 'Tuned map': 15}\n"
+             "uc.set_column('all', 'cht_rise', lambda d: d['cht_c'] - oat[d.title])\n"
+             "uc.plot(x='time_s', y=['cht_c', 'cht_rise'], hspace=110)",
+    ),
+    dict(
+        section="columns", id="per-run-agg", api="add_column vs set_column",
+        title="Max, mean, diff: per run",
+        blurb="add_column's formula sees all four runs stacked, so anything that "
+              "reduces or shifts (max, mean, diff, cumsum, rolling) mixes them: the "
+              "hot day never reaches 100 % on the left. set_column keeps it per run.",
+        code="pct = lambda d: d['power_kw'] / d['power_kw'].max() * 100\n"
+             "uc.add_column('pct_of_all', pct)              # max of every run\n"
+             "uc.set_column('all', 'pct_of_own', pct)       # max of each run\n"
+             "uc.plot(x='time_s', y=['pct_of_all', 'pct_of_own'], hspace=110)",
+    ),
+    dict(
+        section="columns", id="ds-setitem", api="ds[col] = …",
+        title="Fix one run",
+        blurb="Index a Dataset to change that run alone. Pandas' where and mask "
+              "update only the rows that match: here an offset for one probe, then "
+              "a dropout blanked so it plots as a gap.",
+        code="hot = uc.sets[2]\n"
+             "hot['egt_c'] = hot['egt_c'] - 12      # not hot.df[...]: that's a copy\n"
+             "hot['egt_c'] = hot['egt_c'].mask(hot['time_s'].between(200, 250))\n"
+             "uc.plot(x='time_s', y='egt_c')",
+    ),
+
+    dict(
         section="shape", id="select", api="uc.select · uc.query",
         title="Select runs, filter rows",
         blurb="Selection decides which datasets are drawn; a query filters rows "
@@ -371,6 +574,43 @@ EXAMPLES = [
              "uc.var_format('egt_c', color='darkorange')\n"
              "uc.var_format('fuel_kgh', color='steelblue')\n"
              "uc.plot_ymult(x='time_s', y=['cht_c', 'egt_c', 'fuel_kgh'])",
+    ),
+
+    dict(
+        section="legend", id="legend-key", api="uc.legend_entry",
+        title="A key for the glyphs",
+        blurb="When color already names the run, say what the shapes mean. An entry "
+              "given no color takes the legend's text color, so it reads as a key "
+              "rather than another run, and position='start' lists it first.",
+        code="uc.marker('all', 'o'); uc.markersize('all', 5); uc.alpha_marker('all', 0.7)\n"
+             "uc.reg_order('all', 2)\n"
+             "uc.legend_entry('samples', marker='o', markersize=5, position='start')\n"
+             "uc.legend_entry('quadratic fit', linestyle='-', position='start')\n"
+             "uc.plot(x='rpm', y='eta_pct')",
+    ),
+    dict(
+        section="legend", id="legend-band", api="rename= · 'reset'",
+        title="Change it, rename it, remove it",
+        blurb="A highlight has no legend entry of its own, so give it one: a square "
+              "in the band's color. The same name again changes only what you pass, "
+              "and 'reset' as the second argument removes the entry.",
+        code="uc.highlight('time_s', (300, 450), color='orange', alpha=0.15)\n"
+             "uc.legend_entry('climb', marker='s', markersize=12, color='orange')\n"
+             "uc.legend_entry('draft', linestyle='none', position='start')   # text only\n"
+             "\n"
+             "# The same name again changes only what you pass\n"
+             "uc.legend_entry('climb', color='rgba(255, 165, 0, 0.35)')   # like the band\n"
+             "uc.legend_entry('climb', rename='climb, 300–450 s')         # same place\n"
+             "uc.legend_entry('draft', 'reset')                           # remove it\n"
+             "uc.plot(x='time_s', y='cht_c')",
+    ),
+    dict(
+        section="legend", id="legend-note", api="linestyle='none'",
+        title="A note in the legend",
+        blurb="With no line and no marker, an entry is just text: the rig, the "
+              "date, a caveat. A grid shares one legend, so the note shows once.",
+        code="uc.legend_entry('Rig 2, sea level, 15 Oct', linestyle='none', position='start')\n"
+             "uc.plot(x='time_s', y=['rpm', 'cht_c'], hspace=110)",
     ),
 
     dict(
@@ -432,6 +672,32 @@ EXAMPLES = [
         html=True,
     ),
 
+    # `data='survey'`: run on the cowl survey (SURVEY_CODE) instead of the runs.
+    dict(
+        section="round", id="polar", thumb="Polar", api="uc.polar",
+        title="Behind the oil cooler",
+        blurb="The outer probe of each run, read clockwise from the top. scale() on "
+              "the angle shows just that sector, and on the radius zooms onto the "
+              "ring: every run dips behind the cooler, the tuned map deepest.",
+        code="uc.query('all', 'radius_mm == 90')   # the outer probe\n"
+             "uc.scale('angle_deg', (110, 290))     # this sector of angles\n"
+             "uc.scale('pt_kpa', (97, 102))         # and this range of radii\n"
+             "uc.polar(x='angle_deg', y='pt_kpa', direction='clockwise')",
+        data="survey",
+    ),
+    dict(
+        section="round", id="polar-contour", thumb="Polar contour", api="uc.polar(z=…)",
+        title="A map in the round",
+        blurb="Pass z and the same call draws a contour map, interpolated all the way "
+              "round. The panels share their levels and colorbar, so the two runs "
+              "compare at a glance, and a line() on the angle draws a spoke.",
+        code="uc.select([0, 3])\n"
+             "uc.line('angle_deg', 200, color='black', linestyle=':', label='oil cooler')\n"
+             "uc.polar(x='angle_deg', y='radius_mm', z='pt_kpa', by='sets',\n"
+             "         direction='clockwise', interp_method='cubic')",
+        data="survey",
+    ),
+
     dict(
         section="analysis", id="delta", thumb="Delta", api="uc.delta",
         title="Against a baseline",
@@ -447,7 +713,7 @@ EXAMPLES = [
         section="analysis", id="trend", thumb="Trend fit", api="uc.reg_order",
         title="Fits through the cloud",
         blurb="Give a dataset a regression order and its line becomes the fit, "
-              "labelled in the legend. LOWESS needs statsmodels.",
+              "labeled in the legend. LOWESS needs statsmodels.",
         code="uc.marker('all', 'o'); uc.markersize('all', 4); uc.alpha_marker('all', 0.7)\n"
              "uc.reg_order('all', 2)\n"
              "uc.plot(x='rpm', y='eta_pct')",
@@ -562,12 +828,18 @@ EXAMPLES = [
 # Rendering
 # --------------------------------------------------------------------------
 
-def render_example(ex: dict, df: pd.DataFrame, static: bool = False) -> dict:
+def render_example(ex: dict, df: pd.DataFrame, static: bool = False,
+                   survey: pd.DataFrame | None = None) -> dict:
     """Execute one card's code and capture its figure. Returns the card dict."""
     import plotly.io as pio
 
-    uc = fresh_uc(df)
+    if ex.get("data") == "survey":
+        uc = fresh_survey_uc(df, survey)
+    else:
+        uc = fresh_uc(df)
     ns = {"uc": uc, "np": np, "pd": pd, "df": df.copy()}
+    if survey is not None:
+        ns["survey"] = survey.copy()
 
     # An `html` card shows what the notebook itself displays: the styled HTML
     # widget that unichart hands to IPython's display(). Catch it on the way
@@ -690,7 +962,7 @@ _TOKEN = re.compile(r"""
 
 
 def highlight(code: str) -> str:
-    """Minimal Python colouring: comments, strings, numbers, method names."""
+    """Minimal Python coloring: comments, strings, numbers, method names."""
     out, pos = [], 0
     for m in _TOKEN.finditer(code):
         out.append(html.escape(code[pos:m.start()]))
@@ -888,11 +1160,13 @@ def build(only: str | None = None, dump_dir: str | None = None,
           embed_js: bool = False) -> None:
     df = build_frame()
     df.to_csv(DATA_CSV, index=False)
+    survey = build_survey()
+    survey.to_csv(SURVEY_CSV, index=False)
 
     wanted = [e for e in EXAMPLES if only is None or only in e["id"]]
     cards, problems = [], []
     for ex in wanted:
-        card = render_example(ex, df, static=static)
+        card = render_example(ex, df, static=static, survey=survey)
         cards.append(card)
         for msg in card["warnings"]:
             problems.append(f"{ex['id']}: {msg}")
@@ -932,6 +1206,8 @@ def build(only: str | None = None, dump_dir: str | None = None,
             f'        <p>{html.escape(sblurb)}</p>\n'
             f'      </div>\n'
             + SECTION_INTROS.get(sid, "")
+            .replace("<!--SURVEY_RAW-->", html.escape(SURVEY_CODE.strip()))
+            .replace("<!--SURVEY-->", highlight(SURVEY_CODE.strip()))
             + "\n".join(rendered)
             + "\n    </section>"
         )

@@ -49,7 +49,7 @@ def _display_renders():
     return True
 import re
 import inspect
-from scipy.interpolate import griddata
+from scipy.interpolate import griddata, RegularGridInterpolator
 import functools
 import contextlib
 import contextvars
@@ -72,7 +72,7 @@ from pathlib import Path
 # terminal renders it, the explorer's web terminal converts it to spans, and
 # anything that can't gets plain text. The ~10 lines of gating are duplicated
 # from unichart.cli rather than imported — the CLI depends on this module, not
-# the other way round.
+# the other way around.
 #
 # _HELP_COLOR is the override the explorer terminal sets: it runs commands under
 # redirect_stdout, so auto-detection there would always see "not a tty".
@@ -364,6 +364,7 @@ def _build_mpl_template(darkmode):
         zeroline=False,
         showgrid=True, gridcolor=grid, gridwidth=0.8, griddash='solid',
     )
+    polar_grid = dict(showgrid=True, gridcolor=grid, gridwidth=0.8, griddash='solid')
     tpl.layout.update(
         font=dict(family=MPL_FONT_FAMILY, color=ink),
         paper_bgcolor=face,
@@ -372,6 +373,20 @@ def _build_mpl_template(darkmode):
         colorscale=dict(sequential=viridis, sequentialminus=viridis[::-1]),
         xaxis=axis,
         yaxis=axis,
+        # Polar axes as Matplotlib draws them: the outer circle is the spine,
+        # angle ticks point out of it, and the radius labels run along a
+        # spoke-free line at 22.5 degrees (rlabel_position) with no line,
+        # level and about five of them. Left to itself Plotly crowds a small
+        # disc with ten labels and then turns them 90 degrees, which stacks
+        # their digits into a column along the line.
+        polar=dict(
+            bgcolor=face,
+            angularaxis=dict(showline=True, linecolor=ink, linewidth=0.8,
+                             ticks='outside', tickcolor=ink, ticklen=3.5,
+                             tickwidth=0.8, **polar_grid),
+            radialaxis=dict(showline=False, ticks='', angle=22.5, tickangle=0,
+                            nticks=5, **polar_grid),
+        ),
         legend=dict(bgcolor=face, bordercolor='#cccccc', borderwidth=0.8),
     )
     return tpl
@@ -457,7 +472,7 @@ _SUBPLOT_MAX_GAP_SHARE = 0.6
 
 
 def _parse_spacing(name, val):
-    """Normalise an ``hspace``/``vspace`` value to ``('px', n)`` or
+    """Normalize an ``hspace``/``vspace`` value to ``('px', n)`` or
     ``('frac', f)``; ``None`` passes through. Numbers below 1 are a fraction
     of the plot area (Plotly's convention); 1 and above are pixels. Strings
     may carry a ``px`` suffix (``'60px'``)."""
@@ -1174,6 +1189,109 @@ def _line_label_annotation(line_spec, orientation, default_size=None):
 _LINE_LEGEND_GROUP = '_uc_line'
 _LINE_LEGEND_RANK = 10000
 
+# Custom legend entries (``UnichartNotebook.legend_entry``). An entry is stored
+# as these keys; None means "off" for marker and linestyle and "the notebook's
+# default" for the rest. 'reset' on a field puts back the value here.
+_LEGEND_ENTRY_DEFAULTS = {'color': None, 'marker': None, 'linestyle': 'solid',
+                          'markersize': None, 'linewidth': None,
+                          'position': 'end'}
+# legendrank base per position. Data entries sit at 1000 + set index (bar
+# overlay columns from 2000, unranked traces at Plotly's default 1000), so
+# 'start' goes ahead of them all and 'end' after them, but still before the
+# reference-line entries at _LINE_LEGEND_RANK.
+_LEGEND_ENTRY_RANKS = {'start': 0, 'end': 9000}
+# Strings that turn an entry's marker or line off, besides LINESTYLE_MAP's own.
+_STYLE_OFF = ('none', 'None', '', ' ')
+
+
+def _legend_entry_value(key, value):
+    """Check one ``legend_entry`` style argument and return the value to store:
+    Plotly's names for marker and linestyle (Matplotlib shorthand is
+    translated), None where the field is off or left to the notebook default.
+    ``'reset'`` returns the field's default. Raises on anything Plotly would
+    reject, so a typo fails at the call instead of at the next plot."""
+    if isinstance(value, str) and value == 'reset':
+        return _LEGEND_ENTRY_DEFAULTS[key]
+    if key == 'color':
+        if not isinstance(value, str):
+            raise TypeError(f"legend_entry: color must be a string, got {value!r}")
+        try:
+            go.scatter.Line(color=value)
+        except ValueError:
+            raise ValueError(f"legend_entry: {value!r} is not a color Plotly knows "
+                             "(a name like 'red', '#1f77b4' or 'rgb(0,0,0)')") from None
+        return value
+    if key == 'marker':
+        if not isinstance(value, str):
+            raise TypeError(f"legend_entry: marker must be a string, got {value!r}")
+        if value in _STYLE_OFF:
+            return None
+        symbol = MARKER_MAP_MPL_TO_PLOTLY.get(value, value)
+        try:
+            go.scatter.Marker(symbol=symbol)
+        except ValueError:
+            raise ValueError(
+                f"legend_entry: unknown marker {value!r}. Use a Matplotlib marker "
+                f"({' '.join(MARKER_MAP_MPL_TO_PLOTLY)}) or a Plotly symbol name "
+                "('circle-open', 'star', ...), or 'none'") from None
+        return symbol
+    if key == 'linestyle':
+        if not isinstance(value, str):
+            raise TypeError(f"legend_entry: linestyle must be a string, got {value!r}")
+        if value in _STYLE_OFF:
+            return None
+        dash = LINESTYLE_MAP_MPL_TO_PLOTLY.get(value, value)
+        try:
+            go.scatter.Line(dash=dash)
+        except ValueError:
+            raise ValueError(
+                f"legend_entry: unknown linestyle {value!r}. Use '-', '--', '-.', "
+                "':', a Plotly dash ('solid', 'dash', 'longdash', 'dot', ...), "
+                "or 'none'") from None
+        return dash
+    if key in ('markersize', 'linewidth'):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"legend_entry: {key} must be a number, got {value!r}")
+        if value < 0 or (key == 'markersize' and value == 0):
+            raise ValueError(f"legend_entry: {key} must be "
+                             f"{'positive' if key == 'markersize' else '>= 0'}, "
+                             f"got {value}")
+        return value
+    if key == 'position':
+        if value not in _LEGEND_ENTRY_RANKS:
+            raise ValueError(f"legend_entry: position must be 'start' or 'end', "
+                             f"got {value!r}")
+        return value
+    raise KeyError(key)
+
+
+def _check_legend_entries(entries):
+    """A validated copy of a whole ``legend_entries`` store (``{name: spec}``),
+    as assigned to the attribute or restored from a session. A key this
+    version doesn't know (a session from a newer one) is dropped."""
+    if not isinstance(entries, dict):
+        raise TypeError(f"legend_entries must be a dict of name -> style, "
+                        f"got {type(entries).__name__}")
+    checked = {}
+    for name, spec in entries.items():
+        if not isinstance(name, str) or not name or name == 'all':
+            raise ValueError(f"legend entry names must be non-empty strings other "
+                             f"than 'all', got {name!r}")
+        if not isinstance(spec, dict):
+            raise TypeError(f"legend entry {name!r} must be a dict, got {type(spec).__name__}")
+        entry = dict(_LEGEND_ENTRY_DEFAULTS)
+        if 'linestyle' not in spec and spec.get('marker') not in (None, *_STYLE_OFF):
+            entry['linestyle'] = None          # a marker alone: no line, as in legend_entry
+        for key, value in spec.items():
+            if key in entry:
+                # A stored None is already in stored form (off / notebook
+                # default); only 'position' has no None.
+                entry[key] = (_legend_entry_value(key, value) if value is not None
+                              else _LEGEND_ENTRY_DEFAULTS['position'] if key == 'position'
+                              else None)
+        checked[name] = entry
+    return checked
+
 
 def _legend_entries(fig):
     """Objects that can put an entry in ``fig``'s legend: the traces not
@@ -1203,7 +1321,7 @@ def _prefix_annotation(annotation):
 # Variable Format Resolver (used by multi-y plot)
 # -----------------------------------------------------------------------------
 _VAR_FORMAT_KEYS = ('color', 'marker', 'linestyle', 'markersize', 'linewidth', 'alpha',
-                    'alpha_marker', 'alpha_line', 'style')
+                    'alpha_marker', 'alpha_line', 'style', 'marker_interval')
 
 # CSS named colors (the set Plotly accepts), for ``_color_with_alpha``. Plotly
 # only validates names; it ships no name -> value table.
@@ -1326,6 +1444,8 @@ _DATASET_FORMAT_DEFAULTS = {
     'alpha_marker': None,
     'alpha_line':    None,
     'fill':       True,
+    # Which markers a set shows (see _check_marker_interval); None = every one.
+    'marker_interval':  None,
     # Precision used when a value is *displayed* — table/summary cells, plot
     # hover readouts. Two spellings of one knob, so at most one is ever set:
     # sig_figs counts significant figures, decimals counts places after the
@@ -1347,7 +1467,7 @@ _DATASET_FORMAT_DEFAULTS = {
 # ``plot_type`` because the repo treats it as structural (which is why the bulk
 # reset sweep skips it too).
 _INHERITED_FORMAT_ATTRS = (
-    'color', 'marker', 'linestyle', 'markersize', 'linewidth', 'edgewidth',
+    'color', 'marker', 'linestyle', 'markersize', 'marker_interval', 'linewidth', 'edgewidth',
     'alpha', 'alpha_marker', 'alpha_line', 'edge_color', 'fill', 'hue',
     'hue_palette', 'hue_order', 'style', 'display_parms', 'zorder',
     'sig_figs', 'decimals',
@@ -1375,6 +1495,8 @@ def _resolve_var_format(dataset, variable, variable_formats=None):
         'edge_color': getattr(dataset, 'edge_color', 'black'),
         'edgewidth':  var_fmt.get('edgewidth',  getattr(dataset, 'edgewidth', 1)),
         'fill':       var_fmt.get('fill',       getattr(dataset, 'fill', True)),
+        'marker_interval': var_fmt.get('marker_interval',
+                                       getattr(dataset, 'marker_interval', None)),
     }
 
 
@@ -1725,6 +1847,7 @@ class Dataset:
         self._fill = fmt.get('fill', True)
         self._linestyle = fmt.get('linestyle', None)
         self.markersize = fmt.get('markersize', 10)
+        self.marker_interval = fmt.get('marker_interval', None)
         self.alpha = fmt.get('alpha', 1)
         self.alpha_marker = fmt.get('alpha_marker', None)
         self.alpha_line = fmt.get('alpha_line', None)
@@ -1989,6 +2112,15 @@ class Dataset:
     def marker(self, value): self._marker = value
 
     @property
+    def marker_interval(self):
+        """Which of the set's markers show (see
+        :meth:`UnichartNotebook.marker_interval`); None shows every one."""
+        return self._marker_interval
+
+    @marker_interval.setter
+    def marker_interval(self, value): self._marker_interval = _check_marker_interval(value)
+
+    @property
     def linestyle(self): return self._linestyle
 
     @linestyle.setter
@@ -2070,6 +2202,7 @@ class Dataset:
             'fill': self.fill,
             'linestyle': self.linestyle,
             'markersize': self.markersize,
+            'marker_interval': self.marker_interval,
             'alpha': self.alpha,
             'alpha_marker': self.alpha_marker,
             'alpha_line': self.alpha_line,
@@ -2103,7 +2236,7 @@ class Dataset:
 # -----------------------------------------------------------------------------
 
 def coerce_display_parms(value):
-    """Normalise a ``display_parms`` value into a clean list of column names.
+    """Normalize a ``display_parms`` value into a clean list of column names.
 
     Accepts ``None`` (-> ``[]``), a single string (-> ``[name]``), or any
     iterable of names (list, tuple, pandas.Index, numpy array, ...). Entries
@@ -2226,7 +2359,7 @@ def table_read(df, x_col, y_col, x_in, kind='linear', fill_value='extrapolate', 
         Default is 'linear'.
     fill_value : float or (float, float) or {'extrapolate'}, optional
         Value to use for points outside the interpolation range. Matches
-        interp1d's fill_value behaviour. Default is 'extrapolate'.
+        interp1d's fill_value behavior. Default is 'extrapolate'.
     bounds_error : bool, optional
         If True, raise a ValueError when attempting to interpolate outside
         the range of x values. If False, use fill_value. Default is False.
@@ -2454,6 +2587,162 @@ def _apply_hue_coloraxes(fig, numeric_hue_info):
         fig.update_layout(**coloraxis_updates)
 
 
+# -----------------------------------------------------------------------------
+# marker_interval: show only some of a trace's markers
+# -----------------------------------------------------------------------------
+# Plotly has no equivalent of Matplotlib's ``markevery``. The trace keeps every
+# point (the line runs through all of them and hover reads all of them) and lists the points
+# that keep a marker in ``selectedpoints``; the rest are "unselected" at
+# opacity 0. Per-point marker size/opacity arrays would do the same, but Plotly
+# draws the legend glyph from their mean, so every-other-marker would shrink or
+# fade it; ``marker.maxdisplayed`` doesn't exist on Scattergl.
+_MARKER_INTERVAL_HIDDEN = {'marker': {'opacity': 0}}
+
+_MARKER_INTERVAL_FORMS = ("None, an int N (every Nth point), (start, N), a slice or "
+                          "slice string ('1::2'), or a list of point numbers or booleans")
+
+
+def _is_int(value):
+    return isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_))
+
+
+def _slice_from_text(text):
+    """``'1::2'`` as ``slice(1, None, 2)``; ValueError for anything else."""
+    parts = text.split(':')
+    try:
+        if not 2 <= len(parts) <= 3:
+            raise ValueError
+        return slice(*(int(p) if p.strip() else None for p in parts))
+    except ValueError:
+        raise ValueError(f"marker_interval={text!r} is not a slice string such as "
+                         "'1::2' or '10:-10:5'") from None
+
+
+def _slice_text(s):
+    """A slice as the string that :func:`_slice_from_text` reads back."""
+    if not all(v is None or _is_int(v) for v in (s.start, s.stop, s.step)):
+        raise TypeError(f"marker_interval slice parts must be ints or None, got {s!r}")
+    if s.step == 0:
+        raise ValueError("marker_interval slice step cannot be zero")
+    text = ':'.join('' if v is None else str(int(v)) for v in (s.start, s.stop))
+    return text if s.step is None else f"{text}:{int(s.step)}"
+
+
+def _check_marker_interval(value):
+    """``value`` as a ``marker_interval`` setting in its stored form; raises
+    TypeError / ValueError for one it isn't.
+
+    The forms are Matplotlib's ``markevery``, minus its float one (spacing as a
+    fraction of the plot's diagonal):
+
+    * ``None`` — every marker (so does ``1``).
+    * ``N`` (int >= 1) — every Nth point, from the first.
+    * ``(start, N)`` — every Nth point, from point ``start``.
+    * a ``slice``, or the same written as a string (``'1::2'``, ``'10:-10:5'``).
+    * a list of point numbers; negative ones count from the end, and ones past
+      the end are skipped, so one list fits sets of any length.
+    * a list of booleans — a marker where True.
+
+    Points are counted along the drawn trace (after the set's query and
+    ``order``), leaving out rows with a missing x or y. ``(start, N)`` and a
+    slice are stored as the slice string and booleans as their point numbers,
+    so a stored value comes back from a session's JSON meaning the same thing:
+    a tuple would come back as a list, which reads as two point numbers.
+    """
+    if value is None:
+        return None
+    if _is_int(value):
+        if value < 1:
+            raise ValueError("marker_interval must be 1 or more (1 shows every marker), "
+                             f"got {value}")
+        return int(value)
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"marker_interval takes {_MARKER_INTERVAL_FORMS}; got {value!r}")
+    if isinstance(value, (float, np.floating)):
+        raise TypeError(f"marker_interval={value!r}: a float (marker spacing as a fraction of "
+                        "the plot) is not supported; use an int N for every Nth marker")
+    if isinstance(value, str):
+        text = value.strip()
+        if _is_int_text(text):
+            return _check_marker_interval(int(text))
+        return _slice_text(_slice_from_text(text))
+    if isinstance(value, slice):
+        return _slice_text(value)
+    if isinstance(value, tuple) and len(value) == 2 and all(map(_is_int, value)):
+        start, step = value
+        if step < 1:
+            raise ValueError(f"marker_interval=(start, N) needs N >= 1, got {value!r}; for the "
+                             f"points {list(value)} pass a list")
+        return _slice_text(slice(start, None, step))
+    if isinstance(value, (list, tuple, range, np.ndarray, pd.Series, pd.Index)):
+        items = value.tolist() if hasattr(value, 'tolist') else list(value)
+        if all(isinstance(v, (bool, np.bool_)) for v in items):
+            return [i for i, keep in enumerate(items) if keep]
+        if all(map(_is_int, items)):
+            return [int(v) for v in items]
+        raise TypeError("a marker_interval list must be all point numbers or all booleans, "
+                        f"got {value!r}")
+    raise TypeError(f"marker_interval takes {_MARKER_INTERVAL_FORMS}; got {type(value).__name__}")
+
+
+def _is_int_text(text):
+    return text.lstrip('+-').isdigit()
+
+
+def _marker_interval_positions(spec, n):
+    """Which of ``n`` points keep their marker under the stored ``marker_interval``
+    ``spec``: their sorted point numbers, or None when all of them do."""
+    if spec is None:
+        return None
+    if isinstance(spec, int):
+        keep = np.arange(0, n, spec)
+    elif isinstance(spec, str):
+        keep = np.unique(np.arange(n)[_slice_from_text(spec)])
+    else:
+        nums = np.asarray(spec, dtype=int)
+        nums = nums[(nums >= -n) & (nums < n)]
+        keep = np.unique(np.where(nums < 0, nums + n, nums))
+    return None if keep.size == n else keep
+
+
+def _marker_interval_kw(spec, x, y, mode):
+    """Trace keywords that show only the markers ``spec`` keeps on a trace of
+    ``x`` against ``y``: ``selectedpoints`` with the rest unselected and
+    invisible. Empty when it keeps them all or ``mode`` draws no markers.
+
+    Points with a missing x or y draw nothing, so they are not counted: N=2 on
+    a column filled every other row would otherwise keep all or none."""
+    if spec is None or 'markers' not in mode:
+        return {}
+    drawn = np.flatnonzero(np.asarray(pd.notna(x)) & np.asarray(pd.notna(y)))
+    keep = _marker_interval_positions(spec, drawn.size)
+    if keep is None:
+        return {}
+    return {'selectedpoints': drawn[keep].tolist(), 'unselected': _MARKER_INTERVAL_HIDDEN}
+
+
+def _marker_interval_for(call_value, dataset, variable, variable_formats=None):
+    """The ``marker_interval`` a (dataset, variable) trace uses: the plot call's,
+    else the variable's ``var_format``, else the dataset's."""
+    if call_value is not None:
+        return call_value
+    var_fmt = (variable_formats or {}).get(variable, {})
+    return var_fmt.get('marker_interval', getattr(dataset, 'marker_interval', None))
+
+
+def _guard_marker_interval(fig):
+    """Take box and lasso select off the modebar of a figure that thins its
+    markers. A selection rewrites the traces' ``selectedpoints``, and clearing
+    it brings every hidden marker back. unichart reads no point selections."""
+    if fig is None or not any(getattr(tr, 'selectedpoints', None) is not None
+                              for tr in fig.data):
+        return
+    remove = fig.layout.modebar.remove or []
+    remove = [remove] if isinstance(remove, str) else list(remove)
+    fig.update_layout(modebar_remove=remove + [b for b in ('select2d', 'lasso2d')
+                                               if b not in remove])
+
+
 def _marker_line_style(fmt, color, marker, markersize, linewidth, linestyle,
                        hue, df, numeric_hue_info):
     """``marker`` / ``line`` dicts plus trace opacity for one dataset's scatter
@@ -2494,8 +2783,12 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
             darkmode=False, interactive=True, display_parms=None, grid=True,
             legend='above', legend_ncols=1, figsize=(12, 8), ncols=None, nrows=None, x_lim=None, y_lim=None,
-            axis_limits=None, hspace=None, vspace=None, spacing_ref=None):
+            axis_limits=None, hspace=None, vspace=None, spacing_ref=None,
+            marker_interval=None, variable_formats=None):
+    # ``marker_interval`` (see _check_marker_interval) overrides every set's for this call;
+    # of ``variable_formats`` only the marker_interval key is read here.
 
+    marker_interval = _check_marker_interval(marker_interval)
     axis_limits = axis_limits or {}
     x_list = x if isinstance(x, list) else [x]
     y_list = y if isinstance(y, list) else [y]
@@ -2613,6 +2906,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                 fmt, cur_color, cur_marker, cur_markersize, cur_linewidth,
                 cur_linestyle, cur_hue, df, numeric_hue_info)
 
+            interval = _marker_interval_for(marker_interval, dataset, yi, variable_formats)
             fig.add_trace(_scatter_cls(len(df))(
                 x=df[x_col], y=df[yi], mode=mode,
                 name=f"{cur_idx}: {cur_title}",
@@ -2621,7 +2915,8 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                 marker=marker_dict, line=line_dict,
                 opacity=cur_opacity,
                 customdata=custom_data, hovertemplate=ht,
-                showlegend=(idx_p == 0)
+                showlegend=(idx_p == 0),
+                **_marker_interval_kw(interval, df[x_col], df[yi], mode),
             ), row=row, col=col)
 
             if cur_reg_order:
@@ -2663,8 +2958,10 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
                         suptitle=None, figsize=(12, 8), ncols=None, nrows=None,
                         darkmode=False, x_lim=None, y_lim=None,
                         axis_limits=None, return_axes=False,
-                        hspace=None, vspace=None, spacing_ref=None):
-
+                        hspace=None, vspace=None, spacing_ref=None,
+                        marker_interval=None, variable_formats=None):
+    # ``marker_interval`` / ``variable_formats``: as in uniplot.
+    marker_interval = _check_marker_interval(marker_interval)
     active_datasets = [d for d in list_of_datasets if d.select]
     if not active_datasets:
         return None
@@ -2741,16 +3038,21 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
             color0 = color_cycle[0]
             ht = (f"<b>{dataset.title}</b><br>{x_col}: %{{x:{num_fmt}}}"
                   f"<br>{primary_y}: %{{y:{num_fmt}}}{hover_suffix}<extra></extra>")
+            mode = 'lines+markers' if dataset.linestyle else 'markers'
             fig.add_trace(
                 _scatter_cls(len(df))(
                     x=df[x_col], y=df[primary_y],
-                    mode='lines+markers' if dataset.linestyle else 'markers',
+                    mode=mode,
                     name=primary_y, legendgroup=primary_y,
                     showlegend=(idx_ds == 0),
                     marker=dict(size=dataset.markersize or 6,
                                 **_fill_marker_kw(color0, dataset.fill, dataset.edgewidth)),
                     line=dict(color=color0, **line_dict),
                     customdata=hover_cd, hovertemplate=ht,
+                    **_marker_interval_kw(
+                        _marker_interval_for(marker_interval, dataset, primary_y,
+                                             variable_formats),
+                        df[x_col], df[primary_y], mode),
                 ),
                 row=row, col=col,
                 secondary_y=False if use_secondary else None,
@@ -2772,10 +3074,11 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
             color_k = color_cycle[(k + 1) % len(color_cycle)]
             ht = (f"<b>{dataset.title}</b><br>{x_col}: %{{x:{num_fmt}}}"
                   f"<br>{yi}: %{{y:{num_fmt}}}{hover_suffix}<extra></extra>")
+            mode = 'lines+markers' if dataset.linestyle else 'markers'
             fig.add_trace(
                 _scatter_cls(len(df))(
                     x=df[x_col], y=df[yi],
-                    mode='lines+markers' if dataset.linestyle else 'markers',
+                    mode=mode,
                     name=yi, legendgroup=yi,
                     showlegend=(idx_ds == 0),
                     marker=dict(
@@ -2785,6 +3088,9 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
                     ),
                     line=dict(color=color_k, **line_dict),
                     customdata=hover_cd, hovertemplate=ht,
+                    **_marker_interval_kw(
+                        _marker_interval_for(marker_interval, dataset, yi, variable_formats),
+                        df[x_col], df[yi], mode),
                 ),
                 row=row, col=col, secondary_y=True,
             )
@@ -3534,7 +3840,8 @@ def _render_marginal(panels, marginal_x, marginal_y, marginal_size,
                      nbins, xbins, histnorm, alpha,
                      color, hue, marker, markersize, display_parms,
                      suptitle, xlabel, ylabel, darkmode, figsize, ncols, nrows,
-                     axis_limits, legend, hspace, vspace, spacing_ref):
+                     axis_limits, legend, hspace, vspace, spacing_ref,
+                     marker_interval=None, variable_formats=None):
     """Shared builder behind ``unimarginal`` / ``unimarginal_per_dataset``.
 
     ``panels`` is a list of ``(title, datasets, x_col, y_col)`` — one block
@@ -3543,6 +3850,7 @@ def _render_marginal(panels, marginal_x, marginal_y, marginal_size,
     """
     if not panels:
         return None
+    marker_interval = _check_marker_interval(marker_interval)
     if not (0 < marginal_size < 0.6):
         raise ValueError(f"marginal_size must be between 0 and 0.6, got {marginal_size!r}")
     axis_limits = axis_limits or {}
@@ -3607,7 +3915,7 @@ def _render_marginal(panels, marginal_x, marginal_y, marginal_size,
 
         # The strips share the main panel's data axis (``matches``) and hide
         # every tick label: the count/density axis carries no information a
-        # reader needs, and the data axis is already labelled on the main panel.
+        # reader needs, and the data axis is already labeled on the main panel.
         if marginal_x:
             fig.update_xaxes(domain=main_xdom, matches=main_xref, showticklabels=False,
                              row=top[0], col=top[1])
@@ -3690,6 +3998,9 @@ def _render_marginal(panels, marginal_x, marginal_y, marginal_size,
                 marker=marker_dict, line=line_dict, opacity=cur_opacity,
                 customdata=custom_data, hovertemplate=ht,
                 showlegend=(cur_idx not in legend_seen),
+                **_marker_interval_kw(
+                    _marker_interval_for(marker_interval, dataset, y_col, variable_formats),
+                    df[x_col], df[y_col], mode),
             ), row=main[0], col=main[1])
             legend_seen.add(cur_idx)
 
@@ -3724,7 +4035,8 @@ def unimarginal(list_of_datasets, x, y, marginal='histogram', marginal_x=None, m
                 display_parms=None, suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
                 darkmode=False, figsize=(12, 8), ncols=None, nrows=None,
                 x_lim=None, y_lim=None, axis_limits=None, legend='above', return_axes=False,
-                hspace=None, vspace=None, spacing_ref=None):
+                hspace=None, vspace=None, spacing_ref=None, marker_interval=None,
+                variable_formats=None):
     """Scatter of ``y`` against ``x`` with marginal distribution strips.
 
     One block per (x, y) pair — pairs form as in ``uniplot`` (equal-length
@@ -3735,7 +4047,7 @@ def unimarginal(list_of_datasets, x, y, marginal='histogram', marginal_x=None, m
     ``marginal_size`` is the strip's share of the block (default 0.2). The
     histogram binning arguments (``nbins``, ``bin_*``, ``histnorm``) and
     ``alpha`` apply to the strips only; the scatter takes each dataset's
-    own styling, as ``uniplot`` does.
+    own styling, as ``uniplot`` does — ``marker_interval`` included.
     """
     pairs = _xy_pairs(x, y)
     y_list = y if isinstance(y, list) else [y]
@@ -3756,7 +4068,7 @@ def unimarginal(list_of_datasets, x, y, marginal='histogram', marginal_x=None, m
         panels, m_x, m_y, marginal_size, nbins, _build_xbins(bin_size, bin_start, bin_end),
         histnorm, alpha, color, hue, marker, markersize, display_parms,
         suptitle or default_title, xlabel, ylabel, darkmode, figsize, ncols, nrows,
-        axis_limits, legend, hspace, vspace, spacing_ref)
+        axis_limits, legend, hspace, vspace, spacing_ref, marker_interval, variable_formats)
     if fig is None:
         return None
     return _show_or_return(fig, return_axes)
@@ -3769,7 +4081,8 @@ def unimarginal_per_dataset(list_of_datasets, x, y, marginal='histogram', margin
                             suptitle=None, xlabel=None, ylabel=None,
                             darkmode=False, figsize=(12, 8), ncols=None, nrows=None,
                             x_lim=None, y_lim=None, axis_limits=None, legend='above',
-                            return_axes=False, hspace=None, vspace=None, spacing_ref=None):
+                            return_axes=False, hspace=None, vspace=None, spacing_ref=None,
+                            marker_interval=None, variable_formats=None):
     """``unimarginal`` with one block per selected dataset for a single
     ``x`` / ``y`` pair (a one-element list is accepted for either)."""
     if isinstance(x, list):
@@ -3795,13 +4108,14 @@ def unimarginal_per_dataset(list_of_datasets, x, y, marginal='histogram', margin
         panels, m_x, m_y, marginal_size, nbins, _build_xbins(bin_size, bin_start, bin_end),
         histnorm, alpha, color, hue, marker, markersize, display_parms,
         suptitle or "Dataset Comparison", xlabel, ylabel, darkmode, figsize, ncols, nrows,
-        axis_limits, legend, hspace, vspace, spacing_ref)
+        axis_limits, legend, hspace, vspace, spacing_ref, marker_interval, variable_formats)
     if fig is None:
         return None
     return _show_or_return(fig, return_axes)
 
 
-def _add_contour_overlays(fig, overlay_datasets, x, y, n_subplots, ncols, darkmode):
+def _add_contour_overlays(fig, overlay_datasets, x, y, n_subplots, ncols, darkmode,
+                          thetaunit=None):
     """Draw each overlay dataset's ``(x, y)`` on top of every contour subplot.
 
     Used by the contour builders to lay discrete sample points — or, when a set
@@ -3811,13 +4125,16 @@ def _add_contour_overlays(fig, overlay_datasets, x, y, n_subplots, ncols, darkmo
     so they sit above an opaque ``contours_coloring='fill'``.
 
     Each set keeps its own plot style: ``color``, ``marker``, ``markersize``,
-    ``linestyle``/``linewidth``, ``alpha``, and ``fill`` (hollow markers when
-    off). The mode mirrors :func:`uniplot` — a set with a ``linestyle`` draws as
+    ``marker_interval``, ``linestyle``/``linewidth``, ``alpha``, and ``fill`` (hollow
+    markers when off). The mode mirrors :func:`uniplot` — a set with a ``linestyle`` draws as
     a line (so it can trace a contour boundary), otherwise as markers. Points
     are connected in the set's own order (its ``order`` column when set, else
     row order), so an explicitly drawn boundary keeps its shape; regression
     fits are not applied. The legend entry shows once (first subplot), grouped
     per dataset.
+
+    With ``thetaunit`` the subplots are polar (:func:`unipolar_contour`):
+    ``x`` is then the angle, in that unit, and ``y`` the radius.
     """
     if not overlay_datasets:
         return
@@ -3858,13 +4175,19 @@ def _add_contour_overlays(fig, overlay_datasets, x, y, n_subplots, ncols, darkmo
         line_dict = dict(width=ds.linewidth, color=ds.color,
                          dash=get_plotly_linestyle(ds.linestyle))
         opacity = _split_alpha(ds.get_format_dict(), ds.color, marker_dict, line_dict)
-        prepared.append((ds, df, mode, marker_dict, line_dict, opacity))
+        thin = _marker_interval_kw(ds.marker_interval, df[x], df[y], mode)
+        prepared.append((ds, df, mode, marker_dict, line_dict, opacity, thin))
 
+    # Polar subplots take (theta, r) and name them so in the hover template.
+    trace_cls, (hx, hy) = ((go.Scatter, ('x', 'y')) if thetaunit is None
+                           else (go.Scatterpolar, ('theta', 'r')))
     for cell in range(n_subplots):
         row, col = (cell // ncols) + 1, (cell % ncols) + 1
-        for ds, df, mode, marker_dict, line_dict, opacity in prepared:
-            fig.add_trace(go.Scatter(
-                x=df[x], y=df[y],
+        for ds, df, mode, marker_dict, line_dict, opacity, thin in prepared:
+            coords = ({'x': df[x], 'y': df[y]} if thetaunit is None
+                      else {'theta': df[x], 'r': df[y], 'thetaunit': thetaunit})
+            fig.add_trace(trace_cls(
+                **coords,
                 mode=mode,
                 name=f"{ds.index}: {ds.title}",
                 legendgroup=f"overlay_{ds.index}",
@@ -3874,9 +4197,10 @@ def _add_contour_overlays(fig, overlay_datasets, x, y, n_subplots, ncols, darkmo
                 opacity=opacity,
                 showlegend=(cell == 0),
                 hovertemplate=(f"<b>{ds.title}</b><br>"
-                               f"{x}: %{{x:{_hover_fmt(ds.sig_figs, '.3g', ds.decimals)}}}<br>"
-                               f"{y}: %{{y:{_hover_fmt(ds.sig_figs, '.3g', ds.decimals)}}}"
-                               f"<extra></extra>")
+                               f"{x}: %{{{hx}:{_hover_fmt(ds.sig_figs, '.3g', ds.decimals)}}}<br>"
+                               f"{y}: %{{{hy}:{_hover_fmt(ds.sig_figs, '.3g', ds.decimals)}}}"
+                               f"<extra></extra>"),
+                **thin,
             ), row=row, col=col)
 
 def _contour_line_style(ds, coloring):
@@ -4126,12 +4450,1129 @@ def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', 
 
     return _show_or_return(fig, return_axes)
 
+# -----------------------------------------------------------------------------
+# Polar plots (UnichartNotebook.polar)
+# -----------------------------------------------------------------------------
+# A polar plot reads x as the angle and y as the radius, as Matplotlib's polar
+# axes do, so everything keyed on x / y / z (last_x / last_y, sessions,
+# dashboard panels, the CLI's method:x:y:z) works on it unchanged. Plotly has
+# no polar contour trace, so the contour mode makes its own: it grids the
+# samples in (angle, radius) (_polar_field), traces each level's region with
+# marching squares (_polar_rings), and fills the rings as Scatterpolar traces.
+
+_POLAR_THETAUNITS = ('degrees', 'radians')
+_POLAR_DIRECTIONS = ('counterclockwise', 'clockwise')
+_POLAR_COLORINGS = ('fill', 'lines', 'none')
+_POLAR_INTERP_METHODS = ('linear', 'nearest', 'cubic')
+# Plotly draws the angle labels ('90°' at the top) outside the disc. Each
+# polar cell keeps this many px free above and below the disc for them, where
+# a subplot title or the row below would otherwise sit on them...
+_POLAR_LABEL_PAD_PX = 24
+# ...and, above that, this many for its subplot title (see _polar_figure).
+_POLAR_TITLE_PX = 24
+# px from the disc's right edge to a contour colorbar, clear of the '0°' label.
+_POLAR_COLORBAR_GAP_PX = 45
+# px between the colorbars of several z columns stacked beside one panel.
+_POLAR_COLORBAR_STEP_PX = 70
+# Plotly's own default number of contour levels.
+_POLAR_NCONTOURS = 15
+# A contour field's hover readout samples its grid at about this many angles
+# and radii, as invisible markers that hover snaps to (within Plotly's 20 px
+# hoverdistance on a disc of a few hundred px). They are kept tiny: Plotly
+# pads the radial autorange by a marker's size, which would leave a gap
+# between the field and the rim.
+_POLAR_HOVER_THETA = 72
+_POLAR_HOVER_R = 12
+_POLAR_HOVER_MARKER = 2
+# A contour ring or line drops the points that move it by less than this
+# share of the disc's radius (a fraction of a px): a ring traced cell by cell
+# otherwise carries hundreds of points along every smooth arc.
+_POLAR_SIMPLIFY = 0.001
+
+
+def _polar_subplot_key(cell):
+    """Layout key of the ``cell``-th polar subplot: 'polar', 'polar2', ..."""
+    return 'polar' if cell == 0 else f'polar{cell + 1}'
+
+
+def _subplot_kinds(fig):
+    """``(has_cartesian, has_polar)``: which kinds of subplot ``fig``'s layout
+    defines. A layout object reads back defaults for any subplot it lacks
+    (``select_xaxes`` yields one on a polar figure), and updating one writes it
+    in, so the shared styling steps check this before touching either kind."""
+    keys = list(fig.layout.to_plotly_json())
+    return (any(re.fullmatch(r'[xy]axis\d*', k) for k in keys),
+            any(re.fullmatch(r'polar\d*', k) for k in keys))
+
+
+def _polar_paper_px(figsize, spacing_ref):
+    """``(w, h)`` px the polar grid's paper is expected to get: a whole-grid
+    ``set_plot_size`` pin, else ``figsize`` less the usual margins (the
+    estimate ``_subplot_spacing`` makes)."""
+    paper = (spacing_ref or {}).get('paper') or (None, None)
+    return (paper[0] or (figsize[0] * 100 if figsize else 1200) - _SUBPLOT_MARGIN_W_PX,
+            paper[1] or (figsize[1] * 100 if figsize else 800) - _SUBPLOT_MARGIN_H_PX)
+
+
+def _sector_aspect(sector):
+    """Width / height of the box Plotly fits a polar ``sector`` into: the
+    bounding box of the pie slice (center included), 1 for a whole disc."""
+    if not sector:
+        return 1.0
+    a0, a1 = float(sector[0]), float(sector[1])
+    if a1 < a0:
+        a1 += 360.0
+    angles = [a0, a1] + [q for q in range(int(np.floor(a0 / 90)) * 90, int(a1) + 1, 90)
+                         if a0 <= q <= a1]
+    xs = [0.0] + [np.cos(np.radians(a)) for a in angles]
+    ys = [0.0] + [np.sin(np.radians(a)) for a in angles]
+    return (max(xs) - min(xs)) / max(max(ys) - min(ys), 1e-9)
+
+
+def _polar_figure(n, nrows, ncols, figsize, subplot_titles=None, hspace=None,
+                  vspace=None, spacing_ref=None, h_px=None, sectors=None):
+    """A ``make_subplots`` grid of ``n`` polar subplots; the cells past ``n``
+    stay empty instead of drawing a bare disc.
+
+    Each cell holds its whole subplot: its title at the top, then
+    ``_POLAR_LABEL_PAD_PX`` for the angle labels Plotly draws outside the disc
+    (and as much below it), then the domain. A Cartesian subplot title sits
+    above its cell instead, in the row gap or the legend's band; above a disc
+    it would land on the '90°' label, or on a legend wide enough to reach
+    the middle. The domain is then trimmed to the box the disc will fill
+    (Plotly centers the largest disc that fits; for a ``sectors`` entry, the
+    largest such pie slice), so a colorbar placed at the domain's edge sits
+    right beside the disc.
+
+    The pads are px and a domain a paper fraction: the conversion uses the
+    size the figure is expected to get (``_polar_paper_px``). A per-panel
+    ``set_plot_size`` pin sizes each domain itself, so the pads are solved
+    against the pin instead and the pin, not this, decides the shape."""
+    specs = [[{'type': 'polar'} if r * ncols + c < n else None
+              for c in range(ncols)] for r in range(nrows)]
+    fig = make_subplots(rows=nrows, cols=ncols, specs=specs,
+                        subplot_titles=subplot_titles,
+                        **_subplot_spacing(nrows, ncols, figsize, hspace, vspace,
+                                           spacing_ref, h_px=h_px))
+    panel = (spacing_ref or {}).get('panel') or (None, None)
+    paper_w, paper_h = _polar_paper_px(figsize, spacing_ref)
+    # make_subplots writes no annotation for an empty title, so pair the
+    # annotations with the cells whose title has text.
+    titled_cells = [c for c, t in enumerate(list(subplot_titles or [])[:n]) if t]
+    title_of = dict(zip(titled_cells, fig.layout.annotations))
+    for cell in range(n):
+        dom = fig.layout[_polar_subplot_key(cell)].domain
+        (x0, x1), (y0, y1) = dom.x, dom.y
+        span = y1 - y0
+        titled = cell in title_of
+        top_px = _POLAR_LABEL_PAD_PX + (_POLAR_TITLE_PX if titled else 0)
+        if panel[1] is not None:
+            # The pin makes the trimmed span panel[1] px: solve the pads for it.
+            per_px = span / (panel[1] + top_px + _POLAR_LABEL_PAD_PX)
+        else:
+            per_px = 1.0 / max(paper_h, 1.0)
+        per_px = min(per_px, 0.4 * span / (top_px + _POLAR_LABEL_PAD_PX))
+        y0, y1 = y0 + _POLAR_LABEL_PAD_PX * per_px, y1 - top_px * per_px
+        if panel == (None, None):
+            w, h = (x1 - x0) * paper_w, (y1 - y0) * paper_h
+            aspect = _sector_aspect(sectors[cell] if sectors else None)
+            if w > h * aspect:
+                cut = (x1 - x0) * (1 - h * aspect / w) / 2
+                x0, x1 = x0 + cut, x1 - cut
+            elif w < h * aspect:
+                cut = (y1 - y0) * (1 - w / (h * aspect)) / 2
+                y0, y1 = y0 + cut, y1 - cut
+        dom.x, dom.y = [x0, x1], [y0, y1]
+        if titled:                             # over the label above the disc
+            title_of[cell].y = y1 + _POLAR_LABEL_PAD_PX * per_px
+    return fig
+
+
+def _polar_sector(lim, thetaunit, direction, rotation):
+    """Plotly ``polar.sector`` that shows the data angles ``lim`` (a
+    ``scale()`` range on the angle column), or None for a whole turn. A sector
+    is in screen degrees, counterclockwise from 3 o'clock, whatever the
+    angular axis's rotation and direction, so both are folded in here."""
+    lo, hi = sorted(float(v) for v in lim)
+    if thetaunit == 'radians':
+        lo, hi = np.degrees(lo), np.degrees(hi)
+    if hi - lo >= 360:
+        return None
+    if rotation is None:                       # Plotly's default start
+        rotation = 90 if direction == 'clockwise' else 0
+    if direction == 'clockwise':
+        return [rotation - hi, rotation - lo]
+    return [rotation + lo, rotation + hi]
+
+
+def _polar_sectors(cells, thetaunit, direction, rotation, axis_limits):
+    """Each subplot's ``polar.sector``, None for a whole disc: the
+    ``scale()`` limits of its angle column. ``cells`` gives each subplot's
+    ``(angle column, radius column)``."""
+    return [_polar_sector(axis_limits[t_col], thetaunit, direction, rotation)
+            if axis_limits.get(t_col) else None for t_col, _ in cells]
+
+
+def _style_polar_axes(fig, cells, thetaunit, direction, rotation, hole, axis_limits):
+    """Set up each polar subplot: the angle unit, direction and start
+    (``rotation``), the center ``hole``, and the ``scale()`` limits.
+    ``cells`` gives each subplot's ``(angle column, radius column)``: the
+    radius column's limits become the radial range, the angle column's the
+    visible sector."""
+    sectors = _polar_sectors(cells, thetaunit, direction, rotation, axis_limits)
+    for cell, ((t_col, r_col), sector) in enumerate(zip(cells, sectors)):
+        angular = dict(thetaunit=thetaunit, direction=direction)
+        if rotation is not None:
+            angular['rotation'] = rotation
+        upd = dict(angularaxis=angular)
+        if hole:
+            upd['hole'] = hole
+        r_lim = axis_limits.get(r_col)
+        if r_lim:
+            upd['radialaxis'] = dict(range=list(r_lim))
+        if sector:
+            upd['sector'] = sector
+            # Start the radial axis on the sector's edge, where Plotly puts it
+            # unless a template (the Matplotlib one) has moved it. Its labels
+            # run along it, so on the left of the circle they are turned over
+            # to read left to right: Plotly's 'auto' tickangle does that, but
+            # the Matplotlib template fixes the tickangle.
+            radial = upd.setdefault('radialaxis', {})
+            radial['angle'] = sector[0]
+            if 90 < sector[0] % 360 <= 270:
+                radial['tickangle'] = 180
+        fig.layout[_polar_subplot_key(cell)].update(upd)
+
+
+def _polar_text_position(angle):
+    """Plotly ``textposition`` that sets a label off its point toward the
+    screen direction ``angle`` (degrees counterclockwise from 3 o'clock)."""
+    c, s = np.cos(np.radians(angle)), np.sin(np.radians(angle))
+    vertical = 'top' if s > 0.38 else 'bottom' if s < -0.38 else 'middle'
+    horizontal = 'right' if c > 0.38 else 'left' if c < -0.38 else 'center'
+    return f'{vertical} {horizontal}'
+
+
+def _polar_colorbar(fig, cell, title, figsize, spacing_ref, slot=0):
+    """Colorbar kwargs placing it beside the ``cell``-th polar subplot's disc
+    (``slot`` steps further right for a second, third, ... z column)."""
+    dom = fig.layout[_polar_subplot_key(cell)].domain
+    panel_w = ((spacing_ref or {}).get('panel') or (None, None))[0]
+    paper_w = (panel_w / max(dom.x[1] - dom.x[0], 1e-9) if panel_w
+               else _polar_paper_px(figsize, spacing_ref)[0])
+    gap = _POLAR_COLORBAR_GAP_PX + slot * _POLAR_COLORBAR_STEP_PX
+    return dict(title=title, x=dom.x[1] + gap / max(paper_w, 1.0),
+                y=(dom.y[0] + dom.y[1]) / 2, len=dom.y[1] - dom.y[0], thickness=15)
+
+
+def _polar_grid_colorbar(fig, n, title, figsize, spacing_ref, slot=0):
+    """Colorbar kwargs placing it right of a grid of ``n`` polar subplots,
+    as tall as their discs (``slot`` steps further right for a second,
+    third, ... z column)."""
+    doms = [fig.layout[_polar_subplot_key(cell)].domain for cell in range(n)]
+    top, bottom = max(d.y[1] for d in doms), min(d.y[0] for d in doms)
+    paper_w = _polar_paper_px(figsize, spacing_ref)[0]
+    return dict(title=title, x=1.02 + slot * _POLAR_COLORBAR_STEP_PX / max(paper_w, 1.0),
+                y=(top + bottom) / 2, len=top - bottom, thickness=15)
+
+
+def _theta_degrees(values, thetaunit):
+    """Angle samples as float degrees (NaN where not numeric)."""
+    a = pd.to_numeric(pd.Series(values), errors='coerce').to_numpy(dtype=float)
+    return np.degrees(a) if thetaunit == 'radians' else a
+
+
+def _rgb_triplet(color):
+    """``(r, g, b)`` floats of a hex, ``rgb()`` / ``rgba()`` or CSS-named
+    color; None for anything else."""
+    c = str(color).strip().lower()
+    if c in _CSS_NAMED_COLORS:
+        c = '#' + _CSS_NAMED_COLORS[c]
+    try:
+        if c.startswith('#'):
+            h = c[1:]
+            if len(h) in (3, 4):
+                h = ''.join(ch * 2 for ch in h)
+            if len(h) in (6, 8):
+                return tuple(float(int(h[i:i + 2], 16)) for i in (0, 2, 4))
+        elif c.startswith(('rgb(', 'rgba(')) and c.endswith(')'):
+            parts = c[c.index('(') + 1:-1].split(',')
+            if len(parts) >= 3:
+                return tuple(float(p) for p in parts[:3])
+    except ValueError:
+        pass
+    return None
+
+
+def _colorscale_stops(colorscale):
+    """``colorscale`` — a Plotly name (``'_r'`` reverses it), a list of
+    colors, or ``[[position, color], ...]`` — as sorted
+    ``(position, (r, g, b))`` stops."""
+    if isinstance(colorscale, str):
+        stops = pcolors.get_colorscale(colorscale)
+    else:
+        items = list(colorscale)
+        if items and isinstance(items[0], (list, tuple)) and len(items[0]) == 2:
+            stops = items
+        else:
+            stops = [[i / max(len(items) - 1, 1), c] for i, c in enumerate(items)]
+    out = []
+    for pos, col in stops:
+        rgb = _rgb_triplet(col)
+        if rgb is None:
+            raise ValueError(f"colorscale: can't read the color {col!r}")
+        out.append((float(pos), rgb))
+    return sorted(out)
+
+
+def _sample_colorscale(stops, positions):
+    """``'rgb(...)'`` colors of ``stops`` at each 0-1 position. Plotly's own
+    ``sample_colorscale`` can't read CSS color names."""
+    pos = np.array([p for p, _ in stops])
+    rgb = np.array([c for _, c in stops])
+    out = []
+    for p in positions:
+        p = min(1.0, max(0.0, float(p)))
+        out.append('rgb({:.0f},{:.0f},{:.0f})'.format(
+            *(np.interp(p, pos, rgb[:, k]) for k in range(3))))
+    return out
+
+
+def _polar_field(theta_deg, r, z, res=100, method='linear', interpolate=True):
+    """Grid scattered polar samples for contouring.
+
+    Returns ``(theta_nodes, r_nodes, Z, periodic)`` — node angles in degrees
+    (increasing), radii, ``Z`` shaped ``(len(r_nodes), len(theta_nodes))`` with
+    NaN where there is no data, and whether the last angle wraps round to the
+    first — or a string saying why the samples can't be contoured.
+
+    The data covers the whole circle unless its widest gap between angles is
+    more than twice the next widest, in which case it is a sector, from the
+    angle after that gap round to the one before it. Samples at every angle
+    of every radius (rakes x rings) are interpolated along the rings and the
+    radii, bilinear or bicubic: triangulating a layout like that picks its
+    diagonals arbitrarily and saw-tooths the contours. Other samples are
+    triangulated in (arc length at mid radius, radius), with copies across
+    the 0/360 seam on a whole circle. r = 0 is one point but a whole grid
+    row, so a sample there is pinned to that row at every angle.
+    ``interpolate=False`` contours the samples' own angle x radius table.
+    """
+    th = _theta_degrees(theta_deg, 'degrees')
+    rr = pd.to_numeric(pd.Series(r), errors='coerce').to_numpy(dtype=float)
+    zz = pd.to_numeric(pd.Series(z), errors='coerce').to_numpy(dtype=float)
+    ok = np.isfinite(th) & np.isfinite(rr) & np.isfinite(zz)
+    th, rr, zz = th[ok], rr[ok], zz[ok]
+
+    def wrap(a):                       # [0, 360), rounded so 359.9999999999 is 0
+        return np.mod(np.round(np.mod(a, 360.0), 9), 360.0)
+
+    th = wrap(np.where(rr < 0, th + 180.0, th))            # (theta, -r) = (theta + 180, r)
+    rr = np.abs(rr)
+    if len(th) < 3:
+        return "needs at least 3 points"
+    angles = np.unique(th)
+    if len(angles) < 2:
+        return "needs data at two or more angles"
+    if len(np.unique(rr)) < 2:
+        return "needs data at two or more radii"
+    gaps = np.diff(np.r_[angles, angles[0] + 360.0])       # gap after each angle
+    widest = np.argsort(gaps)[::-1]
+    periodic = gaps[widest[0]] <= 2 * gaps[widest[1]] + 1e-9
+    if periodic:
+        start, extent = 0.0, 360.0
+    else:
+        start = angles[(widest[0] + 1) % len(angles)]
+        extent = 360.0 - gaps[widest[0]]
+    rel = wrap(th - start)                                 # 0..extent in the data's frame
+
+    # The samples as an angle x radius table (repeats averaged, NaN where a
+    # combination is missing): the grid itself with interpolate=False, and
+    # what a full rake/ring layout is interpolated along.
+    rel_n = rel
+    t_vals = np.unique(rel_n)
+    r_key = np.round(rr, 12)
+    r_vals = np.unique(r_key)
+    sums = np.zeros((len(r_vals), len(t_vals)))
+    count = np.zeros_like(sums)
+    idx = (np.searchsorted(r_vals, r_key), np.searchsorted(t_vals, rel_n))
+    np.add.at(sums, idx, zz)
+    np.add.at(count, idx, 1)
+    table = np.where(count > 0, sums / np.maximum(count, 1), np.nan)
+    if not interpolate:
+        return start + t_vals, r_vals, table, periodic
+
+    res = max(4, int(res))
+    n_t = 2 * res if periodic else max(res, int(round(2 * res * extent / 360.0)) + 1)
+    t_nodes = (np.arange(n_t) * 360.0 / n_t if periodic
+               else np.linspace(0.0, extent, n_t))
+    r_lo, r_hi = rr.min(), rr.max()
+    r_nodes = np.linspace(r_lo, r_hi, res)
+    TG, RG = np.meshgrid(t_nodes, r_nodes)
+    at_center = 1e-12 * max(r_hi, 1.0)
+
+    if not np.isnan(table).any():
+        tt, tz = t_vals, table
+        if periodic:                                       # wrap round the circle
+            k = min(3, len(t_vals))
+            tt = np.r_[t_vals[-k:] - 360.0, t_vals, t_vals[:k] + 360.0]
+            tz = np.c_[table[:, -k:], table, table[:, :k]]
+        kind = method
+        if kind == 'cubic' and min(len(tt), len(r_vals)) < 4:
+            kind = 'linear'                                # a cubic needs 4 points a side
+        Z = RegularGridInterpolator((r_vals, tt), tz, method=kind)(
+            np.c_[RG.ravel(), TG.ravel()]).reshape(RG.shape)
+        if r_vals[0] <= at_center:
+            Z[0, :] = table[0].mean()
+        return start + t_nodes, r_nodes, Z, periodic
+
+    pts_t, pts_r, pts_z = rel, rr, zz
+    center = rr <= at_center
+    if center.any():
+        z0 = zz[center].mean()
+        spokes = (np.linspace(0.0, 360.0, 37)[:-1] if periodic
+                  else np.linspace(0.0, extent, 9))
+        pts_t = np.r_[pts_t[~center], spokes]
+        pts_r = np.r_[pts_r[~center], np.zeros_like(spokes)]
+        pts_z = np.r_[pts_z[~center], np.full_like(spokes, z0)]
+    if periodic:
+        lo, hi = pts_t > 270.0, pts_t < 90.0               # copies across the seam
+        pts_t = np.r_[pts_t, pts_t[lo] - 360.0, pts_t[hi] + 360.0]
+        pts_r = np.r_[pts_r, pts_r[lo], pts_r[hi]]
+        pts_z = np.r_[pts_z, pts_z[lo], pts_z[hi]]
+    scale = np.pi / 180.0 * ((r_lo + r_hi) / 2 or 1.0)
+    try:
+        Z = griddata((pts_t * scale, pts_r), pts_z, (TG * scale, RG), method=method)
+    except Exception as exc:                               # qhull: collinear, too few
+        return f"can't interpolate it ({type(exc).__name__})"
+    if center.any() and r_nodes[0] <= at_center:
+        Z[0, :] = z0
+    return start + t_nodes, r_nodes, Z, periodic
+
+
+# Oriented marching squares. Corner bits of a cell: a=1 (i, j), b=2 (i, j+1),
+# c=4 (i+1, j+1), d=8 (i+1, j), with i the radius row and j the angle column.
+# Edge codes: 0=bottom (a-b), 1=right (b-c), 2=top (c-d), 3=left (d-a). Every
+# segment runs start -> end with the region >= level on its left (in (j, i)),
+# so outer boundaries wind one way and holes the other: drawn as one path,
+# SVG's nonzero fill rule then cuts the holes out with no bookkeeping.
+_MS_SEGMENTS = {
+    1: ((0, 3),), 2: ((1, 0),), 3: ((1, 3),), 4: ((2, 1),),
+    6: ((2, 0),), 7: ((2, 3),), 8: ((3, 2),), 9: ((0, 2),),
+    11: ((1, 2),), 12: ((3, 1),), 13: ((0, 1),), 14: ((3, 0),),
+}
+# Saddles, decided by the cell's mean: (center inside, center outside).
+_MS_SADDLES = {
+    5: (((0, 1), (2, 3)), ((0, 3), (2, 1))),
+    10: (((3, 0), (1, 2)), ((1, 0), (3, 2))),
+}
+
+
+def _polar_rings(Z, theta, r, level, periodic):
+    """Closed rings bounding the region ``Z >= level`` of a polar grid.
+
+    ``Z`` is ``(len(r), len(theta))`` with NaN where there is no data;
+    ``theta`` (degrees, increasing) and ``r`` (increasing) are the node
+    coordinates, and with ``periodic`` the last angle column joins the first,
+    360 degrees on. The grid is padded with empty nodes on the radial ends
+    (and the angular ones too unless ``periodic``), so every ring closes, and
+    a crossing next to an empty node is put on the data node, so rings hug the
+    edge of the data. ``level=-inf`` gives the outline of all the data.
+
+    Returns ``[(theta, r, interior), ...]``, one per ring; ``interior`` flags
+    the points on a crossing between two data nodes, i.e. the ones on a true
+    isoline rather than the edge of the data (see ``_ring_runs``).
+    """
+    Z = np.asarray(Z, dtype=float)
+    n_r, n_t = Z.shape
+    valid = np.zeros((n_r + 2, n_t + (0 if periodic else 2)), dtype=bool)
+    vals = np.zeros(valid.shape)
+    cols = slice(0, n_t) if periodic else slice(1, n_t + 1)
+    valid[1:-1, cols] = ~np.isnan(Z)
+    vals[1:-1, cols] = np.where(np.isnan(Z), 0.0, Z)
+    # Pad rows and columns sit on the boundary they pad.
+    r_nodes = np.r_[r[0], r, r[-1]]
+    t_nodes = np.asarray(theta, dtype=float)
+    if periodic:
+        t_next = np.r_[t_nodes[1:], t_nodes[0] + 360.0]    # node j+1, across the seam
+    else:
+        t_nodes = np.r_[t_nodes[0], t_nodes, t_nodes[-1]]
+        t_next = t_nodes[1:]
+    rows, ncol = valid.shape
+    ccols = ncol if periodic else ncol - 1                 # cell columns
+    inside = valid & (vals >= level)
+
+    jj = np.arange(ccols)
+    j1 = (jj + 1) % ncol
+    case = (inside[:-1, jj] * 1 + inside[:-1, j1] * 2
+            + inside[1:, j1] * 4 + inside[1:, jj] * 8)
+    ci, cj = np.nonzero((case > 0) & (case < 15))
+    if not len(ci):
+        return []
+
+    n_h = rows * ccols                                     # horizontal edge ids first
+
+    def edge(i, j, code):
+        if code == 0:
+            return i * ccols + j
+        if code == 2:
+            return (i + 1) * ccols + j
+        return n_h + i * ncol + (j if code == 3 else (j + 1) % ncol)
+
+    nxt = {}
+    for i, j in zip(ci.tolist(), cj.tolist()):
+        k = int(case[i, j])
+        if k in _MS_SADDLES:
+            corners = ((i, j), (i, (j + 1) % ncol), (i + 1, (j + 1) % ncol), (i + 1, j))
+            center_in = (all(valid[p] for p in corners)
+                         and np.mean([vals[p] for p in corners]) >= level)
+            segments = _MS_SADDLES[k][0 if center_in else 1]
+        else:
+            segments = _MS_SEGMENTS[k]
+        for s, e in segments:
+            start = edge(i, j, s)
+            if start in nxt:
+                raise RuntimeError(f"polar contour: edge {start} starts two segments")
+            nxt[start] = edge(i, j, e)
+    # Each crossing edge must start one segment and end one, or a ring is
+    # open: a broken case table would otherwise lose rings without a sound.
+    if set(nxt.values()) != set(nxt):
+        raise RuntimeError("polar contour: a ring did not close")
+
+    def point(eid):
+        if eid < n_h:                                      # (i, j) - (i, j+1)
+            i, j = divmod(eid, ccols)
+            p, q = (i, j), (i, (j + 1) % ncol)
+            t0, t1, r0, r1 = t_nodes[j], t_next[j], r_nodes[i], r_nodes[i]
+        else:                                              # (i, j) - (i+1, j)
+            i, j = divmod(eid - n_h, ncol)
+            p, q = (i, j), (i + 1, j)
+            t0, t1, r0, r1 = t_nodes[j], t_nodes[j], r_nodes[i], r_nodes[i + 1]
+        vp, vq = valid[p], valid[q]
+        if vp and vq:
+            zp, zq = vals[p], vals[q]
+            f = (level - zp) / (zq - zp) if zq != zp else 0.5
+        else:
+            f = 0.0 if vp else 1.0
+        return t0 + f * (t1 - t0), r0 + f * (r1 - r0), bool(vp and vq)
+
+    rings, seen = [], set()
+    for first in nxt:
+        if first in seen:
+            continue
+        ring, eid = [], first
+        while eid not in seen:
+            seen.add(eid)
+            ring.append(point(eid))
+            eid = nxt[eid]
+        t, rr, interior = zip(*ring)
+        rings.append((np.array(t), np.array(rr), np.array(interior)))
+    return rings
+
+
+def _ring_runs(t, r, interior):
+    """A ring's true isoline pieces: its runs of consecutive interior points,
+    each as ``(theta, r)`` arrays. A ring interior all the way round comes
+    back closed (its first point repeated)."""
+    n = len(t)
+    if interior.all():
+        return [(np.r_[t, t[:1]], np.r_[r, r[:1]])]
+    k = int(np.argmin(interior))                           # start just after a gap
+    runs, cur = [], []
+    for idx in np.r_[np.arange(k + 1, n), np.arange(0, k + 1)]:
+        if interior[idx]:
+            cur.append(idx)
+        else:
+            if len(cur) > 1:
+                runs.append(cur)
+            cur = []
+    if len(cur) > 1:
+        runs.append(cur)
+    return [(t[ix], r[ix]) for ix in runs]
+
+
+def _rdp_keep(x, y, tol):
+    """Indices of the points Ramer-Douglas-Peucker keeps of the open polyline
+    ``(x, y)``: its ends, and every point further than ``tol`` from the
+    simplified line."""
+    n = len(x)
+    keep = np.zeros(n, dtype=bool)
+    keep[[0, -1]] = True
+    stack = [(0, n - 1)]
+    while stack:
+        i, j = stack.pop()
+        if j <= i + 1:
+            continue
+        dx, dy = x[j] - x[i], y[j] - y[i]
+        px, py = x[i + 1:j] - x[i], y[i + 1:j] - y[i]
+        seg = np.hypot(dx, dy)
+        dist = np.abs(dx * py - dy * px) / seg if seg else np.hypot(px, py)
+        k = int(np.argmax(dist))
+        if dist[k] > tol:
+            stack += [(i, i + 1 + k), (i + 1 + k, j)]
+            keep[i + 1 + k] = True
+    return np.flatnonzero(keep)
+
+
+def _simplify_path(t, r, rho, closed):
+    """``(t, r)`` (degrees, radii) without the points that don't change how
+    it is drawn, judged where it is drawn: ``rho`` maps a radius to its share
+    of the disc's radius. A ``closed`` ring is split at its point furthest
+    from the first and comes back a ring, its winding unchanged."""
+    if len(t) < 4:
+        return t, r
+    x = rho(r) * np.cos(np.radians(t))
+    y = rho(r) * np.sin(np.radians(t))
+    if not closed:
+        idx = _rdp_keep(x, y, _POLAR_SIMPLIFY)
+    else:
+        s = int(np.argmax(np.hypot(x - x[0], y - y[0])))
+        if s == 0:                                     # every point on one spot
+            return t[:1], r[:1]
+        back = np.r_[np.arange(s, len(t)), 0]          # s round to the first again
+        idx = np.r_[_rdp_keep(x[:s + 1], y[:s + 1], _POLAR_SIMPLIFY),
+                    back[_rdp_keep(x[back], y[back], _POLAR_SIMPLIFY)[1:-1]]]
+    return t[idx], r[idx]
+
+
+def _polar_rho(fields, r_col, axis_limits, hole):
+    """The ``rho`` for ``_simplify_path`` on a contour plot's subplots: a
+    radius as the share of the disc's radius Plotly draws it at, from the
+    radial range (``scale()``'s limits, else 0 out to the furthest field) and
+    the ``hole``."""
+    lim = axis_limits.get(r_col)
+    if lim:
+        lo, hi = sorted(float(v) for v in lim)
+    else:
+        lo, hi = 0.0, max([float(np.max(f[1])) for _, _, _, f in fields] or [1.0])
+    inner = hole or 0.0
+    span = (hi - lo) or 1.0
+    return lambda r: inner + (1 - inner) * (np.asarray(r, dtype=float) - lo) / span
+
+
+def _nan_joined(parts):
+    """``[(theta, r), ...]`` as one trace's arrays, NaN-separated (a gap)."""
+    if not parts:
+        return None, None
+    return (np.concatenate([np.r_[t, np.nan] for t, _ in parts]),
+            np.concatenate([np.r_[r, np.nan] for _, r in parts]))
+
+
+def _polar_levels(lo, hi, ncontours):
+    """Contour levels strictly between ``lo`` and ``hi`` at a 'nice' step, at
+    most ``ncontours`` of them (Plotly's autocontour picks them this way)."""
+    if not (np.isfinite(lo) and np.isfinite(hi)) or hi <= lo:
+        return []
+    step = _nice_tick_step(hi - lo, target=ncontours)
+    first = np.ceil(lo / step) * step
+    levels = first + step * np.arange(int(np.floor((hi - first) / step)) + 1)
+    return [float(f'{v:.12g}') for v in levels if lo < v < hi]
+
+
+def _polar_field_traces(field, levels, crange, coloring, colorscale, line,
+                        hovertemplate, thetaunit, name, group, rank,
+                        show_legend, colorbar=None, rho=None):
+    """Scatterpolar traces drawing one gridded field (``_polar_field``).
+
+    * ``'fill'``: the region above each level filled, lowest first, all of a
+      level's rings in one trace so its holes cut out; then the isolines in
+      ``line`` (the set's contour line style, ``_contour_line_style``);
+    * ``'lines'``: each level's isoline, colored from the colorscale;
+    * ``'none'``: the isolines alone, in ``line``.
+
+    Last comes an invisible marker layer on a sample of the grid nodes: it
+    gives hover its readout (``hovertemplate``, with z as the marker color,
+    ``%{marker.color}``) and carries the colorbar when ``colorbar`` is given.
+    ``crange`` is the ``(min, max)`` the colors span; ``name``/``group``/
+    ``rank`` tag every trace, and the legend entry, when ``show_legend``, goes
+    on the isolines. With ``rho`` (``_polar_rho``) the rings and isolines are
+    thinned to the points that show (``_simplify_path``)."""
+    t_nodes, r_nodes, Z, periodic = field
+
+    def thin(t, r, closed):
+        return _simplify_path(t, r, rho, closed) if rho is not None else (t, r)
+    lo, hi = crange
+    if not hi > lo:                                        # a flat field: mid-colorscale
+        lo, hi = lo - 0.5, lo + 0.5
+    span = hi - lo
+    stops = _colorscale_stops(colorscale)
+
+    def angle(t):
+        return np.radians(t) if thetaunit == 'radians' else t
+
+    tags = dict(thetaunit=thetaunit, name=name, legendgroup=group, legendrank=rank)
+    rings = {lvl: _polar_rings(Z, t_nodes, r_nodes, lvl, periodic) for lvl in levels}
+    traces = []
+    if coloring == 'fill':
+        edges = [lo] + list(levels) + [hi]
+        colors = _sample_colorscale(stops, [((a + b) / 2 - lo) / span
+                                            for a, b in zip(edges[:-1], edges[1:])])
+        scale = []
+        for (a, b), color in zip(zip(edges[:-1], edges[1:]), colors):
+            scale += [[(a - lo) / span, color], [(b - lo) / span, color]]
+        for color, lvl in zip(colors, [-np.inf] + list(levels)):
+            region = rings[lvl] if lvl in rings else _polar_rings(Z, t_nodes, r_nodes, lvl, periodic)
+            t, r = _nan_joined([(np.r_[rt, rt[:1]], np.r_[rr, rr[:1]])
+                                for rt, rr in (thin(t0, r0, True) for t0, r0, _ in region)])
+            if t is not None:
+                traces.append(go.Scatterpolar(
+                    theta=angle(t), r=r, mode='none', fill='toself', fillcolor=color,
+                    hoverinfo='skip', showlegend=False, **tags))
+    else:
+        scale = [[p, 'rgb({:.0f},{:.0f},{:.0f})'.format(*c)] for p, c in stops]
+    if coloring == 'lines':
+        line_sets = zip(_sample_colorscale(stops, [(lvl - lo) / span for lvl in levels]),
+                        [[lvl] for lvl in levels])
+    else:
+        line_sets = [(line.get('color'), list(levels))]
+    legend_pending = show_legend
+    def thin_run(t, r):
+        # A run interior all the way round comes back closed (first point
+        # repeated): thin it as a ring, then close it again.
+        if len(t) > 2 and t[0] == t[-1] and r[0] == r[-1]:
+            t, r = thin(t[:-1], r[:-1], True)
+            return np.r_[t, t[:1]], np.r_[r, r[:1]]
+        return thin(t, r, False)
+
+    for color, lvls in line_sets:
+        t, r = _nan_joined([thin_run(*run) for lvl in lvls for ring in rings[lvl]
+                            for run in _ring_runs(*ring)])
+        if t is not None:
+            traces.append(go.Scatterpolar(
+                theta=angle(t), r=r, mode='lines', line={**line, 'color': color},
+                hoverinfo='skip', showlegend=legend_pending, **tags))
+            legend_pending = False
+
+    st = max(1, int(np.ceil(len(t_nodes) / _POLAR_HOVER_THETA)))
+    sr = max(1, int(np.ceil(len(r_nodes) / _POLAR_HOVER_R)))
+    r_idx = np.unique(np.r_[np.arange(0, len(r_nodes), sr), len(r_nodes) - 1])
+    ht, hr = np.meshgrid(t_nodes[::st], r_nodes[r_idx])
+    hz = Z[r_idx][:, ::st]
+    ok = np.isfinite(hz)
+    marker = dict(size=_POLAR_HOVER_MARKER, opacity=0, color=hz[ok], cmin=lo,
+                  cmax=hi, colorscale=scale, showscale=colorbar is not None)
+    if colorbar is not None:
+        marker['colorbar'] = colorbar
+    traces.append(go.Scatterpolar(
+        theta=angle(ht[ok]), r=hr[ok], mode='markers', marker=marker,
+        hovertemplate=hovertemplate, showlegend=legend_pending, **tags))
+    if legend_pending and len(traces) > 1:
+        # No isolines (a flat field): the entry goes on what is drawn instead.
+        traces[-1].showlegend, traces[0].showlegend = False, True
+    return traces
+
+
+def _polar_field_ranges(fields, axis_limits):
+    """``{z column: (min, max)}`` the colors and levels span: the
+    ``scale()`` limits of the column, else its range over every field, so the
+    sets overlaid in a panel share levels and one colorbar reads for all."""
+    out = {}
+    for _, _, zi, (_, _, Z, _) in fields:
+        if np.isfinite(Z).any():
+            lo, hi = float(np.nanmin(Z)), float(np.nanmax(Z))
+            if zi in out:
+                lo, hi = min(lo, out[zi][0]), max(hi, out[zi][1])
+            out[zi] = (lo, hi)
+    for zi in out:
+        lim = axis_limits.get(zi)
+        if lim:
+            out[zi] = tuple(sorted(float(v) for v in lim))
+    return out
+
+
+def _polar_layout(fig, darkmode, figsize, title, legend, right_margin=None):
+    """``_base_layout`` for a polar figure, with ``legend`` placed as
+    :func:`uniplot` places it (the method adds the final geometry)."""
+    fig.update_layout(**_base_layout(
+        darkmode, None, figsize,
+        title={'text': title, 'x': 0.5, 'xanchor': 'center'},
+        showlegend=(legend != 'off'),
+        **({'margin': dict(r=right_margin)} if right_margin else {}),
+        **({'legend': dict(orientation='h')} if legend == 'above' else {}),
+    ))
+
+
+def _polar_name(cols):
+    """A column list as the auto-title writes it: one name bare, else a list."""
+    names = list(dict.fromkeys(cols))
+    return names[0] if len(names) == 1 else str(names)
+
+
+def unipolar(list_of_datasets, x, y, color=None, display_parms=None,
+             thetaunit='degrees', direction='counterclockwise', rotation=None, hole=None,
+             suptitle=None, subplot_titles=None, darkmode=False, legend='above',
+             figsize=(12, 8), ncols=None, nrows=None, axis_limits=None,
+             return_axes=False, hspace=None, vspace=None, spacing_ref=None,
+             marker_interval=None, variable_formats=None):
+    """
+    Polar scatter / line plot, a subplot per ``(x, y)`` pair (paired as
+    :func:`uniplot` pairs them), the datasets overlaid. ``x`` is the angle,
+    in ``thetaunit``, and ``y`` the radius.
+
+    Each set is styled as :func:`uniplot` styles it: ``color`` (or the
+    call-level ``color``), ``marker``, ``markersize``, ``linestyle`` /
+    ``linewidth``, ``alpha`` (``alpha_marker`` / ``alpha_line``), ``fill``,
+    ``hue`` (a numeric hue gets a colorbar), ``reg_order`` (a fit of radius
+    against angle), ``order``, ``zorder``, ``marker_interval`` and its hover parms.
+    Subplots are titled with their radius column (``"y vs x"`` when the
+    angles differ). ``marker_interval`` and ``variable_formats`` work as in
+    :func:`uniplot`.
+    """
+    marker_interval = _check_marker_interval(marker_interval)
+    axis_limits = axis_limits or {}
+    pairs = _xy_pairs(x, y)
+    n_plots = len(pairs)
+    if n_plots == 0:
+        raise ValueError("At least one x/y pair is required.")
+    nrows, ncols = _calc_grid(n_plots, nrows, ncols)
+    numeric_hue_info = _numeric_hue_info(list_of_datasets, None, axis_limits)
+
+    one_x = len({xi for xi, _ in pairs}) == 1
+    titles = subplot_titles or [yi if one_x else f"{yi} vs {xi}" for xi, yi in pairs]
+    fig = _polar_figure(n_plots, nrows, ncols, figsize, titles, hspace, vspace, spacing_ref,
+                        sectors=_polar_sectors(pairs, thetaunit, direction, rotation,
+                                               axis_limits))
+    _polar_layout(fig, darkmode, figsize,
+                  suptitle or f"Polar: {_polar_name([yi for _, yi in pairs])} vs "
+                              f"{_polar_name([xi for xi, _ in pairs])}",
+                  legend, right_margin=max(80, len(numeric_hue_info) * 100))
+    _style_polar_axes(fig, pairs, thetaunit, direction, rotation, hole, axis_limits)
+
+    for dataset in _in_draw_order(list_of_datasets):
+        if not dataset.select:
+            continue
+        fmt = dataset.get_format_dict()
+        cur_idx, cur_title = fmt.get('index'), fmt.get('title')
+        cur_hue = fmt.get('hue')
+        cur_color = color or fmt.get('color')
+        cur_marker = fmt.get('marker')
+        cur_linestyle = fmt.get('linestyle')
+        cur_linewidth = fmt.get('linewidth', 2)
+        cur_reg_order = fmt.get('reg_order')
+        cur_sig, cur_dec = fmt.get('sig_figs'), fmt.get('decimals')
+        num_fmt = _hover_fmt(cur_sig, '.2f', cur_dec)
+
+        base_cols = dataset.columns
+        valid_hover = [p for p in (display_parms or fmt.get('display_parms', []))
+                       if p in base_cols]
+        hue_in_cols = bool(cur_hue) and cur_hue in base_cols
+        ds_order = dataset.order
+        order_in_cols = bool(ds_order) and ds_order != 'index' and ds_order in base_cols
+        resolved = [(i, xi, yi) for i, (xi, yi) in enumerate(pairs)
+                    if xi in base_cols and yi in base_cols]
+        if not resolved:
+            continue
+
+        # Fetch (and sort) the set once as a narrow frame, as uniplot does.
+        needed = [c for _, xi, yi in resolved for c in (xi, yi)]
+        needed += ([cur_hue] if hue_in_cols else []) + valid_hover
+        needed += [ds_order] if order_in_cols else []
+        base_df = dataset.cols(list(dict.fromkeys(needed)))
+        base_df = (base_df.sort_values(by=ds_order) if order_in_cols
+                   else base_df.sort_index())
+
+        for i, xi, yi in resolved:
+            req = [xi, yi] + ([cur_hue] if hue_in_cols else []) + valid_hover
+            df = base_df[list(dict.fromkeys(req))]
+            custom_data, hover_lines = build_hover_data(df, valid_hover, cur_sig, cur_dec)
+            ht = (f"<b><u>Set: {cur_idx}</u></b><br><b>{cur_title}</b><br>"
+                  f"{xi}: %{{theta:{num_fmt}}}<br>{yi}: %{{r:{num_fmt}}}"
+                  + "".join(hover_lines) + "<extra></extra>")
+            show_line = bool(cur_linestyle) and not cur_reg_order
+            mode = '+'.join(['lines'] * show_line
+                            + ['markers'] * (cur_marker is not None)) or 'none'
+            marker_dict, line_dict, cur_opacity = _marker_line_style(
+                fmt, cur_color, cur_marker, fmt.get('markersize', 10), cur_linewidth,
+                cur_linestyle, cur_hue, df, numeric_hue_info)
+            row, col = i // ncols + 1, i % ncols + 1
+            # Plain (SVG) Scatterpolar at any size: the copy button's WebGL
+            # path is written for Cartesian scenes.
+            fig.add_trace(go.Scatterpolar(
+                theta=df[xi], r=df[yi], thetaunit=thetaunit, mode=mode,
+                name=f"{cur_idx}: {cur_title}",
+                legendgroup=f"group_{cur_idx}",
+                legendrank=1000 + cur_idx,
+                marker=marker_dict, line=line_dict, opacity=cur_opacity,
+                customdata=custom_data, hovertemplate=ht,
+                showlegend=(i == resolved[0][0]),
+                **_marker_interval_kw(
+                    _marker_interval_for(marker_interval, dataset, yi, variable_formats),
+                    df[xi], df[yi], mode),
+            ), row=row, col=col)
+
+            if cur_reg_order:
+                rx, ry, fit_label = _calculate_regression(df, xi, yi, cur_reg_order)
+                if rx is not None:
+                    fig.add_trace(go.Scatterpolar(
+                        theta=rx, r=ry, thetaunit=thetaunit, mode='lines',
+                        name=f"{cur_idx}: {cur_title} Fit ({fit_label})",
+                        legendgroup=f"group_{cur_idx}",
+                        line=dict(color=line_dict['color'], width=cur_linewidth,
+                                  dash=get_plotly_linestyle(cur_linestyle)),
+                        opacity=cur_opacity, hoverinfo='skip', showlegend=False,
+                    ), row=row, col=col)
+
+    _apply_hue_coloraxes(fig, numeric_hue_info)
+    return _show_or_return(fig, return_axes)
+
+
+def unipolar_per_dataset(list_of_datasets, x, y, variable_formats=None, color_cycle=None,
+                         display_parms=None, thetaunit='degrees',
+                         direction='counterclockwise', rotation=None, hole=None,
+                         suptitle=None, darkmode=False, legend='above',
+                         figsize=(12, 8), ncols=None, nrows=None, axis_limits=None,
+                         return_axes=False, hspace=None, vspace=None, spacing_ref=None,
+                         marker_interval=None):
+    """
+    Polar scatter / line plot, a subplot per dataset, its ``y`` columns (the
+    radii) overlaid against one ``x`` (the angle, the first if a list).
+
+    The variables are the series here, so each takes a color of its own: its
+    ``var_format`` color, else ``color_cycle`` (the notebook's ``color_map``)
+    by its position in ``y``. Marker, line style, size and alpha follow the
+    dataset, with any ``var_format`` override per attribute
+    (``_resolve_var_format``). The legend lists the variables. A call-level
+    ``marker_interval`` overrides both.
+    """
+    marker_interval = _check_marker_interval(marker_interval)
+    active = [d for d in list_of_datasets if d.select]
+    if not active:
+        return None
+    axis_limits = axis_limits or {}
+    y_list = y if isinstance(y, list) else [y]
+    x0 = x[0] if isinstance(x, list) else x
+    formats = _style_by_formats(y_list, 'color', variable_formats, color_cycle)
+    n_sets = len(active)
+    nrows, ncols = _calc_grid(n_sets, nrows, ncols)
+
+    cells = [(x0, y_list[0])] * n_sets
+    fig = _polar_figure(n_sets, nrows, ncols, figsize, [d.title_format for d in active],
+                        hspace, vspace, spacing_ref,
+                        sectors=_polar_sectors(cells, thetaunit, direction, rotation,
+                                               axis_limits))
+    _polar_layout(fig, darkmode, figsize,
+                  suptitle or f"Polar: {_polar_name(y_list)} vs {x0}", legend)
+    _style_polar_axes(fig, cells, thetaunit, direction, rotation, hole, axis_limits)
+
+    listed = set()
+    for cell, dataset in enumerate(active):
+        base_cols = dataset.columns
+        ys = [yi for yi in y_list if yi in base_cols]
+        if x0 not in base_cols or not ys:
+            continue
+        valid_hover = [p for p in (display_parms or []) if p in base_cols]
+        order_in_cols = (bool(dataset.order) and dataset.order != 'index'
+                         and dataset.order in base_cols)
+        df = dataset.cols(list(dict.fromkeys(
+            [x0] + ys + valid_hover + ([dataset.order] if order_in_cols else []))))
+        df = df.sort_values(by=dataset.order) if order_in_cols else df.sort_index()
+        num_fmt = _hover_fmt(dataset.sig_figs, '.2f', dataset.decimals)
+        hover_cd, hover_lines = build_hover_data(df, valid_hover, dataset.sig_figs,
+                                                 dataset.decimals)
+        row, col = cell // ncols + 1, cell % ncols + 1
+        for yi in ys:
+            vf = _resolve_var_format(dataset, yi, formats)
+            mode = '+'.join(['lines'] * bool(vf['linestyle'])
+                            + ['markers'] * (vf['marker'] is not None)) or 'none'
+            marker_dict, line_dict, opacity = _marker_line_style(
+                vf, vf['color'], vf['marker'], vf['markersize'] or 6, vf['linewidth'],
+                vf['linestyle'], None, df, {})
+            fig.add_trace(go.Scatterpolar(
+                theta=df[x0], r=df[yi], thetaunit=thetaunit, mode=mode,
+                name=yi, legendgroup=yi, showlegend=yi not in listed,
+                marker=marker_dict, line=line_dict, opacity=opacity,
+                customdata=hover_cd,
+                **_marker_interval_kw(marker_interval if marker_interval is not None
+                                      else vf['marker_interval'], df[x0], df[yi], mode),
+                hovertemplate=(f"<b>{dataset.title}</b><br>{x0}: %{{theta:{num_fmt}}}"
+                               f"<br>{yi}: %{{r:{num_fmt}}}{''.join(hover_lines)}"
+                               "<extra></extra>"),
+            ), row=row, col=col)
+            listed.add(yi)
+
+    return _show_or_return(fig, return_axes)
+
+
+def _gather_polar_fields(active, x, y, z_list, thetaunit, interp_res, interp_method,
+                         interpolate, cell_of):
+    """Grid every (dataset, z column) of a polar contour plot:
+    ``[(cell, dataset, z column, field), ...]``. ``cell_of(dataset_position,
+    z_position)`` names the subplot. A set whose samples can't be contoured is
+    skipped with a message, as :func:`unicontour` does."""
+    fields = []
+    for k, ds in enumerate(active):
+        cols = ds.columns
+        if x not in cols or y not in cols:
+            continue
+        df = ds.cols([c for c in dict.fromkeys([x, y] + z_list) if c in cols])
+        for m, zi in enumerate(z_list):
+            if zi not in df.columns:
+                continue
+            field = _polar_field(_theta_degrees(df[x], thetaunit), df[y], df[zi],
+                                 res=interp_res, method=interp_method,
+                                 interpolate=interpolate)
+            if isinstance(field, str):
+                print(f"Skipping polar contour for set {ds.index} (Z={zi}): {field}.")
+                continue
+            fields.append((cell_of(k, m), ds, zi, field))
+    return fields
+
+
+def unipolar_contour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=None,
+                     interpolate=True, interp_res=100, interp_method='linear',
+                     ncontours=None, overlay_datasets=None, thetaunit='degrees',
+                     direction='counterclockwise', rotation=None, hole=None,
+                     suptitle=None, subplot_titles=None, darkmode=False, legend='above',
+                     figsize=(12, 8), ncols=None, nrows=None, axis_limits=None,
+                     return_axes=False, hspace=None, vspace=None, spacing_ref=None):
+    """
+    Polar contour map, a subplot per ``z`` column, the datasets overlaid.
+    ``x`` is the angle and ``y`` the radius, as in :func:`unipolar`.
+
+    Each set's samples are gridded in (angle, radius) by ``_polar_field``, and
+    all the sets in a panel share its levels and colorbar. Boundaries take the
+    set's ``color``, ``linestyle`` and ``linewidth``. As in :func:`unicontour`,
+    more than one set turns the default ``'fill'`` into bare boundaries
+    (``'none'``), which the set colors tell apart, and ``'lines'`` colors each
+    level's line from the colorscale instead.
+    """
+    z_list = z if isinstance(z, list) else [z]
+    axis_limits = axis_limits or {}
+    active = _in_draw_order(d for d in list_of_datasets if d.select)
+    if not active:
+        print("No datasets selected.")
+        return None
+    n_z = len(z_list)
+    nrows, ncols = _calc_grid(n_z, nrows, ncols)
+    coloring = ('none' if len(active) > 1 and contours_coloring == 'fill'
+                else contours_coloring)
+    show_colorbars = coloring != 'none'
+
+    fields = _gather_polar_fields(active, x, y, z_list, thetaunit, interp_res,
+                                  interp_method, interpolate, lambda k, m: m)
+    cells = [(x, y)] * n_z
+    fig = _polar_figure(n_z, nrows, ncols, figsize, subplot_titles or z_list, hspace,
+                        vspace, spacing_ref,
+                        h_px=(160 + _POLAR_COLORBAR_GAP_PX) if show_colorbars else None,
+                        sectors=_polar_sectors(cells, thetaunit, direction, rotation,
+                                               axis_limits))
+    _polar_layout(fig, darkmode, figsize, suptitle or f"Polar contour: {y} vs {x}",
+                  legend, right_margin=100 if show_colorbars else None)
+    _style_polar_axes(fig, cells, thetaunit, direction, rotation, hole, axis_limits)
+
+    ranges = _polar_field_ranges(fields, axis_limits)
+    rho = _polar_rho(fields, y, axis_limits, hole)
+    listed, scaled = set(), set()
+    for cell, ds, zi, field in fields:
+        if zi not in ranges:                               # nothing came out of the grid
+            continue
+        lo, hi = ranges[zi]
+        num = _hover_fmt(ds.sig_figs, '.3g', ds.decimals)
+        colorbar = None
+        if show_colorbars and cell not in scaled:
+            colorbar = _polar_colorbar(fig, cell, zi, figsize, spacing_ref)
+            scaled.add(cell)
+        traces = _polar_field_traces(
+            field, _polar_levels(lo, hi, ncontours or _POLAR_NCONTOURS), (lo, hi),
+            coloring, colorscale or ds.hue_palette, _contour_line_style(ds, coloring),
+            (f"<b>{ds.title}</b><br>{x}: %{{theta:{num}}}<br>{y}: %{{r:{num}}}<br>"
+             f"{zi}: %{{marker.color:{num}}}<extra></extra>"),
+            thetaunit, name=f"{ds.index}: {ds.title}", group=f"group_{ds.index}",
+            rank=1000 + ds.index, show_legend=ds.index not in listed, colorbar=colorbar,
+            rho=rho)
+        listed.add(ds.index)
+        row, col = cell // ncols + 1, cell % ncols + 1
+        for tr in traces:
+            fig.add_trace(tr, row=row, col=col)
+
+    _add_contour_overlays(fig, overlay_datasets, x, y, n_z, ncols, darkmode,
+                          thetaunit=thetaunit)
+    return _show_or_return(fig, return_axes)
+
+
+def unipolar_contour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill',
+                                 colorscale=None, interpolate=True, interp_res=100,
+                                 interp_method='linear', ncontours=None,
+                                 overlay_datasets=None, thetaunit='degrees',
+                                 direction='counterclockwise', rotation=None, hole=None,
+                                 suptitle=None, darkmode=False, legend='above',
+                                 figsize=(12, 8), ncols=None, nrows=None,
+                                 axis_limits=None, return_axes=False,
+                                 hspace=None, vspace=None, spacing_ref=None):
+    """
+    Polar contour map, a subplot per dataset, its ``z`` columns overlaid.
+
+    As in :func:`unicontour_per_dataset`, several ``z`` columns turn the
+    default ``'fill'`` into ``'lines'`` so the fills don't hide each other.
+    Each ``z`` gets a legend entry and keeps the same levels in every panel,
+    so one colorbar per ``z`` reads for them all: it hangs right of the grid,
+    or beside the first panel when ``legend='right'`` has that margin.
+    """
+    active = [d for d in list_of_datasets if d.select]
+    if not active:
+        print("No datasets selected.")
+        return None
+    z_list = z if isinstance(z, list) else [z]
+    axis_limits = axis_limits or {}
+    n_sets = len(active)
+    nrows, ncols = _calc_grid(n_sets, nrows, ncols)
+    coloring = ('lines' if len(z_list) > 1 and contours_coloring == 'fill'
+                else contours_coloring)
+    show_colorbars = coloring != 'none'
+    # Where the colorbars go: beside the first panel takes a colorbar's width
+    # out of every column gap; right of the grid, only out of the margin.
+    beside = show_colorbars and legend == 'right'
+    extra_bars = _POLAR_COLORBAR_STEP_PX * (len(z_list) - 1)
+
+    fields = _gather_polar_fields(active, x, y, z_list, thetaunit, interp_res,
+                                  interp_method, interpolate, lambda k, m: k)
+    cells = [(x, y)] * n_sets
+    fig = _polar_figure(n_sets, nrows, ncols, figsize, [d.title_format for d in active],
+                        hspace, vspace, spacing_ref,
+                        h_px=(160 + _POLAR_COLORBAR_GAP_PX + extra_bars) if beside else None,
+                        sectors=_polar_sectors(cells, thetaunit, direction, rotation,
+                                               axis_limits))
+    _polar_layout(fig, darkmode, figsize, suptitle or f"Polar contour: {y} vs {x}",
+                  legend, right_margin=(100 + (0 if beside else extra_bars))
+                  if show_colorbars else None)
+    _style_polar_axes(fig, cells, thetaunit, direction, rotation, hole, axis_limits)
+
+    ranges = _polar_field_ranges(fields, axis_limits)
+    rho = _polar_rho(fields, y, axis_limits, hole)
+    listed, scaled = set(), set()
+    for cell, ds, zi, field in fields:
+        if zi not in ranges:                               # nothing came out of the grid
+            continue
+        lo, hi = ranges[zi]
+        num = _hover_fmt(ds.sig_figs, '.3g', ds.decimals)
+        colorbar = None
+        if show_colorbars and zi not in scaled:
+            slot = z_list.index(zi)
+            colorbar = (_polar_colorbar(fig, cell, zi, figsize, spacing_ref, slot=slot)
+                        if beside else
+                        _polar_grid_colorbar(fig, n_sets, zi, figsize, spacing_ref, slot))
+            scaled.add(zi)
+        traces = _polar_field_traces(
+            field, _polar_levels(lo, hi, ncontours or _POLAR_NCONTOURS), (lo, hi),
+            coloring, colorscale or ds.hue_palette, _contour_line_style(ds, coloring),
+            (f"<b>{zi}</b><br>{x}: %{{theta:{num}}}<br>{y}: %{{r:{num}}}<br>"
+             f"Value: %{{marker.color:{num}}}<extra></extra>"),
+            thetaunit, name=zi, group=zi, rank=1000 + z_list.index(zi),
+            show_legend=zi not in listed, colorbar=colorbar, rho=rho)
+        listed.add(zi)
+        row, col = cell // ncols + 1, cell % ncols + 1
+        for tr in traces:
+            fig.add_trace(tr, row=row, col=col)
+
+    _add_contour_overlays(fig, overlay_datasets, x, y, n_sets, ncols, darkmode,
+                          thetaunit=thetaunit)
+    return _show_or_return(fig, return_axes)
+
 _BAR_AGG_NAMES = ('mean', 'sum', 'min', 'max', 'median', 'std', 'var',
                   'count', 'first', 'last')
 
 
 def _resolve_agg(agg):
-    """Normalise a ``bar(agg=)`` value to ``(func, name)``.
+    """Normalize a ``bar(agg=)`` value to ``(func, name)``.
 
     ``func`` is what pandas' ``Series.agg`` / ``GroupBy.agg`` accept: one of
     the built-in reducer names, any other ``pd.Series`` reducer method name
@@ -4488,7 +5929,7 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
                         x_lim=None, axis_limits=None,
                         legend='right', legend_group_by='sets', style_by=None,
                         color_cycle=None, marker_cycle=None,
-                        return_axes=False):
+                        return_axes=False, marker_interval=None):
     """
     Single-plot, multi-Y-axis scatter/line chart.
 
@@ -4514,7 +5955,8 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
     variable_formats : dict[str, dict] | None
         Per-variable overrides, e.g.
             {'Temp': {'linestyle': '--'}, 'Pressure': {'color': 'blue'}}
-        Recognized keys: color, marker, linestyle, markersize, linewidth, alpha.
+        Recognized keys: color, marker, linestyle, markersize, linewidth, alpha,
+        marker_interval.
     display_parms : list[str] | None
         Extra columns to surface in the hover tooltip.
     axis_limits : dict[str, tuple] | None
@@ -4525,7 +5967,11 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
         'color', 'marker', 'linestyle', or a combination ('color+marker',
         ['marker', 'linestyle'], ...). Attributes set in ``variable_formats``
         still win per-variable; auto colors also tint that variable's axis.
+    marker_interval
+        Show only some markers on every trace (see ``_check_marker_interval``);
+        overrides the variable's and the dataset's ``marker_interval``.
     """
+    marker_interval = _check_marker_interval(marker_interval)
     variable_formats = variable_formats or {}
     axis_limits = axis_limits or {}
 
@@ -4646,6 +6092,8 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
                 ),
                 customdata=customdata,
                 hovertemplate=ht,
+                **_marker_interval_kw(marker_interval if marker_interval is not None
+                                      else fmt['marker_interval'], df[x], df[yi], mode),
             ))
 
     # Color axes only when explicitly set via variable_formats; otherwise use Plotly's default
@@ -5064,6 +6512,23 @@ def _uses_method_defaults(func):
     return wrapper
 
 
+# Arguments a ``<method>_defaults`` stores in a form of their own: a
+# (start, N) marker_interval would come back from a session's JSON as two point
+# numbers, so it is kept as the slice string _check_marker_interval gives.
+_STORED_ARG_FORMS = {'marker_interval': _check_marker_interval}
+
+
+def _stored_arg(key, value):
+    """``value`` as ``<method>_defaults`` stores it for argument ``key``."""
+    form = _STORED_ARG_FORMS.get(key)
+    if form is None:
+        return value
+    try:
+        return form(value)
+    except (TypeError, ValueError):
+        return value                  # the method says what is wrong when it runs
+
+
 def _method_defaults_setter(method, example, note=''):
     """Build ``<name>_defaults`` for a method decorated with
     :func:`_uses_method_defaults`. It takes the method's own arguments and
@@ -5106,7 +6571,7 @@ def _method_defaults_setter(method, example, note=''):
                 if key in group:
                     for other in group:
                         store.pop(other, None)
-            store[key] = copy.deepcopy(value)
+            store[key] = copy.deepcopy(_stored_arg(key, value))
         if store:
             self._method_defaults[name] = store
         else:
@@ -5142,6 +6607,28 @@ def _method_defaults_setter(method, example, note=''):
     return setter
 
 
+class _CopyButtonFigure(go.Figure):
+    """A ``go.Figure`` that shows unichart's '⧉ copy' button above itself
+    whenever it is displayed: as a cell's result, through ``display(fig)``, or
+    through ``fig.show()``.
+
+    ``_finalize`` gives a figure this class while copy buttons are on, rather
+    than displaying the button itself. A button displayed while plotting
+    appeared whether or not its figure did, so a cell that plotted several
+    times, or assigned a plot without showing it, stacked stray buttons above
+    whichever plot did show — and a figure shown again later
+    (``uc.last_fig``) got none. In every other way this is a ``go.Figure``.
+    """
+
+    def _ipython_display_(self):
+        UnichartNotebook._display_copy_button()
+        super()._ipython_display_()
+
+    def show(self, *args, **kwargs):
+        UnichartNotebook._display_copy_button()
+        return super().show(*args, **kwargs)
+
+
 class UnichartNotebook:
     """Interactive multi-dataset plotting environment for notebooks.
 
@@ -5154,7 +6641,7 @@ class UnichartNotebook:
         3. Plot                -> ``plot`` / ``plot_ymult``
         4. Style               -> ``color`` / ``marker`` / ``var_format`` /
                                   ``set_default_format``
-        5. Analyse             -> ``delta`` / ``table`` / ``combine_sets``
+        5. Analyze             -> ``delta`` / ``table`` / ``combine_sets``
 
     Plot calls remember their last arguments (``last_x``, ``last_y``, ...), so
     follow-up styling and analysis calls can be made without re-specifying them.
@@ -5243,8 +6730,9 @@ class UnichartNotebook:
         
         self.display_parms = []
         self.axis_limits = {} 
-        self.lines = {}       
-        self.highlights = {}  
+        self.lines = {}
+        self.highlights = {}
+        self._custom_legend = {}   # legend_entry(): {name: style}
 
         self.parm_description_dict = {}
 
@@ -5644,7 +7132,7 @@ class UnichartNotebook:
     # runtime does carry zenity, so a subprocess still reaches a real dialog.
     # Only the zenity CLI is listed (qarma is a clone of it) because the rc==1
     # reading below is zenity's: a program whose usage errors also exit 1 would
-    # have them read back as "the user cancelled", which is the one failure
+    # have them read back as "the user canceled", which is the one failure
     # worth never guessing at. Adding kdialog or yad means verifying that first.
     _DIALOG_PROGRAMS = ('zenity', 'qarma')
 
@@ -5666,7 +7154,7 @@ class UnichartNotebook:
     def _pick_files_native(cls, exts=()):
         """Pick files with an OS dialog program instead of tkinter.
 
-        Returns the chosen paths, an empty tuple when the dialog was cancelled,
+        Returns the chosen paths, an empty tuple when the dialog was canceled,
         or ``None`` when no dialog program could be run at all — the caller
         needs to tell "user picked nothing" apart from "there was nothing to
         ask", and only the first of those means load nothing.
@@ -5734,7 +7222,7 @@ class UnichartNotebook:
         ``exts`` are extra extensions for its "Data files" filter, as in
         :meth:`_dialog_argv`.
 
-        Returns an empty tuple when the dialog is cancelled. Raises
+        Returns an empty tuple when the dialog is canceled. Raises
         ``RuntimeError`` when no dialog can be opened at all — tkinter missing
         (Pyodide, a sandboxed runtime built without Tk, or Debian/Ubuntu
         without ``python3-tk``) or no display reachable (a headless server, or
@@ -5799,7 +7287,7 @@ class UnichartNotebook:
 
         Called with no ``source`` (or ``source=None``), opens the OS file
         browser and loads whatever is picked there — several files at once is
-        fine, and cancelling loads nothing.
+        fine, and canceling loads nothing.
 
         ``source`` may be a single item or a list of items; each is coerced to a DataFrame
         and loaded via load_df. Supported files: .csv, .tsv, .txt, .xlsx, .xls, .json, .parquet
@@ -6016,8 +7504,8 @@ class UnichartNotebook:
     # load_session (title/query/select/order are handled separately because
     # they need special treatment on restore).
     _SESSION_SET_FORMAT_ATTRS = (
-        'color', 'marker', 'linestyle', 'markersize', 'linewidth', 'edgewidth',
-        'alpha', 'alpha_marker', 'alpha_line', 'edge_color', 'fill', 'hue',
+        'color', 'marker', 'linestyle', 'markersize', 'marker_interval', 'linewidth',
+        'edgewidth', 'alpha', 'alpha_marker', 'alpha_line', 'edge_color', 'fill', 'hue',
         'hue_palette', 'hue_order', 'reg_order', 'style', 'zorder',
         'show_legend', 'plot_type', 'set_type', 'data_type', 'display_parms', 'delta_sets',
         'sig_figs', 'decimals',
@@ -6031,7 +7519,7 @@ class UnichartNotebook:
     # a method: see _build_session).
     _SESSION_NB_ATTRS = (
         'darkmode', 'suptitle', 'footer', 'plot_title', 'x_label', 'y_label',
-        'display_parms', 'axis_limits', 'lines', 'highlights',
+        'display_parms', 'axis_limits', 'lines', 'highlights', 'legend_entries',
         'parm_description_dict', 'variable_formats', 'color_map', 'marker_map',
         'figsize', 'plot_size_per_subplot',
         'grid_format', 'watermark_format',
@@ -6121,7 +7609,7 @@ class UnichartNotebook:
 
     @staticmethod
     def _apply_synth_cols(df, synth_cols):
-        """Re-add the columns :meth:`load_df` synthesised at load time
+        """Re-add the columns :meth:`load_df` synthesized at load time
         (recorded in ``_source['synth_cols']``) to a freshly re-read file
         frame, so a file-referenced session set restores with the same
         columns it had originally."""
@@ -6638,7 +8126,7 @@ class UnichartNotebook:
         track per-set column ownership. Adding or dropping columns directly
         here is detected and reconciled automatically (ownership is assigned
         from the data); filling values *in place* into existing columns is
-        not — call `refresh_own_columns(rescan=True)` afterwards.
+        not — call `refresh_own_columns(rescan=True)` afterward.
         """
         return self._combined_df
 
@@ -7129,6 +8617,58 @@ class UnichartNotebook:
             return
         self._set_or_reset(uset_slice, 'markersize', size_val)
 
+    def marker_interval(self, uset_slice, interval):
+        """
+        Show only some of the markers of the target dataset(s) or variable(s):
+        every other one, every 5th, ... The line still runs through every point
+        and hover still reads every point; only the markers thin out.
+
+        The target is autodetected as for :meth:`markersize`: a dataset selector
+        (int / list / 'all' / ``Dataset``) sets it per dataset; a
+        variable/parameter name (or list of names) sets a per-variable override
+        via :meth:`var_format`, which wins over the dataset's in every plot. A
+        plot call's own ``marker_interval=`` wins over both.
+
+        Args:
+            uset_slice: Dataset selector, or variable name(s).
+            interval: Which markers show, counting the points along the drawn line
+                (rows with a missing x or y don't count):
+
+                * ``N`` — every Nth marker from the first (``2``: every other).
+                * ``(start, N)`` — every Nth from point ``start``: ``(1, 2)``
+                  offsets a set whose x values match another's, so their
+                  markers don't sit on top of each other.
+                * a slice, or the same as a string: ``'10:-10:5'``.
+                * a list of point numbers (``[0, -1]``: the first and last) or
+                  of booleans (a marker where True).
+                * ``None`` or ``1`` — every marker. For a variable ``None``
+                  clears its override instead, so the dataset's applies.
+                * ``'reset'`` — back to the default
+                  (``set_default_format(marker_interval=)``, else every marker).
+
+                ``(start, N)`` and a slice are kept as the slice string, so
+                ``ds.marker_interval`` then reads ``'1::2'``.
+
+        Interactive figures that thin markers lose the box / lasso select
+        buttons: a selection would bring every hidden marker back. A hidden
+        marker still answers hover, which shows on a set drawn without a line.
+
+        Examples
+        --------
+        uc.marker_interval('all', 2)            # every other marker on every set
+        uc.marker_interval(1, (1, 2))           # set 1: every other, from the second
+        uc.marker_interval('Thrust', 5)         # every 5th marker on Thrust only
+        uc.marker_interval('all', 'reset')
+        """
+        if not (isinstance(interval, str) and interval == 'reset'):
+            interval = _check_marker_interval(interval)
+        variables = self._var_targets(uset_slice)
+        if variables is not None:
+            for v in variables:
+                self.var_format(v, marker_interval='reset' if interval is None else interval)
+            return
+        self._set_or_reset(uset_slice, 'marker_interval', interval)
+
     def linewidth(self, uset_slice=None, width_val=None):
         """
         Set the line thickness for the target dataset(s) or variable(s).
@@ -7571,7 +9111,7 @@ class UnichartNotebook:
     def var_format(self, variable, color=None, marker=None, linestyle=None,
                    markersize=None, linewidth=None, alpha=None, style=None,
                    alpha_marker=None, alpha_line=None, fill=None, edgewidth=None,
-                   reset=False):
+                   marker_interval=None, reset=False):
         """
         Set persistent per-variable formatting overrides.
 
@@ -7597,6 +9137,10 @@ class UnichartNotebook:
         markers solid or hollow, and `edgewidth` (>= 0) sets their outline
         width, as :meth:`fill` / :meth:`edgewidth` do for a whole set. Hollow
         markers are drawn with edgewidth + 1.
+
+        `marker_interval` shows only some of the variable's markers (``2``: every
+        other one; see :meth:`marker_interval` for the forms). Unlike the other keys
+        it applies in every scatter/line plot, not just ``plot_ymult``.
 
         `style` only affects bar-plot overlay columns (the `markers=` argument
         of `uc.bar`): 'marker' (default symbol overlay), 'tick' (horizontal
@@ -7642,20 +9186,24 @@ class UnichartNotebook:
                 isinstance(edgewidth, bool) or not isinstance(edgewidth, (int, float))
                 or edgewidth < 0):
             raise ValueError(f"Invalid edgewidth: {edgewidth}")
+        if marker_interval is not None and not (isinstance(marker_interval, str)
+                                          and marker_interval == 'reset'):
+            marker_interval = _check_marker_interval(marker_interval)
         names = self._var_names(variable)
         pairs = {'color': color, 'marker': marker, 'linestyle': linestyle,
                  'markersize': markersize, 'linewidth': linewidth, 'alpha': alpha,
                  'alpha_marker': alpha_marker, 'alpha_line': alpha_line,
-                 'fill': fill, 'edgewidth': edgewidth, 'style': style}
+                 'fill': fill, 'edgewidth': edgewidth, 'style': style,
+                 'marker_interval': marker_interval}
         for name in names:
             fmt = self.variable_formats.setdefault(name, {})
             for k, v in pairs.items():
                 if v is None:
                     continue
-                if v == 'reset':
+                if isinstance(v, str) and v == 'reset':
                     fmt.pop(k, None)
                 else:
-                    fmt[k] = v
+                    fmt[k] = copy.deepcopy(v)
             if not fmt:
                 del self.variable_formats[name]
         if isinstance(variable, str) or not hasattr(variable, '__iter__'):
@@ -7688,11 +9236,13 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
 
     # Scope names reset_format understands, plus forgiving aliases.
-    _RESET_SCOPES = ('sets', 'vars', 'lines', 'highlights', 'scales',
-                     'fonts', 'plot_size', 'grid', 'watermark', 'defaults')
+    _RESET_SCOPES = ('sets', 'vars', 'lines', 'highlights', 'legend_entries',
+                     'scales', 'fonts', 'plot_size', 'grid', 'watermark',
+                     'defaults')
     _RESET_ALIASES = {'set': 'sets', 'var': 'vars', 'variable': 'vars',
                       'variables': 'vars', 'line': 'lines',
                       'highlight': 'highlights', 'scale': 'scales',
+                      'legend_entry': 'legend_entries',
                       'limits': 'scales', 'axis_limits': 'scales',
                       'font': 'fonts', 'font_sizes': 'fonts',
                       'plotsize': 'plot_size', 'default': 'defaults',
@@ -7703,8 +9253,9 @@ class UnichartNotebook:
     # set_default_format) is deliberately excluded — resetting applied
     # formatting shouldn't silently discard the user's chosen defaults;
     # ask for it by name or with 'all'.
-    _RESET_DEFAULT_SWEEP = ('sets', 'vars', 'lines', 'highlights', 'scales',
-                            'fonts', 'plot_size', 'grid', 'watermark')
+    _RESET_DEFAULT_SWEEP = ('sets', 'vars', 'lines', 'highlights',
+                            'legend_entries', 'scales', 'fonts', 'plot_size',
+                            'grid', 'watermark')
 
     def _reset_set_attrs(self, ds, attrs=None):
         """Restore per-dataset formatting attribute(s) to the current defaults:
@@ -7723,6 +9274,7 @@ class UnichartNotebook:
                                     else default_marker),
             'linestyle':   lambda: fmt.get('linestyle', None),
             'markersize':  lambda: fmt.get('markersize', 10),
+            'marker_interval':   lambda: fmt.get('marker_interval', None),
             'linewidth':   lambda: fmt.get('linewidth', 2),
             'edgewidth':   lambda: fmt.get('edgewidth', 1),
             'alpha':       lambda: fmt.get('alpha', 1),
@@ -7775,7 +9327,7 @@ class UnichartNotebook:
 
         # ``order`` validates against the target's columns, so an unmatched one
         # would raise on a set that is already registered. 'index' is a valid
-        # sentinel the plotters honour but the setter rejects, hence the direct
+        # sentinel the plotters honor but the setter rejects, hence the direct
         # assignment.
         src_order = getattr(source, 'order', None)
         if src_order == 'index' or (src_order and src_order in cols):
@@ -7824,7 +9376,8 @@ class UnichartNotebook:
         Parameters
         ----------
         *what : scope name(s) and/or dataset selector(s)
-            Scope names: 'sets', 'vars', 'lines', 'highlights', 'scales',
+            Scope names: 'sets', 'vars', 'lines', 'highlights',
+            'legend_entries' (the :meth:`legend_entry` entries), 'scales',
             'fonts', 'plot_size', 'grid', 'watermark', 'defaults', or 'all'
             (everything, defaults included). Common aliases work too ('scale', 'variables',
             'gridlines', ...).
@@ -7921,6 +9474,8 @@ class UnichartNotebook:
         for scope, store, label in (('vars', self.variable_formats, "variable formats"),
                                     ('lines', self.lines, "lines"),
                                     ('highlights', self.highlights, "highlights"),
+                                    ('legend_entries', self._custom_legend,
+                                     "legend entries"),
                                     ('scales', self.axis_limits, "axis limits")):
             if scope not in active:
                 continue
@@ -8095,6 +9650,19 @@ class UnichartNotebook:
     def plot_style(self, value):
         self._set_plot_style(DEFAULT_PLOT_STYLE if value is None else value)
 
+    @property
+    def legend_entries(self):
+        """The custom legend entries :meth:`legend_entry` made, as
+        ``{name: style}`` in legend order. Assigning a dict replaces them all,
+        checked the way ``legend_entry`` checks its arguments; ``{}`` or
+        ``None`` removes them.
+        """
+        return self._custom_legend
+
+    @legend_entries.setter
+    def legend_entries(self, value):
+        self._custom_legend = {} if value is None else _check_legend_entries(value)
+
     suptitle_size = _font_size_attr('suptitle_size', 'suptitle')
     footer_size = _font_size_attr('footer_size', 'footer')
     legend_size = _font_size_attr('legend_size', 'legend')
@@ -8110,7 +9678,7 @@ class UnichartNotebook:
                            edgewidth=None, edge_color=None, alpha=None, fill=None,
                            marker=_UNSET, hue_palette=None, sig_figs=None,
                            decimals=None, alpha_marker=_UNSET,
-                           alpha_line=_UNSET, figsize=None, legend=None,
+                           alpha_line=_UNSET, marker_interval=_UNSET, figsize=None, legend=None,
                            suppress_legends=None, ncols=None, nrows=None,
                            hspace=None, vspace=None,
                            barmode=None, agg=None, histfunc=None, histnorm=None,
@@ -8119,7 +9687,7 @@ class UnichartNotebook:
         """Set notebook-wide defaults for styling and for the plot methods.
 
         Two kinds of default live here. **Per-dataset styles** (markersize,
-        linestyle, linewidth, edgewidth, edge_color, alpha, fill, marker,
+        marker_interval, linestyle, linewidth, edgewidth, edge_color, alpha, fill, marker,
         hue_palette — the colorscale for contours and hue-colored scatters) are the
         markersize/linewidth analogue of ``color_map``/``marker_map``, applied to
         *future* loaded datasets; already-loaded sets keep their styling until
@@ -8151,6 +9719,9 @@ class UnichartNotebook:
             Default marker-only / line-only opacity for future datasets
             (see :meth:`alpha_marker`, :meth:`alpha_line`). ``None`` means
             "same as alpha".
+        marker_interval : int, (start, N), slice, list, or None
+            Which markers future datasets show (see :meth:`marker_interval`):
+            ``2`` = every other one. ``None`` (the built-in) shows them all.
         sig_figs : int (>= 1)
             Default significant figures for *displayed* values (table cells,
             summary statistics, hover readouts) of future datasets — see
@@ -8246,6 +9817,8 @@ class UnichartNotebook:
         for _name, _val in (('alpha_marker', alpha_marker), ('alpha_line', alpha_line)):
             if _val is not _UNSET:
                 updates[_name] = None if _val is None else _num(_name, _val, 0.0, 1.0)
+        if marker_interval is not _UNSET:
+            updates['marker_interval'] = _check_marker_interval(marker_interval)
         if linestyle  is not None:
             if not (validate_linestyle(linestyle)
                     or linestyle in LINESTYLE_MAP_MPL_TO_PLOTLY.values()):
@@ -8527,7 +10100,7 @@ class UnichartNotebook:
         The style is orthogonal to :meth:`toggle_darkmode` — both styles have a
         light and a dark variant — and to the rest of the formatting API: any
         explicit ``color``/``markersize``/``set_font_sizes``/``var_format``
-        value you set afterwards still wins.
+        value you set afterward still wins.
 
         Parameters
         ----------
@@ -8604,8 +10177,8 @@ class UnichartNotebook:
                           (a subset of delta_parms, or True / 'all' for all of them)
             passed_parms  pass through additional base columns for context
 
-        The delta set inherits the study set's styling — colour, marker,
-        linestyle, markersize, linewidth, edgewidth, alpha, edge colour, fill,
+        The delta set inherits the study set's styling — color, marker,
+        linestyle, markersize, linewidth, edgewidth, alpha, edge color, fill,
         hue/hue palette/hue order, style, display_parms and sort order — so it
         reads as a visual continuation of the study series it was derived from.
         Only appearance is carried over: ``reg_order`` is not inherited (the
@@ -8654,7 +10227,7 @@ class UnichartNotebook:
         x_ins : scalar | list | None
             ``align_on`` values that define the rows of the new dataset. When
             given, ``align_on`` must be numeric. ``None`` (default) keeps the
-            original ``merge_asof`` row-matching behaviour.
+            original ``merge_asof`` row-matching behavior.
         interp : 'base' | 'study' | 'both'
             Which side(s) to interpolate onto ``x_ins`` (default ``'both'``).
             The non-selected side — and any non-numeric column on either side —
@@ -9177,7 +10750,141 @@ class UnichartNotebook:
         for col in columns:
             self.highlights.setdefault(col, []).append(
                 {'range': range_tuple, 'color': color, 'alpha': alpha})
-        
+
+    def legend_entry(self, name=None, remove=False, *, color=None, marker=None,
+                     linestyle=None, markersize=None, linewidth=None,
+                     position=None, rename=None):
+        """Add a custom entry to the legend of every plot, one that no dataset
+        draws: a key for a convention ("dashed = model"), a symbol explained
+        in a caption, a note. Calling it again with the same name edits that
+        entry, changing only the arguments you pass.
+
+        Args:
+            name (str, list of str, or 'all'): The text the entry shows, which
+                also identifies it for later edits. A list applies the same
+                call to each name; ``'all'`` edits or removes every entry
+                there is (so no entry can be called ``'all'``).
+            remove: ``'reset'`` (aliases ``'clear'``, ``'remove'``) or True
+                deletes the entry, as ``line(column, 'reset')`` deletes a
+                line. ``uc.legend_entry('all', 'reset')`` deletes them all,
+                the same as ``reset_format('legend_entries')``.
+            color (str): Line and marker color. Defaults to the legend's text
+                color, so the entry follows dark mode and the plot style.
+            marker (str): Matplotlib marker ('o', 's', '^', 'x', ...) or
+                Plotly symbol name, including hollow ones ('circle-open',
+                'square-open', ...). ``'none'`` for no marker (the default).
+            linestyle (str): '-', '--', '-.', ':' or a Plotly dash ('solid',
+                'dash', 'longdash', 'dot', ...). ``'none'`` for no line. A
+                new entry draws a solid line, unless you gave it a marker and
+                no linestyle, which makes a marker-only entry. With both
+                ``'none'`` the entry is text only.
+            markersize (float): Marker size; defaults to the datasets' default.
+            linewidth (float): Line width; defaults to the datasets' default.
+            position (str): ``'end'`` (default) lists the entry after the
+                datasets, ``'start'`` before them. Several entries keep the
+                order they were made in; passing ``position`` again moves an
+                entry to the back of its group.
+            rename (str): New text for the entry (one entry at a time).
+
+        Each style argument also takes ``'reset'`` to go back to its default.
+        Called with no arguments, it returns the entries as
+        ``{name: style}``, the same dict as :attr:`legend_entries`, but a
+        copy.
+
+        The entries are drawn on every plot that has a legend (not with
+        ``legend='off'``) and are saved with the session. In an interactive
+        plot, clicking one only greys it out, as it has no data to hide;
+        double-clicking hides everything else, as with any legend entry.
+
+        Examples:
+            uc.legend_entry('Spec limit', color='red', linestyle='--')
+            uc.legend_entry('Test point', color='black', marker='x')
+            uc.legend_entry('Model', marker='o', linestyle='-', color='gray')
+            uc.legend_entry('Spec limit', color='orange')        # edit one field
+            uc.legend_entry('Spec limit', rename='Redline')
+            uc.legend_entry('Model', 'reset')                    # remove it
+            uc.legend_entry()                                    # what is stored
+            uc.legend_entry('all', 'reset')                      # remove them all
+        """
+        given = {k: v for k, v in (('color', color), ('marker', marker),
+                                   ('linestyle', linestyle),
+                                   ('markersize', markersize),
+                                   ('linewidth', linewidth),
+                                   ('position', position)) if v is not None}
+        if name is None:
+            if given or remove or rename is not None:
+                raise TypeError("legend_entry: name the entry, e.g. "
+                                "legend_entry('Spec limit', color='red')")
+            return copy.deepcopy(self._custom_legend)
+
+        every = isinstance(name, str) and name == 'all'
+        names = list(name) if isinstance(name, (list, tuple)) else [name]
+        for n in names:
+            if not isinstance(n, str):
+                raise TypeError(f"legend_entry: names must be strings, got {n!r}")
+            if not n:
+                raise ValueError("legend_entry: a name must be a non-empty string")
+            if n == 'all' and not every:
+                raise ValueError("legend_entry: 'all' means every entry, so it "
+                                 "can't name one")
+        targets = list(self._custom_legend) if every else names
+
+        if remove is not False and remove is not None:
+            if not (remove is True or (isinstance(remove, str) and
+                                       remove.lower() in ('reset', 'clear', 'remove'))):
+                raise ValueError(
+                    "legend_entry: the second argument removes the entry; pass "
+                    f"'reset' (or remove=True) for that, got {remove!r}. Style "
+                    f"arguments are keywords: legend_entry({names[0]!r}, color=...)")
+            if given or rename is not None:
+                raise TypeError("legend_entry: removing an entry takes no style arguments")
+            missing = [n for n in targets if n not in self._custom_legend]
+            for n in targets:
+                self._custom_legend.pop(n, None)
+            if missing:
+                have = ', '.join(map(repr, self._custom_legend)) or 'none'
+                print(f"Warning: no legend entry named {', '.join(map(repr, missing))} "
+                      f"(entries: {have})")
+            return
+
+        # Every value is checked before anything is stored, so a bad one
+        # leaves the entries as they were.
+        checked = {k: _legend_entry_value(k, v) for k, v in given.items()}
+
+        if rename is not None:
+            if every or len(targets) != 1:
+                raise ValueError("legend_entry: rename one entry at a time")
+            if not isinstance(rename, str) or not rename or rename == 'all':
+                raise ValueError(f"legend_entry: rename needs a non-empty name "
+                                 f"other than 'all', got {rename!r}")
+            old = targets[0]
+            if old not in self._custom_legend:
+                have = ', '.join(map(repr, self._custom_legend)) or 'none'
+                raise ValueError(f"legend_entry: no entry named {old!r} to rename "
+                                 f"(entries: {have})")
+            if rename != old and rename in self._custom_legend:
+                raise ValueError(f"legend_entry: an entry named {rename!r} already "
+                                 "exists; remove it first")
+
+        if every and not targets:
+            print("Warning: there are no legend entries to edit.")
+            return
+
+        for n in targets:
+            entry = self._custom_legend.get(n)
+            if entry is None:
+                entry = dict(_LEGEND_ENTRY_DEFAULTS)
+                if checked.get('marker') is not None and 'linestyle' not in checked:
+                    entry['linestyle'] = None          # a marker alone: no line
+            entry.update(checked)
+            if 'position' in checked:
+                self._custom_legend.pop(n, None)      # to the back of its group
+            self._custom_legend[n] = entry
+
+        if rename is not None and rename != targets[0]:
+            self._custom_legend = {(rename if k == targets[0] else k): v
+                                    for k, v in self._custom_legend.items()}
+
     def scale(self, column, range_tuple):
         """
         Set specific axis limits for one or more parameters.
@@ -9318,7 +11025,7 @@ class UnichartNotebook:
         per_subplot : bool
             ``True`` (default) sizes each subplot panel; the figure grows with
             the grid, so a 3-panel plot is roughly three times as wide as a
-            1-panel one. ``False`` pins the combined grid area — the behaviour
+            1-panel one. ``False`` pins the combined grid area — the behavior
             this method had before per-panel sizing — which keeps the figure
             size stable but makes each panel shrink as panels are added.
             Like the sizes, this is per call and not remembered: a later
@@ -9381,13 +11088,13 @@ class UnichartNotebook:
         Also picks up the horizontal room ``plot_ymult`` reserves for its extra
         y axes — that space is inside the paper area but outside the panel, so
         the fraction is what turns a paper-width pin into a true panel-width one.
+
+        A polar subplot's panel is its domain (``polar``), the square the
+        disc fills.
         """
-        def _spans(axes):
+        def _spans(domains):
             out = []
-            for ax in axes:
-                if ax.overlaying:
-                    continue
-                dom = ax.domain
+            for dom in domains:
                 if dom is None or len(dom) != 2:
                     continue
                 span = float(dom[1]) - float(dom[0])
@@ -9395,7 +11102,13 @@ class UnichartNotebook:
                     out.append(span)
             return max(out) if out else 1.0
 
-        return _spans(fig.select_xaxes()), _spans(fig.select_yaxes())
+        if _subplot_kinds(fig) == (False, True):
+            polars = [fig.layout[k] for k in fig.layout.to_plotly_json()
+                      if re.fullmatch(r'polar\d*', k)]
+            return (_spans(p.domain.x for p in polars),
+                    _spans(p.domain.y for p in polars))
+        return (_spans(ax.domain for ax in fig.select_xaxes() if not ax.overlaying),
+                _spans(ax.domain for ax in fig.select_yaxes() if not ax.overlaying))
 
     def _pinned_inner_size(self, fig):
         """The pinned inner (paper) size of ``fig`` in px, as ``(w, h)`` with
@@ -9716,7 +11429,7 @@ class UnichartNotebook:
     def _reflow_extra_yaxes(self, fig, panel_px, inner_px, slots):
         """Re-lay the extra y axes given a plot area of ``inner_px`` whose data
         region is ``panel_px`` wide, giving the k-th axis ``slots[k]`` px after
-        its left neighbour. The last axis lands on paper 1.0, so ``margin.r``
+        its left neighbor. The last axis lands on paper 1.0, so ``margin.r``
         (sized for that axis) covers its labels."""
         axes = self._extra_yaxes(fig)
         if not axes:
@@ -9748,7 +11461,7 @@ class UnichartNotebook:
         the figure. The builders only know a fixed slot, so wide labels
         (``0.00125``, ``1540.5``) or a large tick font ran into the next axis.
         The right margin is sized for the outermost axis (plus a right-hand
-        legend beyond it). A pinned plot size is handled afterwards by
+        legend beyond it). A pinned plot size is handled afterward by
         ``_enforce_plot_size``, which reuses the same widths."""
         if fig is None:
             return fig
@@ -9924,13 +11637,25 @@ class UnichartNotebook:
         ``visible=True`` skips axes that carry an explicit ``showgrid=False``
         or overlay another axis — those grids were hidden deliberately (per-call
         ``grid=False``, secondary y axes) and re-enabling them would draw
-        misaligned double grids."""
+        misaligned double grids.
+
+        On polar subplots ``x`` is the angle and ``y`` the radius, as in
+        :meth:`polar`: the x settings style the spokes, the y ones the
+        circles. Polar axes have no minor grid."""
         if fig is None:
             return fig
+        kinds = None
         for dim in ('x', 'y'):
             stored = self.grid_format[dim]
             if not (stored['major'] or stored['minor']):
                 continue
+            if kinds is None:
+                kinds = _subplot_kinds(fig)
+            cartesian, polar = kinds
+            if polar:
+                self._apply_polar_grid(fig, dim, stored['major'])
+                if not cartesian:
+                    continue
             axes = list(fig.select_xaxes() if dim == 'x' else fig.select_yaxes())
             for which, opts in stored.items():
                 if not opts:
@@ -9949,6 +11674,19 @@ class UnichartNotebook:
                         ax.update(**({'minor': ax_kw} if which == 'minor'
                                      else ax_kw))
         return fig
+
+    @staticmethod
+    def _apply_polar_grid(fig, dim, opts):
+        """The major :meth:`grid` settings for ``dim`` on every polar subplot:
+        'x' styles the angular grid (spokes), 'y' the radial one (circles)."""
+        kw = {}
+        if 'color' in opts: kw['gridcolor'] = opts['color']
+        if 'width' in opts: kw['gridwidth'] = opts['width']
+        if 'dash' in opts: kw['griddash'] = opts['dash']
+        if opts.get('visible') is not None: kw['showgrid'] = opts['visible']
+        if kw:
+            key = 'angularaxis' if dim == 'x' else 'radialaxis'
+            fig.update_polars(**{key: kw})
 
     # ------------------------------------------------------------------
     # Watermarks
@@ -10203,17 +11941,7 @@ class UnichartNotebook:
         # the top space so a bigger suptitle can't collide with an above-legend.
         # _base_layout sized it for the default font; redo it for the real size.
         if suptitle_size is not None and fig.layout.title.text:
-            height = fig.layout.height or 800
-            leg = fig.layout.legend
-            has_above = (leg.orientation == 'h' and leg.yref == 'container')
-            legend_rows = (fig.layout.meta or {}).get('uc_legend_rows', 1)
-            top_margin, title_pos, legend_pos = _top_space(
-                fig.layout.title.text, (None, height / 100), has_above,
-                title_font_size=suptitle_size, legend_rows=legend_rows)
-            geo = {'margin': dict(t=top_margin), 'title': dict(y=title_pos['y'])}
-            if legend_pos is not None:
-                geo['legend'] = dict(y=legend_pos['y'])
-            fig.update_layout(**geo)
+            self._reserve_top_band(fig, suptitle_size)
 
         sp_size = self._font_size('subplot_title_size')
         if sp_size is not None and fig.layout.annotations:
@@ -10233,15 +11961,22 @@ class UnichartNotebook:
         if axes_tick_size is not None:
             x_updates['tickfont'] = dict(size=axes_tick_size)
             y_updates['tickfont'] = dict(size=axes_tick_size)
-        if x_updates:
+        cartesian, polar = _subplot_kinds(fig)
+        if x_updates and (cartesian or not polar):
             fig.update_xaxes(**x_updates)
-        if y_updates:
+        if y_updates and (cartesian or not polar):
             fig.update_yaxes(**y_updates)
+        if polar and x_updates:
+            fig.update_polars(angularaxis=dict(tickfont=x_updates.get('tickfont', {})),
+                              radialaxis=y_updates)
 
         cb_size = self._font_size('colorbar_size')
         if cb_size is not None:
             for trace in fig.data:
                 cb = getattr(trace, 'colorbar', None)
+                marker = getattr(trace, 'marker', None)
+                if cb is None and marker is not None and getattr(marker, 'showscale', None):
+                    cb = marker.colorbar           # a polar contour field's colorbar
                 if cb is not None:
                     cb.tickfont = dict(size=cb_size)
                     if cb.title is not None:
@@ -10252,6 +11987,87 @@ class UnichartNotebook:
 
         return fig
 
+    @staticmethod
+    def _reserve_top_band(fig, title_font_size):
+        """Re-reserve the top band (suptitle, then an above-legend of
+        ``meta['uc_legend_rows']`` rows) at the figure's own height, the way
+        ``_base_layout`` first reserved it."""
+        leg = fig.layout.legend
+        has_above = (leg.orientation == 'h' and leg.yref == 'container')
+        legend_rows = (fig.layout.meta or {}).get('uc_legend_rows', 1)
+        top_margin, title_pos, legend_pos = _top_space(
+            fig.layout.title.text, (None, (fig.layout.height or 800) / 100),
+            has_above, title_font_size=title_font_size, legend_rows=legend_rows)
+        geo = {'margin': dict(t=top_margin)}
+        if fig.layout.title.text:
+            geo['title'] = dict(y=title_pos['y'])
+        if legend_pos is not None:
+            geo['legend'] = dict(y=legend_pos['y'])
+        fig.update_layout(**geo)
+
+    def _add_legend_entries(self, fig):
+        """Add the :meth:`legend_entry` entries to ``fig``'s legend, as
+        traces with one ``None`` point (Plotly lists a trace with no points
+        at all nowhere). Returns the traces added.
+
+        Called from ``_finalize`` after the plot style is applied, since an
+        entry without a color takes the template's text color, and before
+        the font and plot-size steps, which reserve the above-legend's rows.
+        When the new entries add rows by ``_legend_rows``' estimate (the one
+        an unpinned figure is reserved with) the band grows by as many; a
+        pinned figure re-estimates the whole legend anyway."""
+        if fig is None or not self._custom_legend or fig.layout.showlegend is False:
+            return []
+        leg = fig.layout.legend
+        has_above = (leg.orientation == 'h' and leg.yref == 'container')
+
+        def rows():
+            return _legend_rows([n for _, _, n in self._legend_items(fig)],
+                                fig.layout.width)
+
+        rows_before = rows() if has_above else 0
+
+        fmt = self.default_format
+        text_color = (fig.layout.template.layout.font.color
+                      or ('white' if self.darkmode else 'black'))
+        # On a polar plot a Cartesian trace would draw empty x/y axes across
+        # the discs, so the entries are polar there.
+        if _subplot_kinds(fig) == (False, True):
+            entry_cls, coords = go.Scatterpolar, dict(r=[None], theta=[None])
+        else:
+            entry_cls, coords = go.Scatter, dict(x=[None], y=[None])
+        placed = dict.fromkeys(_LEGEND_ENTRY_RANKS, 0)
+        added = []
+        for name, spec in self._custom_legend.items():
+            position = spec.get('position') or 'end'
+            rank = _LEGEND_ENTRY_RANKS[position] + placed[position]
+            placed[position] += 1
+            color = spec.get('color') or text_color
+            marker, dash = spec.get('marker'), spec.get('linestyle')
+            width = spec.get('linewidth')
+            size = spec.get('markersize')
+            mode = '+'.join(['lines'] * (dash is not None)
+                            + ['markers'] * (marker is not None)) or 'none'
+            fig.add_trace(entry_cls(
+                **coords, mode=mode, name=name, showlegend=True,
+                legendrank=rank, hoverinfo='skip',
+                line=dict(color=color, dash=dash or 'solid',
+                          width=fmt.get('linewidth', 2) if width is None else width),
+                marker=dict(color=color, symbol=marker or 'circle',
+                            size=fmt.get('markersize', 10) if size is None else size,
+                            line=dict(width=fmt.get('edgewidth', 1),
+                                      color=fmt.get('edge_color', 'black')))))
+            added.append(fig.data[-1])
+
+        if has_above:
+            extra = rows() - rows_before
+            if extra > 0:
+                meta = dict(fig.layout.meta or {})
+                meta['uc_legend_rows'] = meta.get('uc_legend_rows', 1) + extra
+                fig.update_layout(meta=meta)
+                self._reserve_top_band(fig, self._font_size('suptitle_size'))
+        return added
+
     # legendgroup prefixes the plot builders tag a dataset's traces with.
     _SET_LEGEND_GROUPS = ('group_', 'set_', 'overlay_')
 
@@ -10259,7 +12075,7 @@ class UnichartNotebook:
         """Drop the legend entries of sets hidden with :meth:`legend`, leaving
         their traces drawn. Returns the traces it changed.
 
-        A dataset's traces are recognised by their per-set ``legendgroup`` tag,
+        A dataset's traces are recognized by their per-set ``legendgroup`` tag,
         or by the ``'<index>: <title>'`` name (optionally with a
         ``' — <column>'`` suffix) the builders give them where the group is
         keyed by variable instead (``plot_ymult`` grouped by vars)."""
@@ -10295,9 +12111,13 @@ class UnichartNotebook:
         With ``set_default_format(legend_scroll=False)`` the whole legend is
         shown (``_fit_full_legend``) once the plot size is final; static images
         always show it, via a fitted copy.
+
+        The custom :meth:`legend_entry` entries are added here too, so a new
+        plotting method lists them without doing anything.
         """
         fig = self._apply_style(fig)
         fig = self._apply_grid(fig)
+        entries = self._add_legend_entries(fig)
         fig = self._apply_fonts(fig)
         fig = self._layout_right_yaxes(fig)
         fig = self._apply_footer(fig, footer)
@@ -10310,15 +12130,21 @@ class UnichartNotebook:
             fig = self._fit_full_legend(fig)
         if fig is not None and suppress_legends:
             fig.update_traces(visible='legendonly')
-            # A set with no legend entry would have no way to be shown again.
-            for tr in unlisted:
+            # A set with no legend entry would have no way to be shown again,
+            # and a custom entry has nothing to show: it would only grey out.
+            for tr in unlisted + entries:
                 tr.visible = True
+        _guard_marker_interval(fig)
         self.last_fig = fig
         if self.static_images and fig is not None:
             # An image can't scroll: always render the whole legend.
             return self._render_static(self._full_legend_figure(fig))
-        if fig is not None and self.copy_buttons:
-            self._display_copy_button()
+        if fig is not None and self.copy_buttons and type(fig) is go.Figure:
+            # The button shows when the figure does: see _CopyButtonFigure.
+            # Reassigned in place rather than copied, which keeps the object
+            # (and the links back to it from its traces and layout) and skips
+            # go.Figure(fig)'s re-validation of all the data.
+            fig.__class__ = _CopyButtonFigure
         return fig
 
     @staticmethod
@@ -10390,6 +12216,10 @@ class UnichartNotebook:
         only; static-image mode (``set_static_images``) has no button because
         the browser's native right-click → Copy Image already works on PNGs.
 
+        The setting is read when a plot is made: a figure made with buttons on
+        shows its button wherever it is displayed (``fig``, ``display(fig)``,
+        ``fig.show()``), and a figure that is never displayed shows none.
+
         Examples
         --------
         uc.set_copy_buttons(False)   # hide the buttons
@@ -10398,15 +12228,17 @@ class UnichartNotebook:
         self.copy_buttons = bool(enabled)
         print(f"Plot copy buttons {'on' if self.copy_buttons else 'off'}.")
 
-    def _display_copy_button(self):
+    @staticmethod
+    def _display_copy_button():
         """Display a small right-aligned '⧉ copy' button as its own HTML
-        output, immediately before ``_finalize`` returns the figure — so the
-        button lands directly above the plot in the notebook.
+        output, immediately before a :class:`_CopyButtonFigure` displays
+        itself — so the button lands directly above the plot in the notebook.
 
         The button and the plot are separate outputs, so at click time the
         handler finds its plot geometrically: the nearest ``.js-plotly-plot``
         just below the button (within 300px, so it never grabs a plot from a
-        later cell if this figure was assigned instead of displayed).
+        later cell — ``fig.show(renderer='browser')``, say, puts the plot in
+        another window).
 
         Rasterizing prefers ``Plotly.toImage`` when the page exposes a global
         ``Plotly`` (classic notebook renderer); otherwise — e.g. JupyterLab's
@@ -10619,17 +12451,28 @@ class UnichartNotebook:
             ``set_default_format(hspace=, vspace=)`` or, unset, a fixed pixel
             budget per gap (80 px / 70 px) whatever the grid size. The bar,
             box, histogram and contour methods take the same two arguments.
+        marker_interval : optional (keyword)
+            Show only some of each trace's markers; the line and hover still
+            use every point. ``2`` = every other marker, ``(1, 2)`` = every
+            other starting from the second, ``'10:-10:5'`` = a slice, a list
+            = those point numbers. Overrides :meth:`marker_interval` for this call
+            (``1`` brings every marker back). Works with every ``by``.
         """
         if figsize is None: figsize = self.figsize
         legend = self._apply_default('legend', legend, 'above')
         suppress_legends = self._apply_default('suppress_legends', suppress_legends, False)
+        if kwargs.get('marker_interval') is not None:
+            # Stored form before the call is recorded: a (start, N) tuple would
+            # come back from a session's JSON as two point numbers.
+            kwargs['marker_interval'] = _check_marker_interval(kwargs['marker_interval'])
 
         # Delegate to the multi-y wrapper if requested
         if by == 'ymult':
             return self.plot_ymult(x=x, y=y, suptitle=suptitle,
                                      figsize=figsize, legend=legend,
                                      suppress_legends=suppress_legends,
-                                     style_by=kwargs.pop('style_by', None))
+                                     style_by=kwargs.pop('style_by', None),
+                                     marker_interval=kwargs.pop('marker_interval', None))
 
         if by == 'marginal':
             return self.plot_marginal(x=x, y=y, figsize=figsize, ncols=ncols, nrows=nrows,
@@ -10663,6 +12506,8 @@ class UnichartNotebook:
                 y_lim=None,
                 axis_limits=self.axis_limits, 
                 return_axes=True,
+                marker_interval=kwargs.get('marker_interval'),
+                variable_formats=self.variable_formats,
                 **self._spacing_kwargs(hspace, vspace),
             )
             mode = 'sets'
@@ -10683,6 +12528,7 @@ class UnichartNotebook:
                 'ncols': ncols,
                 'nrows': nrows,
                 'axis_limits': self.axis_limits,
+                'variable_formats': self.variable_formats,
                 **self._spacing_kwargs(hspace, vspace),
             }
             plot_args.update(kwargs)
@@ -10752,7 +12598,7 @@ class UnichartNotebook:
     @_uses_method_defaults
     def plot_ymult(self, x=None, y=None, suptitle=None, footer=None, figsize=None,
                      legend=None, legend_group_by='sets', suppress_legends=None,
-                     style_by=None):
+                     style_by=None, marker_interval=None):
         """
         Single plot, multiple Y-axes. All selected datasets overlay on the same x-axis.
         Applies all notebook-level formatting: axis_limits, variable_formats, lines, highlights.
@@ -10768,10 +12614,14 @@ class UnichartNotebook:
         Any attribute set via :meth:`var_format` still overrides the auto value
         for that variable, and unstyled attributes fall back to the dataset as
         usual. With ``'color'``, each variable's y-axis is tinted to match.
+
+        ``marker_interval`` shows only some of each trace's markers, as in ``plot``,
+        overriding the variables' and the datasets' own (:meth:`marker_interval`).
         """
         if figsize is None: figsize = self.figsize
         legend = self._apply_default('legend', legend, 'above')
         suppress_legends = self._apply_default('suppress_legends', suppress_legends, False)
+        marker_interval = _check_marker_interval(marker_interval)
         self._clear_last_fig()
         if x is None: x = self.last_x
         if y is None: y = self.last_y
@@ -10797,6 +12647,7 @@ class UnichartNotebook:
             color_cycle=self.color_map,
             marker_cycle=self.marker_map,
             return_axes=True,
+            marker_interval=marker_interval,
         )
         if fig is None:
             return None
@@ -10872,7 +12723,7 @@ class UnichartNotebook:
         opens an empty one you fill in the browser: load more data from the
         header's data bar, hit "+ add panel", and point each panel at whatever
         columns you want. Datasets loaded in the GUI stay on this notebook
-        afterwards; panel renders leave its state untouched.
+        afterward; panel renders leave its state untouched.
 
         From a kernel the board has no close button: it would have to end the
         process, and here that process is the kernel. Standalone — the
@@ -10934,7 +12785,7 @@ class UnichartNotebook:
         marginal_size : float, optional
             The strips' share of each block (default 0.2, must be below 0.6).
         nbins, bin_size, bin_start, bin_end, histnorm : optional
-            Histogram binning / normalisation for ``marginal='histogram'``,
+            Histogram binning / normalization for ``marginal='histogram'``,
             as in ``histogram()``; ``histnorm`` falls back to the
             ``set_default_format`` default.
         alpha : float, optional
@@ -10949,9 +12800,12 @@ class UnichartNotebook:
             and its strips is fixed (a few px).
 
         Remaining keyword arguments (``hue=``, ``marker=``, ``markersize=``,
-        ``display_parms=``) pass through to ``unimarginal``.
+        ``marker_interval=``, ``display_parms=``) pass through to ``unimarginal``.
         """
         if figsize is None: figsize = self.figsize
+        if kwargs.get('marker_interval') is not None:
+            # Stored form before the call is recorded, as in plot.
+            kwargs['marker_interval'] = _check_marker_interval(kwargs['marker_interval'])
         legend = self._apply_default('legend', legend, 'above')
         suppress_legends = self._apply_default('suppress_legends', suppress_legends, False)
         histnorm = self._apply_default('histnorm', histnorm, '')
@@ -10978,6 +12832,7 @@ class UnichartNotebook:
             suptitle=suptitle or self.suptitle, xlabel=self.x_label, ylabel=self.y_label,
             darkmode=self.darkmode, figsize=figsize, ncols=ncols, nrows=nrows,
             axis_limits=self.axis_limits, legend=legend, return_axes=True,
+            variable_formats=self.variable_formats,
             **self._spacing_kwargs(hspace, vspace),
         )
         common.update(kwargs)
@@ -11503,6 +13358,242 @@ class UnichartNotebook:
         return fig
 
     contour_defaults = _method_defaults_setter(contour, "colorscale='Viridis', ncontours=20")
+
+    # ------------------------------------------------------------------
+    # The polar Command
+    # ------------------------------------------------------------------
+    @_uses_method_defaults
+    def polar(self, x=None, y=None, z=None, by='vars', thetaunit='degrees',
+              direction='counterclockwise', rotation=None, hole=None,
+              contours_coloring='fill', colorscale=None, interpolate=True,
+              interp_res=100, interp_method='linear', ncontours=None,
+              overlay_sets=None, color=None, subplot_titles=None, suptitle=None,
+              footer=None, figsize=None, ncols=None, nrows=None, legend=None,
+              suppress_legends=None, hspace=None, vspace=None, marker_interval=None):
+        """Polar plot: ``x`` is the angle and ``y`` the radius. Given ``z``, a
+        polar contour map of ``z`` over the angle/radius plane instead.
+
+        Without ``z`` the samples are drawn as points and lines, each dataset
+        styled the way ``plot`` styles it (color, marker, linestyle, alpha,
+        fill, hue, reg_order, hover parms). With ``z`` they are gridded and
+        contoured, the way ``contour`` does it, on polar axes.
+
+        Parameters
+        ----------
+        x : str or list of str
+            Angle column(s), in ``thetaunit``.
+        y : str or list of str
+            Radius column(s).
+        z : str or list of str, optional
+            Column(s) to contour. Unlike in ``contour``, a ``z`` is not
+            remembered from an earlier call: passing it is what turns the
+            contour map on.
+        by : {'vars', 'sets'}
+            'vars' (default): a subplot per (x, y) pair, or per ``z`` column
+            with ``z``, the datasets overlaid. 'sets' ('datasets'): a subplot
+            per dataset, its ``y`` columns (or ``z`` columns) overlaid, each
+            in a color of its own (``var_format`` colors win).
+        thetaunit : {'degrees', 'radians'}
+            Unit of the angle column, and of the angle labels.
+        direction : {'counterclockwise', 'clockwise'}
+            Which way the angle grows.
+        rotation : float, optional
+            Where angle 0 sits, in degrees counterclockwise from 3 o'clock.
+            Plotly's default puts it east when counterclockwise and north
+            (90) when clockwise, so ``direction='clockwise'`` alone gives a
+            compass.
+        hole : float, optional
+            Fraction of the radius left empty in the middle (0 to below 1).
+        contours_coloring : {'fill', 'lines', 'none'}
+            With ``z``. 'fill' (default) fills the bands between levels and
+            outlines them in the set's line style; 'lines' draws each level
+            in its colorscale color; 'none' draws the levels in the set's
+            color alone. As in ``contour``, more than one set (by='vars') or
+            ``z`` column (by='sets') turns 'fill' into 'none' / 'lines', so
+            the fields don't hide each other.
+        colorscale : str or list, optional
+            With ``z``: a Plotly colorscale name ('Viridis', 'RdBu_r', ...) or
+            a list of colors. Defaults to each set's ``hue_palette``.
+        interpolate : bool
+            With ``z``. True (default) grids the samples on ``interp_res``
+            radii by ``2 * interp_res`` angles. Samples at every angle of
+            every radius (rakes x rings) are interpolated along the rings and
+            radii; any others are triangulated. Data round the whole circle
+            wraps seamlessly; data on part of it is gridded over that sector.
+            False contours the samples' own angle x radius grid.
+        interp_res : int
+            Grid resolution for ``interpolate`` (default 100).
+        interp_method : {'linear', 'cubic', 'nearest'}
+            Interpolation for ``interpolate``. 'cubic' gives smoother
+            contours from a few rakes.
+        ncontours : int, optional
+            With ``z``: at most this many levels (default 15), at a round
+            step. The sets overlaid in a panel share them and one colorbar.
+        overlay_sets : int, list, 'all' or Dataset, optional
+            With ``z``: datasets drawn over the field as points or lines, as
+            in ``contour``.
+        color : str, optional
+            One color for every dataset (without ``z``, by='vars').
+        marker_interval : optional
+            Without ``z``: show only some of each trace's markers, as in
+            ``plot``.
+        subplot_titles : list of str, optional
+            Titles of the by='vars' subplots (default: the radius column, or
+            the ``z`` column, of each).
+        legend : {'above', 'right', 'off'}
+            Legend placement, as in ``plot`` (default 'above', or the
+            ``set_default_format(legend=)`` default).
+        suptitle, footer, figsize, ncols, nrows, suppress_legends, hspace, vspace
+            As in ``plot``.
+
+        The notebook-wide formatting reads as polar: ``scale(y, (lo, hi))``
+        sets the radial range, ``scale(x, (lo, hi))`` shows only that sector
+        of angles, and ``scale(z, ...)`` sets the color range. ``line(y, r)``
+        draws a circle and ``line(x, angle)`` a spoke; ``highlight(y, (r0,
+        r1))`` shades a ring and ``highlight(x, (a0, a1))`` a wedge.
+        ``grid(axis='x')`` styles the spokes and ``grid(axis='y')`` the
+        circles.
+
+        Examples
+        --------
+        uc.polar(x='angle_deg', y='spl_db')
+        uc.polar(x='wind_dir', y='wind_speed', direction='clockwise')
+        uc.polar(x='theta', y='radius', z='pt_ratio', interp_method='cubic')
+        uc.polar(x='theta', y='radius', z='pt_ratio', overlay_sets=0)
+        """
+        if figsize is None: figsize = self.figsize
+        if by not in ('vars', 'sets', 'datasets'):
+            raise ValueError(f"by must be 'vars' or 'sets' ('datasets'), got {by!r}")
+        for name, val, allowed in (('thetaunit', thetaunit, _POLAR_THETAUNITS),
+                                   ('direction', direction, _POLAR_DIRECTIONS)):
+            if val not in allowed:
+                raise ValueError(f"{name} must be one of {allowed}, got {val!r}")
+        for name, val in (('rotation', rotation), ('hole', hole)):
+            if val is not None and (isinstance(val, bool)
+                                    or not isinstance(val, numbers.Real)):
+                raise TypeError(f"{name} must be a number, got {type(val).__name__}")
+        if hole is not None and not 0 <= hole < 1:
+            raise ValueError(f"hole must be from 0 to below 1, got {hole}")
+        contour = z is not None
+        if contour:
+            if contours_coloring not in _POLAR_COLORINGS:
+                raise ValueError(f"contours_coloring must be one of {_POLAR_COLORINGS}, "
+                                 f"got {contours_coloring!r}")
+            if interp_method not in _POLAR_INTERP_METHODS:
+                raise ValueError(f"interp_method must be one of {_POLAR_INTERP_METHODS}, "
+                                 f"got {interp_method!r}")
+            for name, val, low in (('interp_res', interp_res, 4), ('ncontours', ncontours, 1)):
+                if val is not None and (isinstance(val, bool)
+                                        or not isinstance(val, numbers.Integral)
+                                        or val < low):
+                    raise ValueError(f"{name} must be a whole number of at least {low}, "
+                                     f"got {val!r}")
+
+        legend = self._apply_default('legend', legend, 'above')
+        suppress_legends = self._apply_default('suppress_legends', suppress_legends, False)
+        marker_interval = _check_marker_interval(marker_interval)
+        ncols, nrows = self._resolve_grid(ncols, nrows)
+        self._clear_last_fig()
+
+        if x is None: x = self.last_x
+        if y is None: y = self.last_y
+        self.last_x, self.last_y = x, y
+        if contour:
+            self.last_z = z
+        self._record_plot_call('polar', locals())
+
+        missing = [name for name, val in (('x', x), ('y', y)) if val is None]
+        if missing:
+            print(f"Error: polar() needs {' and '.join(missing)} (none given and none "
+                  "remembered from a previous plotting call).")
+            return None
+        if contour and (isinstance(x, list) or isinstance(y, list)):
+            raise ValueError("polar() with z takes one x (angle) and one y (radius) "
+                             f"column, got x={x!r}, y={y!r}; put several fields in z.")
+        per_set = by in ('sets', 'datasets')
+        ignored = [name for name, val, unused in (
+            ('color', color, contour or per_set),
+            ('marker_interval', marker_interval, contour),
+            ('overlay_sets', overlay_sets, not contour)) if val is not None and unused]
+        if ignored:
+            # stacklevel 3: past the _uses_method_defaults wrapper, to the
+            # caller's line.
+            warnings.warn(f"polar() ignores {', '.join(ignored)} here: marker_interval= is "
+                          "for points/lines (without z), color= is for "
+                          "points/lines with by='vars' (by='sets' colors by variable; "
+                          "use var_format), overlay_sets= is for contours (with z).",
+                          UserWarning, stacklevel=3)
+
+        x_list = x if isinstance(x, list) else [x]
+        y_list = y if isinstance(y, list) else [y]
+        z_list = (z if isinstance(z, list) else [z]) if contour else []
+        active_sets = [d for d in self.sets if d.select]
+        if not active_sets:
+            print("No datasets selected.")
+            return None
+        self._check_bar_columns(active_sets, x_list + y_list + z_list)
+
+        common = dict(
+            thetaunit=thetaunit, direction=direction, rotation=rotation, hole=hole,
+            suptitle=suptitle or self.suptitle, darkmode=self.darkmode, legend=legend,
+            figsize=figsize, ncols=ncols, nrows=nrows, axis_limits=self.axis_limits,
+            return_axes=True, **self._spacing_kwargs(hspace, vspace),
+        )
+        if contour:
+            contour_kw = dict(
+                list_of_datasets=self.sets, x=x, y=y, z=z,
+                contours_coloring=contours_coloring, colorscale=colorscale,
+                interpolate=interpolate, interp_res=interp_res,
+                interp_method=interp_method, ncontours=ncontours,
+                overlay_datasets=(self._get_uset_slice(overlay_sets)
+                                  if overlay_sets is not None else []),
+                **common)
+            if per_set:
+                fig = unipolar_contour_per_dataset(**contour_kw)
+                cells = [(x, y)] * len(active_sets)
+            else:
+                fig = unipolar_contour(subplot_titles=subplot_titles, **contour_kw)
+                cells = [(x, y)] * len(z_list)
+        elif per_set:
+            fig = unipolar_per_dataset(
+                list_of_datasets=self.sets, x=x, y=y,
+                variable_formats=self.variable_formats, color_cycle=self.color_map,
+                display_parms=self.display_parms, marker_interval=marker_interval, **common)
+            cells = [(x_list[0], y_list[0])] * len(active_sets)
+        else:
+            fig = unipolar(list_of_datasets=self.sets, x=x, y=y, color=color,
+                           display_parms=self.display_parms,
+                           subplot_titles=subplot_titles, marker_interval=marker_interval,
+                           variable_formats=self.variable_formats, **common)
+            cells = _xy_pairs(x, y)
+        if fig is None:
+            return None
+
+        # Contour fills are opaque, so a highlight goes over them (as in
+        # contour); over points and lines it stays underneath.
+        fig = self._apply_polar_decorations(fig, cells,
+                                            highlight_layer='above' if contour else 'below')
+
+        if legend == 'off':
+            fig.update_layout(showlegend=False)
+        elif legend == 'right':
+            _top, _, _ = _top_space(suptitle or self.suptitle, figsize, False)
+            fig.update_layout(
+                showlegend=True,
+                # yref='paper' explicitly: see plot().
+                legend=dict(orientation='v', xanchor='left', x=1.02,
+                            yanchor='top', y=1, yref='paper'),
+                margin=dict(r=self._keep_right_margin(fig, 160), t=_top),
+            )
+        else:  # 'above' (default)
+            _legend, _top = _above_legend_layout(suptitle or self.suptitle, figsize)
+            fig.update_layout(legend=_legend,
+                              margin=dict(r=self._keep_right_margin(fig, 80),
+                                          t=_top))
+        return self._finalize(fig, suppress_legends, footer=footer or self.footer)
+
+    polar_defaults = _method_defaults_setter(
+        polar, "direction='clockwise', interp_method='cubic'")
 
     def table_read(self, uset_slice, x_col, y_col, x_in,
                    kind=None, fill_value='extrapolate', bounds_error=False):
@@ -12581,7 +14672,8 @@ class UnichartNotebook:
             }
 
             // One column's filter. `nested` (other columns are filtered too)
-            // brackets an OR so the AND joining the columns can't split it.
+            // wraps an OR in parentheses so the AND joining the columns can't
+            // split it.
             function filterQuery(groups, col, nested) {
                 // Plain substrings OR-ed together ("idle, cruise") read best
                 // as a single regex alternation.
@@ -13343,14 +15435,14 @@ class UnichartNotebook:
         ("Selection",        ['select', 'selected', 'omit', 'query', 'restore',
                               'clear_data']),
         ("Plotting",         ['plot', 'plot_ymult', 'plot_marginal', 'plot_type',
-                              'bar', 'box', 'contour', 'histogram', 'line', 'highlight',
-                              'save_png', 'dashboard']),
+                              'bar', 'box', 'contour', 'polar', 'histogram', 'line',
+                              'highlight', 'legend_entry', 'save_png', 'dashboard']),
         ("Method defaults",  ['plot_defaults', 'plot_ymult_defaults',
                               'plot_marginal_defaults', 'bar_defaults',
                               'box_defaults', 'histogram_defaults',
-                              'contour_defaults', 'table_defaults',
+                              'contour_defaults', 'polar_defaults', 'table_defaults',
                               'summary_defaults', 'save_png_defaults']),
-        ("Styling & format", ['color', 'marker', 'markersize', 'alpha',
+        ("Styling & format", ['color', 'marker', 'markersize', 'marker_interval', 'alpha',
                               'alpha_marker', 'alpha_line', 'fill',
                               'linestyle', 'linewidth', 'edgewidth', 'hue',
                               'hue_palette', 'reg_order', 'copy_format',
@@ -13591,7 +15683,7 @@ class UnichartNotebook:
         def _add_spanning_line(add, l, orientation, **pos):
             # add_vline/add_hline copy one set of kwargs onto every subplot, so
             # on a grid each copy would get its own legend entry. Group the
-            # copies afterwards and keep the entry on the first one only.
+            # copies afterward and keep the entry on the first one only.
             n0 = len(fig.layout.shapes)
             kw = legend_kw(l)
             add(**pos, line_dash=l['dash'] or 'solid', line_color=l['color'],
@@ -13678,6 +15770,149 @@ class UnichartNotebook:
 
         return fig
 
+    def _apply_polar_decorations(self, fig, cells, highlight_layer='below'):
+        """Draw the stored :meth:`line` and :meth:`highlight` decorations on a
+        polar figure, as :meth:`_apply_decorations` does on a Cartesian one.
+
+        Plotly shapes can't sit on polar axes, so each is a trace on the
+        subplots whose angle (``x``) or radius (``y``) column it names: a line
+        on the radius column is a circle, one on the angle column a spoke from
+        the center to the rim; a highlight on the radius column is a ring, one
+        on the angle column a wedge. ``cells`` gives each subplot's
+        ``(angle column, radius column)``.
+
+        A spoke or wedge has to end on the rim, so a subplot that gets one
+        also gets an explicit radial range (unless ``scale()`` set one) at
+        about what Plotly's autorange gives: the furthest radius drawn, a touch
+        further when markers show. Highlights go under the data (``'below'``)
+        or over an opaque contour fill (``'above'``). A line's ``label`` sits
+        at its far end, or ``label_position``'s fraction along it, and
+        ``legend=`` gives it an entry, as on a Cartesian plot."""
+        if fig is None or not (self.lines or self.highlights):
+            return fig
+        thetaunit = fig.layout[_polar_subplot_key(0)].angularaxis.thetaunit or 'degrees'
+        to_deg = np.degrees if thetaunit == 'radians' else (lambda a: a)
+        legend_kw = self._line_legend_kwargs()
+        turn = np.linspace(0.0, 360.0, 361)
+        under = []
+
+        def add(trace, key, below=False):
+            fig.add_trace(trace.update(subplot=key))
+            if below:
+                under.append(len(fig.data) - 1)
+
+        def screen(key, theta):
+            """Screen angle (counterclockwise from 3 o'clock) of data angle
+            ``theta`` in degrees, after the subplot's rotation and direction."""
+            axis = fig.layout[key].angularaxis
+            clockwise = axis.direction == 'clockwise'
+            start = axis.rotation if axis.rotation is not None else (90 if clockwise else 0)
+            return start - theta if clockwise else start + theta
+
+        def add_label(l, key, theta, r, toward):
+            """``l``'s label at (theta, r), set off its point toward the screen
+            direction ``toward``."""
+            text = l.get('label')
+            if not text:
+                return
+            size = l.get('label_size') or getattr(self, 'axes_tick_size', None)
+            color = l.get('label_color') or l.get('color')
+            add(go.Scatterpolar(theta=[theta], r=[r], thetaunit='degrees', mode='text',
+                                text=[str(text)], textposition=_polar_text_position(toward),
+                                hoverinfo='skip', showlegend=False,
+                                textfont={k: v for k, v in (('size', size), ('color', color))
+                                          if v is not None}), key)
+
+        for cell, (t_col, r_col) in enumerate(cells):
+            key = _polar_subplot_key(cell)
+            spokes = self.lines.get(t_col, [])
+            circles = self.lines.get(r_col, [])
+            wedges = self.highlights.get(t_col, [])
+            rings = self.highlights.get(r_col, [])
+            if not (spokes or circles or wedges or rings):
+                continue
+            t_lim = self.axis_limits.get(t_col)
+            sweep = (to_deg(np.array(sorted(float(v) for v in t_lim))) if t_lim
+                     else np.array([0.0, 360.0]))
+            if spokes or wedges:
+                r_lo, r_hi = self._polar_rim(fig, key, r_col, circles, rings)
+
+            for h in rings:
+                r0, r1 = sorted(float(v) for v in h['range'])
+                theta = np.r_[turn, np.nan, turn[::-1]] if r0 > 0 else turn
+                radius = (np.r_[np.full(361, r1), np.nan, np.full(361, r0)] if r0 > 0
+                          else np.full(361, r1))
+                add(go.Scatterpolar(theta=theta, r=radius, thetaunit='degrees',
+                                    mode='none', fill='toself', fillcolor=h['color'],
+                                    opacity=h['alpha'], hoverinfo='skip',
+                                    showlegend=False), key, highlight_layer == 'below')
+            for h in wedges:
+                a0, a1 = to_deg(np.array(sorted(float(v) for v in h['range'])))
+                arc = np.linspace(a0, a1, max(2, int(abs(a1 - a0)) + 1))
+                add(go.Scatterpolar(theta=np.r_[a0, arc, a1],
+                                    r=np.r_[r_lo, np.full(len(arc), r_hi), r_lo],
+                                    thetaunit='degrees', mode='none', fill='toself',
+                                    fillcolor=h['color'], opacity=h['alpha'],
+                                    hoverinfo='skip', showlegend=False),
+                        key, highlight_layer == 'below')
+            for l in circles:
+                add(go.Scatterpolar(theta=turn, r=np.full(361, float(l['level'])),
+                                    thetaunit='degrees', mode='lines',
+                                    line=dict(color=l['color'], dash=l['dash'] or 'solid', width=2),
+                                    hoverinfo='skip',
+                                    **{'showlegend': False, **legend_kw(l, repeated=True)}), key)
+                # A circle reads as a horizontal line: 'top' (the default)
+                # puts the label outside it, 'bottom' inside.
+                along, side = _parse_line_label_position(l.get('label_position'), 'horizontal')
+                at = sweep[0] + along * (sweep[1] - sweep[0])
+                add_label(l, key, at, float(l['level']),
+                          screen(key, at) + (0 if side == 'top' else 180))
+            for l in spokes:
+                level = float(to_deg(float(l['level'])))
+                add(go.Scatterpolar(theta=[level, level], r=[r_lo, r_hi],
+                                    thetaunit='degrees', mode='lines',
+                                    line=dict(color=l['color'], dash=l['dash'] or 'solid', width=2),
+                                    hoverinfo='skip',
+                                    **{'showlegend': False, **legend_kw(l, repeated=True)}), key)
+                # A spoke reads as a vertical line: the label sits beside it
+                # ('right', the default, is clockwise of it looking out), and
+                # at either end is turned in along it, so it stays on the disc.
+                along, side = _parse_line_label_position(l.get('label_position'), 'vertical')
+                off = 135 if along > 0.9 else 45 if along < 0.1 else 90
+                add_label(l, key, level, r_lo + along * (r_hi - r_lo),
+                          screen(key, level) + (-off if side == 'right' else off))
+
+        if under:
+            # Under the data: first in the draw order.
+            first = set(under)
+            order = under + [i for i in range(len(fig.data)) if i not in first]
+            fig.data = tuple(fig.data[i] for i in order)
+        return fig
+
+    def _polar_rim(self, fig, key, r_col, circles, rings):
+        """``(r_lo, r_hi)`` radial range of the polar subplot ``key``, made
+        explicit so spokes and wedges can be drawn to its rim: ``scale()``'s
+        limits for the radius column, else from the center out to the
+        furthest radius drawn (circles and rings included), 3% further when
+        markers show, about where Plotly's autorange puts the rim."""
+        lim = self.axis_limits.get(r_col)
+        if lim:
+            return float(lim[0]), float(lim[1])
+        far, markers = 0.0, False
+        for tr in fig.data:
+            if (getattr(tr, 'subplot', None) or 'polar') != key or tr.r is None:
+                continue
+            r = np.abs(np.asarray(tr.r, dtype=float))
+            if np.isfinite(r).any():
+                far = max(far, float(np.nanmax(r)))
+                if 'markers' in (tr.mode or '') and tr.marker.opacity != 0:
+                    markers = True
+        far = max([far] + [abs(float(l['level'])) for l in circles]
+                  + [abs(float(v)) for h in rings for v in h['range']])
+        r_hi = (far * (1.03 if markers else 1.0)) or 1.0
+        fig.layout[key].radialaxis.range = [0.0, r_hi]
+        return 0.0, r_hi
+
 # ======================================================================
 # new_uc — one-call notebook factory
 # ======================================================================
@@ -13715,6 +15950,7 @@ def new_uc(
     alpha=AUTO,
     alpha_marker=_DATASET_FORMAT_DEFAULTS['alpha_marker'],
     alpha_line=_DATASET_FORMAT_DEFAULTS['alpha_line'],
+    marker_interval=_DATASET_FORMAT_DEFAULTS['marker_interval'],
     fill=_DATASET_FORMAT_DEFAULTS['fill'],
     hue_palette=AUTO,
     sig_figs=_DATASET_FORMAT_DEFAULTS['sig_figs'],
@@ -13777,7 +16013,7 @@ def new_uc(
         Per-index color / marker sequences. ``auto`` keeps the style's own
         (matplotlib: the mpl color cycle; plotly: ``px.colors.qualitative.Plotly``).
     marker, markersize, linestyle, linewidth, edgewidth, edge_color, alpha,
-    alpha_marker, alpha_line, fill, hue_palette
+    alpha_marker, alpha_line, marker_interval, fill, hue_palette
         Per-dataset styles, exactly as :meth:`UnichartNotebook.set_default_format`
         takes them. ``markersize`` and ``hue_palette`` are style-owned
         (matplotlib: 8.3 / 'Viridis'; plotly: 10 / 'Jet'). ``alpha`` is ``auto``
@@ -13853,8 +16089,8 @@ def new_uc(
         'marker': marker, 'markersize': markersize, 'linestyle': linestyle,
         'linewidth': linewidth, 'edgewidth': edgewidth, 'edge_color': edge_color,
         'alpha': alpha, 'alpha_marker': alpha_marker, 'alpha_line': alpha_line,
-        'fill': fill, 'hue_palette': hue_palette, 'sig_figs': sig_figs,
-        'decimals': decimals,
+        'marker_interval': marker_interval, 'fill': fill, 'hue_palette': hue_palette,
+        'sig_figs': sig_figs, 'decimals': decimals,
         'figsize': figsize, 'legend': legend, 'suppress_legends': suppress_legends,
         'legend_scroll': legend_scroll, 'ncols': ncols, 'nrows': nrows,
         'hspace': hspace, 'vspace': vspace, 'barmode': barmode, 'agg': agg,

@@ -15,3 +15,14 @@ First release on PyPI.
   call uses them for whatever it leaves out. `uc.plot_defaults` used to be the
   dict `set_default_format` writes, which is now internal (older sessions still
   load).
+- `legend_entry()` adds custom legend entries that no dataset draws, with your
+  own color, marker and line style. Call it again by name to edit an entry, or
+  with `'reset'` to remove it. The entries are saved with the session and
+  cleared by `reset_format('legend_entries')`.
+- `polar()` draws on polar axes, with `x` as the angle and `y` as the radius,
+  styled like `plot`. Given a `z`, it draws a polar contour map instead,
+  interpolated all the way round the circle, or over the sector the data
+  covers. `scale`, `line`, `highlight` and `grid` work on it as angle and
+  radius. It has a `polar_defaults()` sister, and works as a dashboard panel and
+  a CLI `--panel` method. The explorer has a new "Inlet survey" example for it,
+  and the gallery an "In the round" section.

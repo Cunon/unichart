@@ -3,7 +3,7 @@
 How to add a new plotting capability to `unichart/_core.py` so its inputs and behavior
 match every existing plot. Read this before copy-pasting an existing method:
 the existing methods have drifted in a few places, and copying the wrong one
-propagates the drift. Known drift is catalogued in [§7](#7-standardization-recommendations).
+propagates the drift. Known drift is cataloged in [§7](#7-standardization-recommendations).
 
 All line references are to `unichart/_core.py` as of this writing — treat them as
 "look near here," not exact addresses, since the file changes.
@@ -34,7 +34,7 @@ plotting logic into a method.
   `variable_formats`, `display_parms`, `lines`, `highlights`, fonts).
 - Choose the right render function based on `by`.
 - Post-process (decorations, fonts, legends) and store `self.last_fig`.
-- Public methods: `plot`, `plot_ymult`, `plot_marginal`, `bar`, `box`, `histogram`, `contour`.
+- Public methods: `plot`, `plot_ymult`, `plot_marginal`, `bar`, `box`, `histogram`, `contour`, `polar`.
 
 ---
 
@@ -158,7 +158,7 @@ State passthrough rules:
 | `_font_size(slot)` | — | resolve one font slot: user setting → plot style → Plotly default |
 | `_template_name()` | — | Plotly template for the active `(plot_style, darkmode)` pair |
 | `_apply_style(fig)` | — | re-theme a finished figure for the active plot style |
-| `_finalize(fig, suppress_legends)` | `:4058` | shared tail: style + fonts + suppress + cache `last_fig` |
+| `_finalize(fig, suppress_legends)` | `:4058` | shared tail: style + `legend_entry` entries + fonts + suppress + cache `last_fig` |
 | `_clear_last_fig()` | `:5236` | reset cached figure at method start |
 
 If you need grid math or layout scaffolding and one of these fits, call it — do not
@@ -183,7 +183,7 @@ Rules for new code:
 - **Never write `"plotly_dark" if self.darkmode else "plotly_white"`.** Call
   `self._template_name()` — the ternary ignores the plot style. (Render
   functions in Layer A still take `darkmode` and hand it to `_base_layout`; the
-  style is layered on afterwards, in `_finalize`.)
+  style is layered on afterward, in `_finalize`.)
 - **Read font sizes through `_font_size('axes_tick_size')`**, not
   `self.axes_tick_size`, so a style default applies when the user hasn't set one.
   A new size slot is a `_font_size_attr('foo_size', 'foo')` line in the class,
@@ -194,6 +194,28 @@ Rules for new code:
 - A per-dataset attribute a style should be able to change belongs in
   `_DATASET_FORMAT_DEFAULTS` (read via `notebook.default_format`), not
   hardcoded in `Dataset.__init__`.
+
+### Polar subplots
+
+`polar` is the one method on non-Cartesian axes, and several shared steps had
+to learn about them. A new polar (or other non-Cartesian) plot must keep to this:
+
+- **`x` is the angle, `y` the radius** (Matplotlib's polar convention), so
+  `last_x`/`last_y`, sessions, board panels and the CLI's `method:x:y:z` all work
+  unchanged. Build the grid with `_polar_figure` (it keeps each subplot's title
+  and angle labels inside its cell) and set the axes with `_style_polar_axes`.
+- **No shapes, no `_apply_decorations`.** Plotly shapes can't reference polar
+  axes, and `add_vline` would plant Cartesian axes. `_apply_polar_decorations`
+  draws `line` / `highlight` as traces (circle, spoke, ring, wedge).
+- **No Cartesian anything on a polar figure.** A Cartesian trace draws an empty
+  x/y frame across the discs. `_subplot_kinds(fig)` tells the shared steps
+  (`_apply_grid`, `_apply_fonts`, `_add_legend_entries`, `_panel_fractions`)
+  which kind they are styling.
+- **The contour mode makes its own contours** (Plotly has no polar contour
+  trace): `_polar_field` grids the samples, `_polar_rings` traces each level
+  with oriented marching squares, and each level's rings go in **one** trace so
+  SVG's nonzero fill rule cuts the holes. `tests/test_polar.py` checks the
+  geometry against exact areas; keep it passing if you touch either.
 
 ---
 

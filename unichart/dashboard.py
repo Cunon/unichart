@@ -55,19 +55,26 @@ _RENDER_LOCK = threading.Lock()
 # Plot methods offered in the per-panel "plot type" switch. contour is included
 # but needs a z column (and optionally overlay_sets) supplied via the panel's
 # ``kwargs`` passthrough, e.g. kwargs={'z': 'EFF', 'overlay_sets': [1, 2]}. A
-# contour panel with no z renders a graceful in-panel error. table renders a
-# go.Table of the selected columns (the y control picks the columns); it has a
-# different signature, so render_panel dispatches it through a dedicated branch.
+# contour panel with no z renders a graceful in-panel error. polar plots x as
+# the angle and y as the radius; picking a z turns it into a polar contour map.
+# table renders a go.Table of the selected columns (the y control picks the
+# columns); it has a different signature, so render_panel dispatches it through
+# a dedicated branch.
 PLOT_METHODS = ['plot', 'plot_ymult', 'plot_marginal', 'bar', 'box', 'histogram',
-                'contour', 'table']
+                'contour', 'polar', 'table']
 
 # Methods whose signature accepts a `legend=` argument (above/right/off). The
 # legend control is only shown — and only passed through — for these.
-_LEGEND_METHODS = {'plot', 'plot_ymult', 'plot_marginal'}
+_LEGEND_METHODS = {'plot', 'plot_ymult', 'plot_marginal', 'polar'}
 
 # Methods that take a `z=` column (mapped to color). The z dropdown is only
 # shown — and only passed through — for these.
-_Z_METHODS = {'contour'}
+_Z_METHODS = {'contour', 'polar'}
+
+# Methods that fit their subplots to the figure's size (polar trims each disc's
+# box to the shape it will draw, so a colorbar can sit beside it): a panel hands
+# them its own size as figsize, since _stamp replaces the figsize-sized one.
+_SIZED_METHODS = {'polar'}
 
 # Methods with a different signature from the x/y plotters: handled by a
 # dedicated branch in render_panel rather than the generic x/y/legend dispatch.
@@ -461,6 +468,8 @@ def render_panel(uc, method, x, y, dataset_indices, suptitle=None, legend='above
                 kwargs['suptitle'] = suptitle
             if method in _LEGEND_METHODS:
                 kwargs['legend'] = legend
+            if method in _SIZED_METHODS and size is not None:
+                kwargs['figsize'] = (size[0] / 100, size[1] / 100)
 
             method_fn(**kwargs)
             fig = uc.last_fig
@@ -567,10 +576,31 @@ def _figure_to_dataframe(figure):
     Each trace contributes rows tagged with a ``trace`` column. 1-D traces
     (scatter / line / bar / box / histogram, and contour overlays) export their
     ``x``/``y``/``z`` arrays column-wise; a 2-D ``z`` (contour grid) is unrolled to
-    long ``(x, y, z)`` rows over the grid. Traces with no data are skipped."""
+    long ``(x, y, z)`` rows over the grid. Traces with no data are skipped.
+
+    Polar traces export ``theta``/``r``. A polar contour's field is its grid
+    of hover points (the markers drawn at opacity 0), which carry z as their
+    marker color; its fills and contour lines, like the polar reference lines
+    and highlights, skip hover and are left out as drawing, not data."""
     frames = []
     for i, tr in enumerate(figure.get('data', []) if figure else []):
         name = tr.get('name') or tr.get('type') or f'trace{i}'
+        if tr.get('theta') is not None or tr.get('r') is not None:
+            if tr.get('hoverinfo') == 'skip':
+                continue
+            cols = {'theta': _decode_array(tr.get('theta')),
+                    'r': _decode_array(tr.get('r'))}
+            marker = tr.get('marker') or {}
+            if marker.get('opacity') == 0:
+                cols['z'] = _decode_array(marker.get('color'))
+            cols = {k: list(v) for k, v in cols.items() if v is not None}
+            if not cols:
+                continue
+            n = max(len(v) for v in cols.values())
+            df = pd.DataFrame({k: list(v) + [None] * (n - len(v)) for k, v in cols.items()})
+            df.insert(0, 'trace', name)
+            frames.append(df)
+            continue
         x = _decode_array(tr.get('x'))
         y = _decode_array(tr.get('y'))
         z = _decode_array(tr.get('z'))
@@ -898,16 +928,20 @@ def _register_board_callbacks(app, uc, size):
 
     # Show the z / legend controls only for plot types that accept them.
     # Clientside so toggling is instant and never queues behind a render on
-    # the lock.
+    # the lock. The method lists are written in from _Z_METHODS /
+    # _LEGEND_METHODS, so the two can't drift apart.
+    def _shown_for(methods):
+        names = ', '.join(f"'{m}'" for m in sorted(methods))
+        return (f"function(method){{ return [{names}].indexOf(method) >= 0 ? "
+                "'control' : 'control hidden'; }")
+
     app.clientside_callback(
-        "function(method){ return method === 'contour' ? "
-        "'control' : 'control hidden'; }",
+        _shown_for(_Z_METHODS),
         Output({'type': 'panel-z-wrap', 'index': MATCH}, 'className'),
         Input({'type': 'panel-method', 'index': MATCH}, 'value'),
     )
     app.clientside_callback(
-        "function(method){ return (method === 'plot' || method === 'plot_ymult'"
-        " || method === 'plot_marginal') ? 'control' : 'control hidden'; }",
+        _shown_for(_LEGEND_METHODS),
         Output({'type': 'panel-legend-wrap', 'index': MATCH}, 'className'),
         Input({'type': 'panel-method', 'index': MATCH}, 'value'),
     )
@@ -1154,14 +1188,15 @@ def _panel_div(html, dcc, dash_table, i, panel, col_options, size,
             _control(html, 'y', dcc.Dropdown(
                 id={'type': 'panel-y', 'index': i},
                 options=col_options, value=y, multi=True)),
-            # z: only relevant for contour, so hidden unless the plot type is
-            # contour (toggled by the clientside callback in build_app).
+            # z: only relevant for contour and polar (where it turns on the
+            # contour map), so hidden for every other plot type (toggled by the
+            # clientside callback in build_app).
             _control(html, 'z', dcc.Dropdown(
                 id={'type': 'panel-z', 'index': i},
                 options=col_options, value=z),
                 wrap_id={'type': 'panel-z-wrap', 'index': i},
                 hidden=(method not in _Z_METHODS)),
-            # legend: only plot/plot_ymult accept it, so hidden elsewhere
+            # legend: only the _LEGEND_METHODS accept it, so hidden elsewhere
             # (same clientside toggle pattern as z).
             _control(html, 'legend', dcc.Dropdown(
                 id={'type': 'panel-legend', 'index': i},
@@ -1346,7 +1381,7 @@ def explore(uc=None, data=None, sessions=None, panels=None, title=None,
     uc : UnichartNotebook, optional
         The notebook to drive. Defaults to a fresh one. Passing your own shares
         state: what you load or restyle in the terminal is on that notebook
-        afterwards, which is the point — the board is a view onto a live
+        afterward, which is the point — the board is a view onto a live
         notebook, not a copy of one. Dark mode is switched on to match the
         board unless the notebook is already in it.
     data : str | DataFrame | list, optional
@@ -1452,10 +1487,11 @@ def dashboard(uc, panels, ncols=2, width=600, height=420, title=None,
         One dict per panel. Recognized keys: ``method`` (one of
         :data:`PLOT_METHODS`, default ``'plot'``), ``x``, ``y`` (str or list),
         ``z`` (the contour color column; its dropdown is shown only for contour
-        panels), ``suptitle`` (the panel's card title — drawn in the card
+        and polar panels, where it turns the polar plot into a polar contour
+        map), ``suptitle`` (the panel's card title — drawn in the card
         header, not inside the figure, and used to name CSV exports),
         ``legend`` (``above``/``right``/``off``; shown
-        only for plot/plot_ymult), ``datasets`` (pin the panel to these dataset
+        only for plot/plot_ymult/plot_marginal/polar), ``datasets`` (pin the panel to these dataset
         indices — it then ignores the header picker and shows a "pinned" badge),
         and ``kwargs`` (method-specific passthrough options, e.g. ``{'nbins':
         20}`` for histogram, ``{'barmode': 'stack', 'agg': 'sum'}`` for bar,
@@ -1552,7 +1588,8 @@ def to_html(uc, panels, path, ncols=2, width=600, height=420, title=None,
         ``.select`` flags, so the file opens showing exactly the export-time
         selection. Panels the filter cannot reach keep that selection frozen
         and carry a badge: pinned panels (``datasets=[...]``) stay pinned, and
-        ``table`` / ``contour`` / ``by='sets'`` panels are marked "static"
+        ``table`` / ``contour`` / polar-with-``z`` / ``by='sets'`` panels are
+        marked "static"
         (their figures aren't built one-trace-per-dataset, so visibility
         toggling can't re-slice them). Unchecking every chip leaves empty
         axes — unlike the live board there is no server to draw the "no
@@ -1608,7 +1645,7 @@ def to_html(uc, panels, path, ncols=2, width=600, height=420, title=None,
                          'does not affect it.">pinned: sets '
                          f"{', '.join(str(d) for d in pin)}</span>")
         elif (global_select and method not in _TABLE_METHODS
-                and method not in _Z_METHODS):
+                and not (method == 'contour' or (method in _Z_METHODS and z))):
             # Embed every dataset so the filter can bring any of them in; the
             # on-load script hides the initially-unselected ones. Only keep
             # this render if its traces actually carry dataset tags — a
@@ -1624,7 +1661,9 @@ def to_html(uc, panels, path, ncols=2, width=600, height=420, title=None,
         else:
             # table (one combined go.Table) and contour (z-grid computed from
             # the data, only overlays are tagged) can't be re-sliced by trace
-            # visibility; freeze them on the export-time selection.
+            # visibility; freeze them on the export-time selection. So is a
+            # polar panel with a z: its contour levels, colors and fill-or-
+            # outline choice all depend on which sets are drawn together.
             fig = _render(default_selected)
             if global_select:
                 badge = static_badge

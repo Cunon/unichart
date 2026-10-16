@@ -181,4 +181,4 @@ Existing editable installs need `pip install -e .` re-run, since the old
       `unichart` from TestPyPI with `--no-deps` and the rest from PyPI. Check the
       rendered project page, including links and the license. Then approve.
 - [ ] Verify `pip install unichart` from real PyPI.
-- [ ] Afterwards: create a GitHub Release from the tag and add PyPI/Python-version badges to the README.
+- [ ] Afterward: create a GitHub Release from the tag and add PyPI/Python-version badges to the README.

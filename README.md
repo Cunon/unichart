@@ -74,9 +74,9 @@ typical loop is:
 |------|---------|
 | **1. Load** | `load_df` · `load` · `load_clipboard` |
 | **2. Select** | `select` · `omit` · `query` · `restore` |
-| **3. Plot** | `plot` · `plot_ymult` · `plot_marginal` · `bar` · `box` · `histogram` · `contour` · `table` |
+| **3. Plot** | `plot` · `plot_ymult` · `plot_marginal` · `bar` · `box` · `histogram` · `contour` · `polar` · `table` |
 | **4. Style** | `color` · `marker` · `var_format` · `set_default_format` · `toggle_darkmode` · `set_plot_style` |
-| **5. Analyse** | `delta` · `table` · `summary` · `reg_info` · `combine_sets` |
+| **5. Analyze** | `delta` · `table` · `summary` · `reg_info` · `combine_sets` |
 
 Two conveniences run through the whole API:
 
@@ -117,7 +117,7 @@ uc.color(0, 'red')                        # dataset 0 red
 uc.var_format('temperature', linestyle='--')   # every temperature line dashed
 uc.toggle_darkmode(True)
 
-# 5. Analyse
+# 5. Analyze
 uc.plot(x='time', y='temperature', by='ymult')   # shared X, multiple Y axes
 uc.delta(base_idx=0, study_indices='all', delta_parms='temperature')
 ```
@@ -178,6 +178,7 @@ All plotting methods return an interactive Plotly `go.Figure` (cached in
 | `box(x, y, points=, notched=)` | Box / distribution plots. |
 | `histogram(x, histfunc=, nbins=)` | Histograms with configurable binning and normalization. |
 | `contour(x, y, z, overlay_sets=)` | Filled/line contour maps from scattered data, with optional scatter overlays. |
+| `polar(x, y, z=, direction=)` | Polar axes: `x` is the angle (`thetaunit='degrees'` or `'radians'`), `y` the radius, styled like `plot`. With `z`, a polar contour map instead, the way `contour` draws one: samples round the whole circle wrap seamlessly, and rake × ring surveys are interpolated along the rings and radii. `direction='clockwise'` gives a compass (0° at the top); `rotation=` and `hole=` move the start and open the middle. |
 | `table(cols=, x_in=, kind=)` | Rendered data table; optionally interpolate values at given `x_in` points. |
 
 ```python
@@ -186,14 +187,22 @@ uc.plot_marginal(x='rpm', y='torque', marginal='kde')
 uc.bar(x='config', y='efficiency', barmode='group', agg='mean')
 uc.histogram(x='error', nbins=40, histnorm='probability')
 uc.contour(x='rpm', y='torque', z='efficiency', overlay_sets=[1, 2])
+uc.polar(x='angle', y='spl', direction='clockwise')
+uc.polar(x='theta', y='radius', z='pt_ratio', interp_method='cubic')
 ```
+
+On polar axes the notebook-wide formatting reads as angle and radius:
+`scale(y, (lo, hi))` sets the radial range and `scale(x, (lo, hi))` shows just
+that sector of angles; `line(y, r)` draws a circle and `line(x, angle)` a
+spoke; `highlight` shades a ring or a wedge; `grid(axis='x')` styles the spokes
+and `axis='y'` the circles.
 
 ### Defaults per method
 
 Every plotting method has a `_defaults` sister that takes the same arguments
 and stores them for later calls: `plot_defaults`, `plot_ymult_defaults`,
 `plot_marginal_defaults`, `bar_defaults`, `box_defaults`,
-`histogram_defaults`, `contour_defaults` and `table_defaults`, plus
+`histogram_defaults`, `contour_defaults`, `polar_defaults` and `table_defaults`, plus
 `summary_defaults` and `save_png_defaults`. Each later call fills in whatever
 it leaves out from what is stored, so the arguments that stay the same are
 typed once:
@@ -476,6 +485,50 @@ uc.line('cht', 350, label='target', label_position='center below', label_color='
   `uc.line('egt', 900, color='orange', legend='EGT limit')`. Line entries sit
   after the data entries, and clicking one toggles the line.
 
+#### Custom legend entries
+
+`legend_entry` adds a legend entry that no dataset draws, such as a key for a
+convention or a symbol explained in a caption. You pick its color, marker and
+line style. It is listed with the sets on every plot until you remove it:
+
+```python
+uc.legend_entry('Spec limit', color='red', linestyle='--')    # a dashed line
+uc.legend_entry('Test point', color='black', marker='x')      # a marker alone
+uc.legend_entry('Model', marker='circle-open', linestyle='-')  # both
+uc.legend_entry('Rig A, sea level', linestyle='none')         # text only
+uc.legend_entry('Key', marker='s', position='start')          # before the sets
+```
+
+- **Style:** `color` defaults to the legend's text color, so the entry follows
+  dark mode. `marker` and `linestyle` take Matplotlib shorthand (`'o'`, `'--'`)
+  or any Plotly name (`'circle-open'`, `'longdash'`), and `'none'` turns either
+  off. `markersize` and `linewidth` default to the datasets' defaults.
+- **Glyph:** a new entry draws a solid line, unless you give it a marker and no
+  `linestyle`, which makes a marker-only entry.
+- **Order:** entries sit after the sets (`position='end'`) or before them
+  (`'start'`), in the order they were made. They come ahead of any reference-line
+  entries.
+
+The entry's text is its name. Calling `legend_entry` again with the same name
+edits just the arguments you pass:
+
+```python
+uc.legend_entry('Spec limit', color='orange')        # change one field
+uc.legend_entry('Spec limit', rename='Redline')      # new text, same place
+uc.legend_entry('all', markersize=8)                 # edit every entry
+uc.legend_entry('Model', 'reset')                    # remove one ('clear' works too)
+uc.legend_entry('all', 'reset')                      # remove them all
+uc.legend_entry()                                    # what is stored, as a dict
+```
+
+The second argument is only ever the remove switch, and the style arguments
+are keywords. On a style argument, `'reset'` restores that field's default:
+`uc.legend_entry('Model', color='reset')`. The entries are also the
+`uc.legend_entries` attribute. They are saved with the session, cleared by
+`reset_format()`, and left out with `legend='off'`. In an interactive plot,
+clicking an entry only greys it out, since it has no data to hide.
+Double-clicking hides everything else, as with any legend entry.
+
 ### Fixed plot size / aspect ratio
 
 `figsize` sets the size of the whole *figure*, so the actual drawing area moves
@@ -496,7 +549,7 @@ uc.plot_size = None             # ...and cleared
 The size applies to **one subplot panel** by default, and the figure grows to
 fit the grid plus its margins — so panels keep the same size and aspect ratio no
 matter how many variables you plot or how tall the title and legend get. Pass
-`per_subplot=False` to pin the combined grid area instead (the behaviour this
+`per_subplot=False` to pin the combined grid area instead (the behavior this
 method had before per-panel sizing), which holds the figure size steady but
 shrinks each panel as the grid grows.
 
@@ -518,7 +571,7 @@ them, so the pin governs notebook figures, not board tiles.
 ### Subplot spacing
 
 The gap between subplots is a fixed pixel budget — 80px between columns, 70px
-between rows (enough for the neighbouring panel's tick labels, axis title and
+between rows (enough for the neighboring panel's tick labels, axis title and
 subplot title) — whatever the grid size, so a 6-row plot doesn't overlap and a
 2-row plot doesn't waste a third of the figure on the gap. Contour plots and
 secondary-axis plots reserve more for their colorbars and extra axes. When a
@@ -526,7 +579,7 @@ grid is too crowded for its figure the gaps are clamped and a warning says so;
 a bigger `figsize` or `set_plot_size` is the cure.
 
 To change it, every gridded plot method (`plot`, `bar`, `box`, `histogram`,
-`contour`) takes `hspace` (columns) and `vspace` (rows). The `uc.hspace` and
+`contour`, `polar`) takes `hspace` (columns) and `vspace` (rows). The `uc.hspace` and
 `uc.vspace` attributes set the standing default, the way `uc.figsize` does for
 the figure size; `set_default_format` sets the same thing in one call, and a
 per-call value always wins:
@@ -595,12 +648,14 @@ Two consistent rules cover every reset:
    uc.var_format('CHT', color='reset')  # same, per attribute
    uc.line('all', 'reset')          # remove reference lines ('clear' also works)
    uc.highlight('rpm', 'reset')     # remove highlights on one column
+   uc.legend_entry('all', 'reset')  # remove custom legend entries
    uc.scale('all', 'reset')         # clear every fixed axis range
    ```
 
 2. **`reset_format()` is the single bulk-reset hub**, with optional scopes
-   `'sets'`, `'vars'`, `'lines'`, `'highlights'`, `'scales'`, `'fonts'`,
-   `'plot_size'`, `'grid'`, `'watermark'`, `'defaults'`, `'all'`:
+   `'sets'`, `'vars'`, `'lines'`, `'highlights'`, `'legend_entries'`,
+   `'scales'`, `'fonts'`, `'plot_size'`, `'grid'`, `'watermark'`,
+   `'defaults'`, `'all'`:
 
    ```python
    uc.reset_format()                     # all applied formatting
@@ -658,7 +713,7 @@ uc.dashboard(panels=[
 Panel spec keys:
 
 - `method` — one of `plot`, `plot_ymult`, `plot_marginal`, `bar`, `box`,
-  `histogram`, `contour`, `table` (default `plot`).
+  `histogram`, `contour`, `polar`, `table` (default `plot`).
 - `x`, `y`, `z` — variables (the `z` / legend controls appear only for the
   methods that use them).
 - `suptitle` — the card title (also names CSV exports).
@@ -708,7 +763,7 @@ sheet reads the way the library does, and `uc` covers everything else:
   Jupyter still has its own; this is the board's.
 - **Syntax highlighting** everywhere Python appears: the cheat-sheet snippets,
   every command in the transcript, and the input line as you type. The
-  transcript is coloured by Python's own tokenizer, so f-strings, comments and
+  transcript is colored by Python's own tokenizer, so f-strings, comments and
   nested quotes are handled properly; half-typed input degrades to plain text
   rather than breaking.
 - **Drag the pane edges** to resize: the sidebar's right edge and the divider
@@ -723,6 +778,7 @@ sheet reads the way the library does, and `uc` covers everything else:
   | Battery discharge | four C-rates, different lengths | `table(x_in=...)`, `plot_ymult`, `line`, `delta` |
   | Compressor map | four speed lines of scattered points | `contour`, `hue`, `reg_order`, `plot_marginal` |
   | Weather stations | a year of days at four sites | `box`, `bar(agg=...)`, `histogram`, `query` |
+  | Inlet survey | rakes round a duct at three throttle settings | `polar`, `polar(z=...)`, `line` spokes, `scale` |
 
   An example is appended to what is already loaded, not swapped in: your data
   stays, deselected, and the example's snippets name the set numbers it landed
@@ -741,7 +797,7 @@ sheet reads the way the library does, and `uc` covers everything else:
 - Drop a file of a type unichart can't read and a reader for it is staged in
   the input: a stub function plus the `uc.register_reader(...)` and
   `uc.load(...)` that use it. Edit the stub to parse the file and press Enter;
-  later drops of that type then load straight away.
+  later drops of that type then load right away.
 - **✕ close** in the top bar shuts the board down: it asks first, then stops
   the server and ends the process — so `unichart runs.csv` in a shell returns
   to the prompt without a `Ctrl-C`. Typing `exit()` in the terminal pane does
@@ -752,7 +808,7 @@ sheet reads the way the library does, and `uc` covers everything else:
   Reopen it with `unichart that-file.json`, by dropping it back on the sidebar,
   or with `uc.load_session(...)` from Python.
 - The board runs against **your** notebook: what you load or restyle there is
-  on `uc` afterwards.
+  on `uc` afterward.
 
 The board is dark, and `explore()` switches the notebook to dark mode to match
 unless it already is. Options: `data=`, `panels=` (dashboard-style specs,
@@ -805,7 +861,7 @@ unichart run1.dat                       # the explorer asks for a reader
 Data files load first (as one batch, so `--combine` still means what it says),
 then sessions in the order given — so a session's own formatting is the one that
 sticks, and any `--panel` draws on top of the restored state. A session records
-its own theme, which the explorer honours; `--dark` overrides it. `--combine`,
+its own theme, which the explorer honors; `--dark` overrides it. `--combine`,
 `--set-col`, `--name-col` and `--reader` describe how to *read* a data file, so
 passing one with nothing but a session on the line is an error rather than a
 no-op.
@@ -896,7 +952,7 @@ can be built without opening the data first:
 
 ```
 $ unichart runs.csv --panel <TAB>
-plot:  plot_ymult:  plot_marginal:  bar:  box:  histogram:  contour:  table
+plot:  plot_ymult:  plot_marginal:  bar:  box:  histogram:  contour:  polar:  table
 
 $ unichart runs.csv --panel plot:<TAB>
 time   temp   press   rpm

@@ -182,14 +182,14 @@
     border-block: 1px solid var(--rule);
     margin-block: 40px 0;
   }
+  /* Wraps onto a second row rather than hiding sections off the right edge;
+     phones scroll one row instead (see the max-width: 720px block). */
   .index .wrap {
     display: flex;
-    gap: 6px;
-    overflow-x: auto;
-    scrollbar-width: none;
+    flex-wrap: wrap;
+    gap: 4px 6px;
     padding-block: 9px;
   }
-  .index .wrap::-webkit-scrollbar { display: none; }
   .index a {
     flex: none;
     padding: 4px 11px;
@@ -276,6 +276,8 @@
     font-size: .95em;
   }
   .primer p code, .primer dd code { color: var(--ink); }
+  .primer p + dl { margin-top: 16px; }
+  .primer .code { border: 1px solid var(--slab-rule); border-radius: 6px; }
 
   /* ---------------- cards ---------------- */
 
@@ -411,6 +413,17 @@
     .primer dd + dt { margin-top: 10px; }
     .card-head, .plate, .code pre { padding-inline: 16px; }
     .wrap { padding-inline: 16px; }
+    /* One scrolling row, so the sticky bar stays short; the thin scrollbar
+       shows there is more to the right. */
+    .index .wrap {
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      scrollbar-width: thin;
+      scrollbar-color: var(--rule) transparent;
+      padding-block: 9px 6px;
+    }
+    .index .wrap::-webkit-scrollbar { height: 4px; }
+    .index .wrap::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 2px; }
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -452,8 +465,9 @@
         sharing one schema — the shape <code>unichart</code> is built for.
       </p>
       <p>
-        Load it once and every example below starts from this state. No example
-        re-reads the file, and only the last section touches Plotly directly.
+        Load it once and every example below starts from this state, except the
+        polar cards, which load a survey of their own on top. No example re-reads
+        the file, and only the last section touches Plotly directly.
       </p>
       <dl>
         <dt>time_s</dt><dd>elapsed seconds, 0–600</dd>
@@ -487,7 +501,8 @@
     <code>--static</code> swaps the live charts for PNG stills.
   </p>
   <p>
-    The demo frame is written next to this page as <code>dyno_runs.csv</code>.
+    The demo frames are written next to this page as <code>dyno_runs.csv</code> and
+    <code>cowl_survey.csv</code>.
     See <code>README.md</code> for the full API and <code>demo_notebooks/</code> for
     runnable versions.
   </p>
