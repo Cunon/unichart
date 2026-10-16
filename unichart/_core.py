@@ -2549,14 +2549,62 @@ def _xy_pairs(x, y):
     )
 
 
-def _numeric_hue_info(list_of_datasets, hue, axis_limits):
-    """The numeric hue columns among the selected datasets, each assigned its
+def _check_subplot_sets(value):
+    """``value`` as a ``subplot_sets`` setting in its stored form; raises
+    TypeError for one it isn't.
+
+    A list (or tuple) with one entry per subplot: a dataset selector — anything
+    ``select()`` takes — or None for the current selection. ``Dataset``
+    objects are stored as their index, slices as range shorthand and ranges as
+    lists, so the value comes back from a session's JSON meaning the same
+    thing. An empty list is the same as None.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("subplot_sets takes a list with one dataset selector per "
+                        f"subplot, e.g. ['0:3', '3:6'] or [[0, 1], 2]; got {value!r}")
+
+    def stored(sel):
+        if isinstance(sel, Dataset):
+            return sel.index
+        if _is_int(sel):
+            return int(sel)
+        if isinstance(sel, slice):
+            return _slice_text(sel)
+        if isinstance(sel, (list, tuple, set, range)):
+            return [stored(s) for s in sel]
+        return sel
+
+    return [stored(entry) for entry in value] or None
+
+
+def _sets_label(indices):
+    """Set indices as a subplot title: ``[0, 1, 2, 5]`` -> ``'Sets 0–2, 5'``."""
+    idx = sorted(set(indices))
+    if not idx:
+        return "No sets"
+    runs, start = [], idx[0]
+    for prev, cur in zip(idx, idx[1:] + [None]):
+        if cur == prev + 1:
+            continue
+        if prev - start >= 2:
+            runs.append(f"{start}–{prev}")
+        else:
+            runs.extend(str(i) for i in range(start, prev + 1))
+        start = cur
+    return ("Set " if len(idx) == 1 else "Sets ") + ", ".join(runs)
+
+
+def _numeric_hue_info(list_of_datasets, hue, axis_limits, selected_only=True):
+    """The numeric hue columns among the selected datasets (all of
+    ``list_of_datasets`` with ``selected_only=False``), each assigned its
     own layout coloraxis: ``{hue_col: {'ca_name', 'palette', 'lim'}}``. A
     dataset's own ``hue`` wins over the call-level one; categorical hues are
     left out (they color through a per-trace colorscale, with no colorbar)."""
     numeric_hue_info = {}
     for _ds in list_of_datasets:
-        if not _ds.select: continue
+        if selected_only and not _ds.select: continue
         _fmt = _ds.get_format_dict()
         _cur_hue = _fmt.get('hue') or hue
         if not _cur_hue or _cur_hue in numeric_hue_info: continue
@@ -2784,9 +2832,12 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             darkmode=False, interactive=True, display_parms=None, grid=True,
             legend='above', legend_ncols=1, figsize=(12, 8), ncols=None, nrows=None, x_lim=None, y_lim=None,
             axis_limits=None, hspace=None, vspace=None, spacing_ref=None,
-            marker_interval=None, variable_formats=None):
+            marker_interval=None, variable_formats=None, subplot_sets=None):
     # ``marker_interval`` (see _check_marker_interval) overrides every set's for this call;
     # of ``variable_formats`` only the marker_interval key is read here.
+    # ``subplot_sets``: one entry per x/y pair — the datasets that subplot
+    # draws, selected or not — or None (for the list or an entry) to draw the
+    # selected sets.
 
     marker_interval = _check_marker_interval(marker_interval)
     axis_limits = axis_limits or {}
@@ -2797,9 +2848,26 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
     n_plots = len(pairs)
     if n_plots == 0: raise ValueError("At least one x/y pair is required.")
 
+    panel_ids = [None] * n_plots
+    if subplot_sets is not None:
+        if len(subplot_sets) != n_plots:
+            raise ValueError(f"subplot_sets has {len(subplot_sets)} entries for "
+                             f"{n_plots} subplots; give one per subplot.")
+        panel_ids = [None if s is None else {id(d) for d in s} for s in subplot_sets]
+
+    def panels_of(ds):
+        """The subplots (pair indices) that draw ``ds``."""
+        return {i for i, ids in enumerate(panel_ids)
+                if (ds.select if ids is None else id(ds) in ids)}
+
     nrows, ncols = _calc_grid(n_plots, nrows, ncols)
 
-    numeric_hue_info = _numeric_hue_info(list_of_datasets, hue, axis_limits)
+    if subplot_sets is None:
+        numeric_hue_info = _numeric_hue_info(list_of_datasets, hue, axis_limits)
+    else:
+        numeric_hue_info = _numeric_hue_info(
+            [d for d in list_of_datasets if panels_of(d)], hue, axis_limits,
+            selected_only=False)
 
     # Match unicontour's r=100 per colorbar: 90 leaves the colorbar's tick
     # labels just wide enough to trip Plotly's margin autoexpand, which then
@@ -2810,14 +2878,15 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                         **_subplot_spacing(nrows, ncols, figsize, hspace, vspace, spacing_ref))
     fig.update_layout(**_base_layout(
         darkmode, None, figsize,
-        title={'text': suptitle or (f"{x} vs {[str(yi) for yi in y_list]}" if len(x_list) == 1 else f"{x_list} vs {y_list}"), 'x': 0.5, 'xanchor': 'center'},
+        title={'text': suptitle or (f"{x} vs {[str(yi) for yi in dict.fromkeys(y_list)]}" if len(x_list) == 1 else f"{x_list} vs {y_list}"), 'x': 0.5, 'xanchor': 'center'},
         showlegend=(legend != 'off'),
         margin=dict(r=right_margin),
         **({'legend': dict(orientation="h")} if legend == 'above' else {}),
     ))
 
     for dataset in _in_draw_order(list_of_datasets):
-        if not dataset.select: continue
+        panels = panels_of(dataset)
+        if not panels: continue
 
         fmt = dataset.get_format_dict()
         cur_title = fmt.get('title')
@@ -2846,7 +2915,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
         # plot a handful of columns dominated plot time on wide frames.
         resolved_pairs = []
         for idx_p, (x_name, yi) in enumerate(pairs):
-            if yi not in base_cols: continue
+            if idx_p not in panels or yi not in base_cols: continue
             if x_name in base_cols:
                 x_col = x_name
             else:
@@ -2915,7 +2984,9 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                 marker=marker_dict, line=line_dict,
                 opacity=cur_opacity,
                 customdata=custom_data, hovertemplate=ht,
-                showlegend=(idx_p == 0),
+                # On the set's first drawn panel, which needn't be the first
+                # subplot: it may lack that y column or leave the set out.
+                showlegend=(idx_p == resolved_pairs[0][0]),
                 **_marker_interval_kw(interval, df[x_col], df[yi], mode),
             ), row=row, col=col)
 
@@ -3471,6 +3542,7 @@ def unibox(list_of_datasets, x, y, boxmode='group', points='outliers', notched=F
     for ds in _in_draw_order(list_of_datasets):
         if not ds.select: continue
         df = ds.cols([c for c in dict.fromkeys([x] + y_list) if c in ds.columns])
+        listed = False   # legend entry goes on the set's first box drawn
 
         for idx_y, yi in enumerate(y_list):
             row, col = (idx_y // ncols) + 1, (idx_y % ncols) + 1
@@ -3487,8 +3559,9 @@ def unibox(list_of_datasets, x, y, boxmode='group', points='outliers', notched=F
                 boxpoints=points,
                 notched=notched,
                 line=dict(width=ds.linewidth),
-                showlegend=(idx_y == 0)
+                showlegend=not listed
             ), row=row, col=col)
+            listed = True
 
     _label_outer_axes(fig, n_y, nrows, ncols, xlabel or x, ylabel)
     if not ylabel:
@@ -3581,6 +3654,7 @@ def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
                       if c in ds.columns])
 
         use_color = color if color else ds.color
+        listed = False   # legend entry goes on the set's first histogram drawn
 
         for idx_x, xi in enumerate(x_list):
             row, col = (idx_x // ncols) + 1, (idx_x % ncols) + 1
@@ -3603,7 +3677,7 @@ def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
                 nbinsx=nbins,
                 xbins=xbins,
                 histnorm=histnorm,
-                showlegend=(idx_x == 0)
+                showlegend=not listed
             )
 
             if y:
@@ -3611,6 +3685,7 @@ def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
                 trace_args['histfunc'] = histfunc
 
             fig.add_trace(go.Histogram(**trace_args), row=row, col=col)
+            listed = True
 
     if x_lim: fig.update_xaxes(range=x_lim)
 
@@ -6514,8 +6589,11 @@ def _uses_method_defaults(func):
 
 # Arguments a ``<method>_defaults`` stores in a form of their own: a
 # (start, N) marker_interval would come back from a session's JSON as two point
-# numbers, so it is kept as the slice string _check_marker_interval gives.
-_STORED_ARG_FORMS = {'marker_interval': _check_marker_interval}
+# numbers, so it is kept as the slice string _check_marker_interval gives; a
+# Dataset or slice in subplot_sets has no JSON form, so it is kept as an index
+# or range shorthand.
+_STORED_ARG_FORMS = {'marker_interval': _check_marker_interval,
+                     'subplot_sets': _check_subplot_sets}
 
 
 def _stored_arg(key, value):
@@ -12427,7 +12505,7 @@ class UnichartNotebook:
     @_uses_method_defaults
     def plot(self, x=None, y=None, by='vars', figsize=None, ncols=None, nrows=None,
                 subplot_titles=None, suptitle=None, footer=None, suppress_legends=None,
-                legend=None, hspace=None, vspace=None, **kwargs):
+                legend=None, hspace=None, vspace=None, subplot_sets=None, **kwargs):
         """
         Main plotting wrapper.
 
@@ -12439,6 +12517,21 @@ class UnichartNotebook:
             'ymult'           - Single plot, multiple Y axes (delegates to plot_ymult).
             'marginal'        - Scatter with marginal distribution strips
                                 (delegates to plot_marginal).
+        subplot_sets : list, optional
+            The datasets each subplot draws, in subplot order like
+            ``subplot_titles``: one entry per subplot, each anything
+            :meth:`select` takes (``2``, ``[0, 3]``, ``'0:3'``, ``'all'``) or
+            ``None`` for the current selection. A named set is drawn even when
+            deselected, and the selection itself is left as it is (a set whose
+            query matched no rows still draws nothing). With a single ``y``,
+            each entry gets its own panel of that variable, titled by its
+            sets::
+
+                uc.plot('time', ['T', 'P'], subplot_sets=['0:3', '3:6'])
+                uc.plot('time', 'T', subplot_sets=[[0, 1], [2, 3]])
+
+            For ``by='vars'`` only; other ``by`` values ignore it with a
+            warning.
         legend : str, optional
             Legend placement, matching ``plot_ymult`` (default 'above', or the
             ``set_default_format(legend=)`` default):
@@ -12465,6 +12558,15 @@ class UnichartNotebook:
             # Stored form before the call is recorded: a (start, N) tuple would
             # come back from a session's JSON as two point numbers.
             kwargs['marker_interval'] = _check_marker_interval(kwargs['marker_interval'])
+        # Likewise: a Dataset or slice in it has no JSON form.
+        subplot_sets = _check_subplot_sets(subplot_sets)
+        if subplot_sets and by in ('sets', 'datasets', 'ymult', 'marginal'):
+            # stacklevel 3: past the _uses_method_defaults wrapper, to the
+            # caller's line.
+            warnings.warn(f"plot() ignores subplot_sets with by={by!r}: it picks "
+                          "the sets of each by='vars' subplot.", UserWarning,
+                          stacklevel=3)
+            subplot_sets = None
 
         # Delegate to the multi-y wrapper if requested
         if by == 'ymult':
@@ -12513,10 +12615,17 @@ class UnichartNotebook:
             mode = 'sets'
             
         else:
+            panel_sets = None
+            if subplot_sets:
+                x, y, panel_sets = self._subplot_set_panels(x, y, subplot_sets)
+                if subplot_titles is None and len(set(_xy_pairs(x, y))) < len(panel_sets):
+                    # The same variable in several panels: name each by its sets.
+                    subplot_titles = [_sets_label(d.index for d in p) for p in panel_sets]
             plot_args = {
                 'list_of_datasets': self.sets,
                 'x': x,
                 'y': y,
+                'subplot_sets': panel_sets,
                 'darkmode': self.darkmode,
                 'display_parms': self.display_parms,
                 'suptitle': suptitle or self.suptitle,
@@ -12591,6 +12700,29 @@ class UnichartNotebook:
         note="``by='ymult'`` and ``by='marginal'`` hand off without "
              "``plot_ymult``'s or ``plot_marginal``'s stored defaults: only "
              "the method you call fills in.")
+
+    def _subplot_set_panels(self, x, y, subplot_sets):
+        """``plot``'s x, y and the datasets of each subplot, for a stored-form
+        ``subplot_sets``. A single x/y pair gets one panel per entry. An entry
+        of None draws the selected sets, any other the sets it names, selected
+        or not — leaving out a set whose query matched no rows: ``query``
+        turned it off and dropped its mask, so drawing it would show every row.
+        """
+        pairs = _xy_pairs(x, y)
+        if len(pairs) == 1 and len(subplot_sets) > 1:
+            x, y = pairs[0][0], [pairs[0][1]] * len(subplot_sets)
+        elif len(subplot_sets) != len(pairs):
+            raise ValueError(f"subplot_sets has {len(subplot_sets)} entries for "
+                             f"{len(pairs)} subplots; give one per subplot (None "
+                             "draws the selected sets).")
+        panels = []
+        for entry in subplot_sets:
+            if entry is None:
+                panels.append([ds for ds in self.sets if ds.select])
+            else:
+                panels.append([ds for ds in self._get_uset_slice(entry)
+                               if not (ds._query and ds._query_mask is None)])
+        return x, y, panels
 
     # ------------------------------------------------------------------
     # Multi-Y plot wrapper
