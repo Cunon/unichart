@@ -115,7 +115,7 @@ def test_zenity_separator_is_newline_not_pipe():
 
 
 def test_cancel_is_not_failure():
-    # rc 1 means the user cancelled: load nothing, quietly.
+    # rc 1 means the user canceled: load nothing, quietly.
     with _Dialogs(available=['zenity'], answer=lambda p, argv: _Completed(1)):
         assert UnichartNotebook._pick_files_native() == ()
 
@@ -134,7 +134,7 @@ def test_falls_through_to_next_program_on_error():
 
 
 def test_only_zenity_compatible_programs_are_tried():
-    # rc 1 is read as "cancelled", which is zenity's contract. A program that
+    # rc 1 is read as "canceled", which is zenity's contract. A program that
     # exits 1 on a usage error would have it swallowed as a cancel, so nothing
     # joins this list without its CLI being checked first.
     assert UnichartNotebook._DIALOG_PROGRAMS == ('zenity', 'qarma')

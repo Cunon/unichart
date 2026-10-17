@@ -75,6 +75,8 @@ PLOT_CALLS = {
     'box': lambda nb: nb.box(x='phase', y='eta_pct', points='outliers'),
     'histogram': lambda nb: nb.histogram(x='cht_c', nbins=40),
     'contour': lambda nb: nb.contour(x='rpm', y='torque_nm', z='eta_pct'),
+    # The runs have no angle column; time_s read as degrees still draws.
+    'polar': lambda nb: nb.polar(x='time_s', y='rpm'),
     'table': lambda nb: nb.table(cols=['rpm', 'eta_pct'], output='fig'),
 }
 
@@ -128,6 +130,149 @@ def test_full_legend_with_reference_line():
         nb.line('cht_c', 150, color='firebrick', legend='CHT limit')
         nb.plot(x='time_s', y='cht_c')
     _draw(call)
+
+
+def _custom_entries(fig):
+    """The legend_entry traces: legend-only, one None point each (an ``r``
+    point on a polar plot, an ``x`` one elsewhere)."""
+    def one_none(tr):
+        pts = getattr(tr, 'r' if tr.type == 'scatterpolar' else 'x', None)
+        return pts is not None and len(pts) == 1 and pts[0] is None
+    return {tr.name: tr for tr in fig.data if one_none(tr)}
+
+
+def test_custom_legend_entries():
+    """legend_entry() puts entries no set draws into every plot's legend,
+    styled as asked, ordered around the sets, and edited or removed by name."""
+    nb = _notebook()
+    nb.legend_entry('Spec limit', color='red', linestyle='--')
+    nb.legend_entry('Test point', marker='x')                  # marker only
+    nb.legend_entry('Model', marker='circle-open', linestyle='-', linewidth=3)
+    nb.legend_entry('Note', linestyle='none')                  # text only
+    nb.legend_entry('Key', position='start', color='teal', marker='s')
+    for method, call in PLOT_CALLS.items():
+        if method == 'table':                   # a go.Table: no legend
+            continue
+        with redirect_stdout(io.StringIO()):
+            call(nb)
+        entries = _custom_entries(nb.last_fig)
+        assert list(entries) == ['Spec limit', 'Test point', 'Model', 'Note',
+                                 'Key'], method
+        ranks = [tr.legendrank for tr in nb.last_fig.data
+                 if tr.name not in entries and tr.legendrank is not None]
+        assert entries['Key'].legendrank < min(ranks, default=1000), method
+        assert entries['Spec limit'].legendrank > max(ranks, default=1000), method
+
+    entries = _custom_entries(nb.last_fig)
+    assert entries['Spec limit'].mode == 'lines'
+    assert entries['Spec limit'].line.dash == 'dash'
+    assert entries['Test point'].mode == 'markers'
+    assert entries['Model'].mode == 'lines+markers'
+    assert entries['Model'].marker.symbol == 'circle-open'
+    assert entries['Model'].line.width == 3
+    assert entries['Note'].mode == 'none'
+    assert entries['Key'].marker.color == 'teal'
+    # No color given: the legend's text color, so it follows dark mode.
+    assert entries['Test point'].marker.color == 'black'
+    with redirect_stdout(io.StringIO()):
+        nb.toggle_darkmode(True)
+        nb.plot(x='time_s', y='cht_c')
+    assert _custom_entries(nb.last_fig)['Test point'].marker.color == 'white'
+
+    # Edit one field, rename in place, remove, list.
+    nb.legend_entry('Spec limit', color='orange')
+    assert nb.legend_entries['Spec limit']['linestyle'] == 'dash'
+    nb.legend_entry('Spec limit', rename='Redline')
+    nb.legend_entry('Note', 'reset')
+    listing = nb.legend_entry()
+    assert list(listing) == ['Redline', 'Test point', 'Model', 'Key']
+    assert listing['Redline']['color'] == 'orange'
+    listing['Redline']['color'] = 'pink'                      # a copy
+    assert nb.legend_entries['Redline']['color'] == 'orange'
+
+    # Nothing to toggle: they stay lit when the sets start hidden, and go
+    # with the legend.
+    nb.suppress_legends = True
+    with redirect_stdout(io.StringIO()):
+        nb.plot(x='time_s', y='cht_c')
+    assert {tr.visible for tr in _custom_entries(nb.last_fig).values()} == {True}
+    assert {tr.visible for tr in nb.last_fig.data
+            if tr.name not in listing} == {'legendonly'}
+    with redirect_stdout(io.StringIO()):
+        nb.plot(x='time_s', y='cht_c', legend='off')
+    assert not _custom_entries(nb.last_fig)
+
+    with redirect_stdout(io.StringIO()):
+        nb.reset_format('lines')
+        assert nb.legend_entries
+        nb.reset_format('legend_entries')
+    assert nb.legend_entries == {}
+
+
+def test_custom_legend_entry_checks():
+    """A bad legend_entry() argument raises and stores nothing; Plotly's own
+    marker and dash names are accepted alongside Matplotlib's."""
+    nb = _notebook()
+    nb.legend_entry('A', color='red')
+    for bad in (lambda: nb.legend_entry('B', 'red'),          # not a style slot
+                lambda: nb.legend_entry('B', color='not-a-color'),
+                lambda: nb.legend_entry('B', marker='q'),
+                lambda: nb.legend_entry('B', linestyle='~'),
+                lambda: nb.legend_entry('B', markersize=0),
+                lambda: nb.legend_entry('B', position='middle'),
+                lambda: nb.legend_entry('A', color='blue', marker='q'),
+                lambda: nb.legend_entry('A', rename='all'),
+                lambda: nb.legend_entry('missing', rename='C'),
+                lambda: nb.legend_entry('A', 'reset', color='red')):
+        try:
+            bad()
+        except (TypeError, ValueError):
+            pass
+        else:
+            raise AssertionError('expected an error')
+    assert nb.legend_entries == {'A': {
+        'color': 'red', 'marker': None, 'linestyle': 'solid',
+        'markersize': None, 'linewidth': None, 'position': 'end'}}
+    nb.legend_entry('B', marker='star-triangle-up-open', linestyle='longdashdot')
+    nb.legend_entry('B', linestyle='5px,3px')
+    try:
+        nb.legend_entries = {'C': {'color': 'not-a-color'}}
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('expected an error')
+    assert list(nb.legend_entries) == ['A', 'B']
+    nb.legend_entry('all', 'reset')
+    assert nb.legend_entries == {}
+    # Assigning follows legend_entry's rule: a marker alone draws no line.
+    nb.legend_entries = {'Z': {'marker': 'o'}}
+    assert nb.legend_entries['Z']['marker'] == 'circle'
+    assert nb.legend_entries['Z']['linestyle'] is None
+
+
+def test_custom_legend_entries_session():
+    """Entries are saved with the session; a session saved before they
+    existed leaves the current ones alone."""
+    nb = _notebook()
+    nb.legend_entry('Spec limit', color='red', linestyle='--')
+    nb.legend_entry('Key', position='start', marker='x')
+    with tempfile.TemporaryDirectory() as tmp, redirect_stdout(io.StringIO()):
+        path = Path(tmp) / 'session.json'
+        nb.plot(x='time_s', y='cht_c')
+        nb.save_session(path)
+        fresh = UnichartNotebook()
+        fresh.load_session(path)
+        assert fresh.legend_entries == nb.legend_entries
+        assert list(fresh.legend_entries) == ['Spec limit', 'Key']
+        assert set(_custom_entries(fresh.last_fig)) == {'Spec limit', 'Key'}
+
+        session = json.loads(path.read_text())
+        del session['notebook']['legend_entries']
+        path.write_text(json.dumps(session))
+        older = _notebook()
+        older.legend_entry('Mine')
+        older.load_session(path)
+    assert list(older.legend_entries) == ['Mine']
 
 
 def test_hue_and_polynomial_trend():
@@ -193,6 +338,57 @@ def test_table_copy_query_button():
         {'ref': 'rpm', 'kind': 'num'}, {'ref': '`Power (kW)`', 'kind': 'num'},
         {'ref': '`class`', 'kind': 'str'}, {'ref': 'ok', 'kind': 'bool'},
         {'ref': 'when', 'kind': 'other'}]
+
+
+def test_copy_button_shows_with_its_figure():
+    """The ⧉ copy button belongs to the figure's display, not to the plot
+    call: a plot that is never shown leaves no button behind, and a figure
+    shown again (display(fig), fig.show(), uc.last_fig) gets one each time."""
+    import copy
+    import pickle
+
+    import plotly.io as pio
+    from plotly.basedatatypes import BaseFigure
+
+    shown = []
+    real_button = UnichartNotebook.__dict__['_display_copy_button']
+    real_display, real_show = BaseFigure._ipython_display_, pio.show
+    UnichartNotebook._display_copy_button = staticmethod(lambda: shown.append('button'))
+    BaseFigure._ipython_display_ = lambda fig: shown.append('plot')
+    pio.show = lambda fig, *args, **kwargs: shown.append('plot')
+    try:
+        nb = _notebook()
+        with redirect_stdout(io.StringIO()):
+            nb.set_copy_buttons(True)
+            nb.plot(x='rpm', y='torque_nm')
+            fig = nb.plot(x='rpm', y='eta_pct')
+        assert shown == [], 'plotting alone must display nothing'
+        assert isinstance(fig, go.Figure)
+        fig._ipython_display_()
+        fig.show()
+        assert shown == ['button', 'plot'] * 2
+
+        # Switched to the button class in place, the figure still edits,
+        # copies and pickles like any other. Checked before the next plot,
+        # which empties this one to free memory (_clear_last_fig).
+        fig.update_layout(title_text='edited')
+        fig.data[0].name = 'renamed'
+        assert fig.layout.title.text == 'edited'
+        assert json.loads(fig.to_json())['data'][0]['name'] == 'renamed'
+        for twin in (copy.deepcopy(fig), pickle.loads(pickle.dumps(fig))):
+            assert type(twin) is type(fig)
+            assert json.loads(twin.to_json()) == json.loads(fig.to_json())
+
+        shown.clear()
+        with redirect_stdout(io.StringIO()):
+            nb.set_copy_buttons(False)
+            plain = nb.plot(x='rpm', y='eta_pct')
+        assert type(plain) is go.Figure
+        plain._ipython_display_()
+        assert shown == ['plot']
+    finally:
+        UnichartNotebook._display_copy_button = real_button
+        BaseFigure._ipython_display_, pio.show = real_display, real_show
 
 
 def test_styles_and_dark_mode():
@@ -734,6 +930,8 @@ BOARD_PANELS = [
     {'method': 'box', 'x': 'phase', 'y': ['eta_pct']},
     {'method': 'histogram', 'x': 'cht_c', 'y': []},
     {'method': 'contour', 'x': 'rpm', 'y': ['torque_nm'], 'z': 'eta_pct'},
+    {'method': 'polar', 'x': 'time_s', 'y': ['rpm']},
+    {'method': 'polar', 'x': 'time_s', 'y': ['rpm'], 'z': 'eta_pct'},
     {'method': 'table', 'x': None, 'y': ['rpm', 'eta_pct']},
 ]
 

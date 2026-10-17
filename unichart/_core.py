@@ -7361,7 +7361,7 @@ class UnichartNotebook:
 
     def load(self, source=None, title=None, set_name_column=None, set_idx_column=None,
              load_cols_as_vars=False, combined=False, read_kwargs=None, reader=None):
-        """Load datasets from DataFrames, filepaths, dicts, or numpy arrays.
+        """Load datasets from DataFrames, filepaths, dicts, numpy arrays, or Datasets.
 
         Called with no ``source`` (or ``source=None``), opens the OS file
         browser and loads whatever is picked there — several files at once is
@@ -7380,6 +7380,14 @@ class UnichartNotebook:
         :meth:`register_reader` once to read that extension from then on. A
         file with no reader raises a ``ValueError`` whose message is a reader
         to start from.
+
+        A :class:`Dataset` — usually another notebook's — loads as a copy of
+        itself: all its rows, its formatting, query, select flag and source
+        file, so ``uc2.load(uc1.sets[0])`` (or ``uc2.load(uc1.sets)`` for every
+        set) brings sets across as they were. ``title`` renames the copy; the
+        split, reader and ``load_cols_as_vars`` arguments apply only to the
+        other sources, and ``combined=True`` refuses Datasets. The original is
+        left untouched in its notebook.
         """
         if source is None:
             source = self._pick_files(tuple(self._custom_readers))
@@ -7391,7 +7399,13 @@ class UnichartNotebook:
                             f"and returns a DataFrame, got {type(reader).__name__}")
 
         sources = list(source) if isinstance(source, (list, tuple)) else [source]
-        coerced = [self._coerce_to_df(s, read_kwargs, reader) for s in sources]
+        if combined and any(isinstance(s, Dataset) for s in sources):
+            raise ValueError(
+                "combined=True cannot merge Datasets, which load as copies of "
+                "themselves; load them without combined=True, or pass their "
+                "frames instead: load([ds.df for ds in sets], combined=True)")
+        coerced = [s if isinstance(s, Dataset)
+                   else self._coerce_to_df(s, read_kwargs, reader) for s in sources]
 
         def resolve_title(frame, default_title):
             if title is not None or set_idx_column is not None:
@@ -7425,11 +7439,68 @@ class UnichartNotebook:
                 annotate(created, coerced[0][2], coerced[0][3])
             return
 
-        for frame, default_title, src_path, custom in coerced:
+        # Runs of Datasets are registered together: one combined-frame rebuild
+        # for uc.load(other.sets) instead of one per set.
+        pending = []
+        for item in coerced:
+            if isinstance(item, Dataset):
+                pending.append(item)
+                continue
+            self._load_datasets(pending, title)
+            pending = []
+            frame, default_title, src_path, custom = item
             created = self.load_df(frame, title=resolve_title(frame, default_title),
                                    set_name_column=set_name_column, set_idx_column=set_idx_column,
                                    load_cols_as_vars=load_cols_as_vars)
             annotate(created, src_path, custom)
+        self._load_datasets(pending, title)
+
+    def _load_datasets(self, sources, title=None):
+        """Copy Datasets (from any notebook, this one included) in as new sets.
+
+        Each copy is what a session round trip would give back: every row
+        (unmasked) of the source's own columns, its formatting, order, query
+        (re-evaluated here), select flag and file provenance, so save_session
+        can still reference the file. ``title`` overrides every copy's title.
+
+        Registered directly rather than through :meth:`load_df`, which would
+        split a frame carrying the ``SETNUMBER`` column load_df itself adds to
+        plain DataFrames — one set per row.
+        """
+        if not sources:
+            return []
+        frames = [(src._notebook._set_source_frame(src), title or src.title)
+                  for src in sources]
+        created = self._register_sets(frames)
+        for ds, src in zip(created, sources):
+            for attr in self._SESSION_SET_FORMAT_ATTRS:
+                # Copied so list/dict values (hue_order, display_parms, ...)
+                # aren't shared between the two sets.
+                value = copy.deepcopy(getattr(src, attr, None))
+                if attr == 'delta_sets' and src._notebook is not self:
+                    value = None          # base/study indices of another notebook
+                try:
+                    setattr(ds, attr, value)
+                except (ValueError, TypeError) as e:
+                    print(f"Warning: set {ds.index}: could not copy "
+                          f"{attr}={value!r} ({e})")
+            # 'index' is a valid order sentinel the setter rejects; assign
+            # directly, as _inherit_set_format does.
+            ds._order = src._order
+            if src._query:
+                try:
+                    ds.query = src._query
+                except ValueError as e:
+                    print(f"Warning: set {ds.index}: could not copy query "
+                          f"{src._query!r} ({e})")
+            # After the query, which turns an emptied set off.
+            ds._select = src._select
+            ds.file_path = src.file_path
+            # Deep-copied: a shared dict would let a write to one copy mark
+            # the other's source modified too.
+            ds._source = copy.deepcopy(src._source)
+            print(f"Loaded Set {ds.index}: {ds.title}")
+        return created
 
     def register_reader(self, ext, func=None):
         """Teach :meth:`load` to read a file type: ``func(path)`` returns its DataFrame.
@@ -7564,7 +7635,7 @@ class UnichartNotebook:
             return pd.DataFrame(source), None, None, False
         raise TypeError(
             f"load() cannot handle source of type {type(source).__name__}; "
-            f"pass a DataFrame, filepath, dict, or numpy array.")
+            f"pass a DataFrame, filepath, dict, numpy array, or Dataset.")
 
     def load_clipboard(self, **kwargs):
         """Quickly load data from system clipboard."""

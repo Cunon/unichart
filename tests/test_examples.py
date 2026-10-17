@@ -90,8 +90,8 @@ def test_every_snippet_runs_on_its_example():
                 _clean(result, f"[{example['key']}, prior={prior}] {snippet}")
                 if snippet.split('(')[0].endswith(('plot', 'plot_ymult', 'contour',
                                                    'box', 'bar', 'histogram',
-                                                   'plot_marginal')) \
-                        or '; plot(' in snippet or '; contour(' in snippet:
+                                                   'plot_marginal', 'polar')) \
+                        or any(f'; {m}(' in snippet for m in ('plot', 'contour', 'polar')):
                     assert result['figure'] is not None, snippet
 
 

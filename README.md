@@ -129,6 +129,9 @@ uc.delta(base_idx=0, study_indices='all', delta_parms='temperature')
   (`combined=True` concatenates them into one). Auto-detects `SETNUMBER` /
   `INDEX` / `TITLE` columns if you don't name them.
 - `load(source, ...)` — load from a file path (CSV/Excel/etc.) or other source.
+  A `Dataset` loads as a copy of itself — rows, formatting, query and source
+  file — so `uc2.load(uc1.sets[0])` (or `uc2.load(uc1.sets)`) brings sets
+  across from another notebook.
 - `register_reader(ext, func)` / `load(path, reader=func)` — read any other file
   type with your own function: it takes the file's path and returns a
   DataFrame. Register it once to read that extension from then on, or pass it

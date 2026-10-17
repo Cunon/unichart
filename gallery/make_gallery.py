@@ -676,12 +676,11 @@ EXAMPLES = [
     dict(
         section="round", id="polar", thumb="Polar", api="uc.polar",
         title="Behind the oil cooler",
-        blurb="The outer probe of each run, read clockwise from the top. scale() on "
-              "the angle shows just that sector, and on the radius zooms onto the "
-              "ring: every run dips behind the cooler, the tuned map deepest.",
+        blurb="The outer probe of each run, all the way round and read clockwise from "
+              "the top. scale() on the radius zooms onto the ring: every run dips "
+              "behind the cooler, the tuned map deepest.",
         code="uc.query('all', 'radius_mm == 90')   # the outer probe\n"
-             "uc.scale('angle_deg', (110, 290))     # this sector of angles\n"
-             "uc.scale('pt_kpa', (97, 102))         # and this range of radii\n"
+             "uc.scale('pt_kpa', (97, 102))        # this range of radii\n"
              "uc.polar(x='angle_deg', y='pt_kpa', direction='clockwise')",
         data="survey",
     ),

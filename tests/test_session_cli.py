@@ -1,7 +1,7 @@
 """Sessions where the CLI and the explorer meet them.
 
 Covers the seam rather than the session format itself: which files are
-recognised as sessions, that a ``.json`` session now carries its plot call the
+recognized as sessions, that a ``.json`` session now carries its plot call the
 way a PNG always has, and that ``unichart``'s argument handling routes a session
 away from ``nb.load``. The format's own round-trip guarantees live in
 ``demo_notebooks/session_save_load_demo.ipynb``.
@@ -77,7 +77,7 @@ class _Args:
 # sniff_session
 # ---------------------------------------------------------------------------
 
-def test_sniff_session_recognises_every_shape(tmp_path):
+def test_sniff_session_recognizes_every_shape(tmp_path):
     nb, csv = _notebook(tmp_path)
     session_json = tmp_path / 's.json'
     with redirect_stdout(io.StringIO()):
@@ -249,8 +249,24 @@ def test_read_flags_are_rejected_for_a_session_alone(tmp_path):
 
 def test_completion_methods_match_the_real_ones():
     """The check cli's own comment promises."""
-    from unichart.dashboard import PLOT_METHODS
+    from unichart.dashboard import PLOT_METHODS, _Z_METHODS
     assert cli.COMPLETION_METHODS == tuple(PLOT_METHODS)
+    assert set(cli._COMPLETION_Z_METHODS) == _Z_METHODS
+
+
+def test_polar_panels_complete_and_draw_a_z(tmp_path):
+    """polar takes a z like contour does: completed in the fourth field, and
+    passed through by _draw_panels."""
+    nb, csv = _notebook(tmp_path, plot=False)
+    assert 'polar:' in cli.complete('unichart --panel pol')
+    line = f'unichart {csv} --panel polar:t:temp:'
+    assert cli.complete(line) == cli.complete(line.replace('polar', 'contour'))
+    assert cli.complete(line), 'no z candidates offered'
+    with redirect_stdout(io.StringIO()):
+        cli._draw_panels(nb, [{'method': 'polar', 'x': 't', 'y': ['temp'], 'z': 'press'}])
+    call = nb._last_plot_call
+    assert call['method'] == 'polar'
+    assert (call['kwargs']['x'], call['kwargs']['y'], call['kwargs']['z']) == ('t', 'temp', 'press')
 
 
 def test_save_session_flag_is_completable():
