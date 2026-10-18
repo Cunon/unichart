@@ -551,6 +551,12 @@ def _subplot_spacing(nrows, ncols, figsize, hspace=None, vspace=None,
 _TITLE_TOP_PAD = 12             # gap above the first title line
 _DEFAULT_TITLE_FONT_PX = 18     # approximates Plotly's default suptitle font
 _TITLE_LINE_FACTOR = 1.45       # title line height = font size * this
+# yanchor='top' lowers a title by Plotly's cap shift (dy=0.7em on the <text>)
+# so its first line hangs below the anchor. A multi-line title is drawn as
+# <tspan>s whose own dy overrides that, which leaves the first line's
+# *baseline* on the anchor and its glyphs sticking out above the figure. So a
+# multi-line title is anchored this many ems lower to land where one line does.
+_TITLE_CAP_SHIFT = 0.7
 _LEGEND_ROW_PX = 26             # space reserved per legend row
 _LEGEND_GAP    = 12             # gap title→legend and legend→plot
 # Extra top margin reserved only when set_plot_size is pinning the height:
@@ -803,7 +809,8 @@ def _top_space(title_text, figsize, has_above_legend, title_font_size=None,
     else:
         top_margin = title_band + _TITLE_TOP_PAD
 
-    title_pos = {'y': 1.0 - top_pad / height, 'yanchor': 'top', 'yref': 'container'}
+    anchor_px = top_pad + (_TITLE_CAP_SHIFT * font if n_lines > 1 else 0.0)
+    title_pos = {'y': 1.0 - anchor_px / height, 'yanchor': 'top', 'yref': 'container'}
     legend_pos = None
     if has_above_legend:
         legend_pos = {'orientation': 'h', 'yanchor': 'top',
