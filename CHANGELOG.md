@@ -7,6 +7,10 @@ First release on PyPI.
 - `UnichartNotebook`: stateful, multi-dataset Plotly plotting for Jupyter.
 - `unichart.dashboard`: Dash boards and self-contained HTML from notebook panels.
 - `unichart.terminal`: the `explore()` GUI — sidebar, chart pane and Python terminal.
+  Its example datasets and cheat sheet only show when the notebook starts
+  empty; `explore(cheat_sheet=True)` brings them back. Its sidebar lists the
+  sets and the parameters in searchable tables; clicking a name puts it in the
+  terminal.
 - `unichart` command (also `python -m unichart`): open the explorer on a data or
   session file, or print `--info` / write `--html` without serving.
 - Sessions save to JSON or embed in PNGs, and restore with `load_session`.

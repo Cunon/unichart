@@ -1366,7 +1366,7 @@ def _default_panel_spec(uc):
 @_accepts_nb
 def explore(uc=None, data=None, sessions=None, panels=None, title=None,
             port=8050, debug=False, open_browser=None, app_window=False,
-            jupyter_mode=None, dark=None, **run_kwargs):
+            jupyter_mode=None, dark=None, cheat_sheet=None, **run_kwargs):
     """Launch the terminal explorer — a GUI for plotting on the fly.
 
     Where :func:`dashboard` renders a board you specified in code, this opens a
@@ -1398,6 +1398,11 @@ def explore(uc=None, data=None, sessions=None, panels=None, title=None,
         Force the plot theme, overriding whatever a restored session carries.
         None (default) lets the session decide; with no session the board's
         usual "switch to dark to match" applies either way.
+    cheat_sheet : bool, optional
+        Show the sidebar's example datasets and cheat sheet. None (default)
+        shows them only when ``uc`` has no datasets yet — judged before
+        ``data`` loads — since someone arriving with data loaded is past
+        needing them. ``uc.help()`` in the terminal covers the API either way.
     panels : list[dict], optional
         Dashboard-style panel specs, replayed as terminal commands at startup
         so they appear in the transcript. Mostly here so the ``unichart``
@@ -1455,7 +1460,8 @@ def explore(uc=None, data=None, sessions=None, panels=None, title=None,
     return terminal(uc=uc, data=data, sessions=sessions, panels=panels,
                     title=title, port=port, debug=debug,
                     open_browser=open_browser, app_window=app_window,
-                    jupyter_mode=jupyter_mode, dark=dark, **run_kwargs)
+                    jupyter_mode=jupyter_mode, dark=dark,
+                    cheat_sheet=cheat_sheet, **run_kwargs)
 
 
 def _in_notebook():

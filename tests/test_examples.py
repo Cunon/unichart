@@ -206,6 +206,66 @@ def test_rerendered_buttons_do_not_load_anything():
     assert not uc.sets
 
 
+def _sidebar_hidden(app):
+    """Whether each sidebar part the cheat_sheet flag owns is hidden."""
+    side = app.layout.children[1].children[0]
+    data, *_, cheat, note = side.children
+    hidden = lambda n: (n.style or {}).get('display') == 'none'
+    assert cheat.children[1].id == 'term-chips'
+    assert data.children[2].className == 'term-examples'
+    return [hidden(data.children[2]), hidden(cheat), hidden(note)]
+
+
+def test_the_cheat_sheet_is_hidden_once_data_is_loaded():
+    empty = terminal.build_terminal_app(_notebook(), banner=False)
+    assert not any(_sidebar_hidden(empty))
+
+    uc = _notebook()
+    with redirect_stdout(io.StringIO()):
+        uc.load(terminal.demo_frame())
+    loaded = terminal.build_terminal_app(uc, banner=False)
+    assert all(_sidebar_hidden(loaded))
+    # Hidden, not removed: the dispatch callback still needs its components.
+    layout = str(loaded.layout)
+    assert "'type': 'term-example'" in layout and "'type': 'term-chip'" in layout
+
+    forced = terminal.build_terminal_app(uc, banner=False, cheat_sheet=True)
+    assert not any(_sidebar_hidden(forced))
+    off = terminal.build_terminal_app(_notebook(), banner=False, cheat_sheet=False)
+    assert all(_sidebar_hidden(off))
+
+
+def test_explore_judges_the_cheat_sheet_before_loading_data():
+    """data= is the file you asked for, not data you came with."""
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def fake_build(uc, **kwargs):
+        seen.update(kwargs, sets=len(uc.sets))
+        raise _Stop
+
+    real = terminal.build_terminal_app
+    terminal.build_terminal_app = fake_build
+    try:
+        for uc, expect in ((_notebook(), True), (None, None)):
+            if uc is None:
+                uc = _notebook()
+                with redirect_stdout(io.StringIO()):
+                    uc.load(terminal.demo_frame())
+                expect = False
+            try:
+                with redirect_stdout(io.StringIO()):
+                    terminal.terminal(uc, data=terminal.demo_frame())
+            except _Stop:
+                pass
+            assert seen['sets'] > 0
+            assert seen['cheat_sheet'] is expect
+    finally:
+        terminal.build_terminal_app = real
+
+
 def _main():
     import traceback
 

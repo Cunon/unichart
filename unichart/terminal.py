@@ -3,8 +3,9 @@
 This is the GUI behind :func:`unichart.dashboard.explore` — a dark, three-part
 board that mirrors the web version at plot.thomas-emmons.com:
 
-* a **sidebar** with a drop zone for data, the loaded datasets, and a cheat
-  sheet of clickable snippets,
+* a **sidebar** with a drop zone for data, tables of the loaded sets and
+  their parameters (searchable; click a name to put it in the terminal), and
+  a cheat sheet of clickable snippets,
 * a **chart pane** showing the most recent figure, and
 * a **terminal** you drive with real Python: ``plot(x='time', y='temp')``.
 
@@ -45,7 +46,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from ._core import _READER_STUB_BODY, _reader_name, sniff_session
+from ._core import (_READER_STUB_BODY, _compact_indices, _reader_name,
+                    sniff_session)
 from .dashboard import (_UPLOAD_READERS, _df_from_upload, _pick_port,
                         _require_dash, _upload_bytes)
 
@@ -941,7 +943,6 @@ body.term-dragging iframe {{ pointer-events: none; }}
 .term-name {{ font-size: 15px; font-weight: 700; letter-spacing: -0.01em; }}
 .term-tagline {{ color: {MUTED}; font-size: 12.5px; }}
 .term-top-actions {{ margin-left: auto; display: flex; align-items: center; gap: 10px; }}
-
 /* ---- sidebar ---- */
 .term-side {{
   width: var(--side-w); flex: none; overflow-y: auto;
@@ -978,10 +979,50 @@ body.term-dragging iframe {{ pointer-events: none; }}
 .term-example span {{ color: {MUTED}; font-size: 10.5px; font-family: {MONO_FONT};
                       display: block; margin-top: 2px; }}
 
-.term-set {{ display: flex; align-items: center; gap: 8px; padding: 4px 2px; }}
-.term-swatch {{ width: 11px; height: 11px; border-radius: 3px; flex: none; }}
-.term-set-idx {{ color: {MUTED}; font-variant-numeric: tabular-nums; }}
-.term-set-name {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+/* Sets and parameters: compact tables sized for the sidebar's default width.
+   Fixed layout, so a long name ellipsizes (the full text is its tooltip)
+   instead of pushing the sidebar wider. */
+.term-tablebox {{
+  max-height: 42vh; overflow-y: auto;
+  border: 1px solid {HAIRLINE}; border-radius: 6px;
+}}
+.term-table {{
+  width: 100%; table-layout: fixed; border-collapse: collapse;
+  font-size: 12px;
+}}
+.term-table th {{
+  position: sticky; top: 0; z-index: 1; background: {SURFACE};
+  color: {MUTED}; font-size: 10px; font-weight: 600; letter-spacing: 0.05em;
+  text-transform: uppercase; text-align: left;
+  padding: 4px 5px; border-bottom: 1px solid {HAIRLINE};
+}}
+.term-table td {{
+  padding: 3px 5px; border-bottom: 1px solid rgba(38,42,51,0.55);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}}
+.term-table tbody tr:last-child td {{ border-bottom: none; }}
+.term-table tr.term-pick {{ cursor: pointer; }}
+.term-table tr.term-pick:hover td {{ background: rgba(59,130,246,0.12); }}
+/* An unselected set: still listed, still pickable, visibly not plotted. */
+.term-table tr.off td {{ opacity: 0.45; }}
+.term-table .num {{ text-align: right; font-variant-numeric: tabular-nums; color: {MUTED}; }}
+.term-table .mono {{ font-family: {MONO_FONT}; font-size: 11.5px; }}
+.term-table td.sw {{ padding: 0 0 0 7px; text-overflow: clip; }}
+.term-swatch {{
+  display: inline-block; width: 10px; height: 10px; border-radius: 3px;
+  vertical-align: middle;
+}}
+/* dcc.Input: Dash 4 puts the class on its wrapper and colors it from its own
+   tokens, so the board's palette goes in through those. */
+.term-search.dash-input-container {{
+  --Dash-Fill-Inverse-Strong: {BG}; --Dash-Stroke-Strong: {HAIRLINE};
+  --Dash-Fill-Interactive-Strong: {ACCENT};
+  height: 28px; margin: 0 0 6px; border-radius: 6px;
+  font-size: 12px; color: {INK};
+}}
+.term-search.dash-input-container:has(:focus-visible) {{ outline: none; }}
+.term-search .dash-input-element {{ padding: 4px 8px; }}
+.term-search .dash-input-element::placeholder {{ color: {MUTED}; }}
 .term-empty {{ color: {MUTED}; font-size: 12px; font-style: italic; }}
 
 /* Cheat-sheet snippets: clickable, monospace, wrapped like code. */
@@ -1145,21 +1186,82 @@ def _blank():
     }
 
 
+def _table(html, widths, head, rows):
+    """A compact sidebar table. ``widths`` are CSS widths per column (None
+    takes the rest); ``rows`` are ``html.Tr``."""
+    return html.Div(html.Table([
+        html.Colgroup([html.Col(style={'width': w} if w else None)
+                       for w in widths]),
+        html.Thead(html.Tr([html.Th(h) for h in head])),
+        html.Tbody(rows),
+    ], className='term-table'), className='term-tablebox')
+
+
 def _dataset_rows(html, uc):
-    """The sidebar's dataset list, colored to match the traces on the chart."""
+    """The sidebar's set table, swatches colored to match the chart's traces.
+
+    The same facts as ``list_sets()``, narrowed for the sidebar: the full
+    title, shape and query ride in the tooltip, and an unselected set is
+    dimmed rather than given a column. Clicking a row puts its set number in
+    the terminal.
+    """
     if not uc.sets:
         return [html.Div('No data loaded.', className='term-empty')]
     rows = []
     for ds in uc.sets:
-        rows.append(html.Div([
-            html.Span(className='term-swatch', style={'background': ds.color}),
-            html.Span(str(ds.index), className='term-set-idx'),
+        n_rows = len(ds._masked_positions())
+        tip = (f'{ds.title_format} · {n_rows} rows × '
+               f'{len(ds._own_col_positions())} cols')
+        if not ds.select:
+            tip += ' · not selected'
+        if ds.query:
+            tip += f' · query: {ds.query}'
+        rows.append(html.Tr([
+            html.Td(html.Span(className='term-swatch',
+                              style={'background': ds.color}), className='sw'),
+            html.Td(str(ds.index), className='num'),
             # title_format is '0: Baseline run' — the index is already its own
             # column here, so use the bare title and don't print it twice.
-            html.Span(ds.title, className='term-set-name',
-                      title=str(ds.title_format)),
-        ], className='term-set'))
-    return rows
+            html.Td(ds.title, className='title'),
+            html.Td(str(n_rows), className='num'),
+        ], className='term-pick' if ds.select else 'term-pick off',
+            title=tip + ' — click to put its number in the terminal',
+            **{'data-insert': str(ds.index), 'data-kind': 'set'}))
+    return [_table(html, ['20px', '24px', None, '44px'],
+                   ['', '#', 'Title', 'Rows'], rows)]
+
+
+def _parm_rows(html, uc):
+    """The sidebar's parameter table, and a signature of what it lists.
+
+    ``list_parms('all')`` in sidebar form: every parameter of every set, and —
+    with more than one set — which sets own it. The signature lets the refresh
+    after each command skip resending a table that hasn't changed.
+    """
+    owners = {}
+    for ds in uc.sets:
+        for col in ds.columns:
+            owners.setdefault(col, []).append(ds.index)
+    names = sorted(owners, key=lambda c: str(c).lower())
+    many = len(uc.sets) > 1
+    descs = uc.parm_description_dict
+    listed = [(str(c), owners[c] if many else None, descs.get(c)) for c in names]
+    sig = str(hash(repr(listed)))
+    if not listed:
+        return [html.Div('No parameters yet.', className='term-empty')], 0, sig
+    rows = []
+    for name, own, desc in listed:
+        cells = [html.Td(name, className='mono')]
+        if many:
+            cells.append(html.Td('all' if len(own) == len(uc.sets)
+                                 else _compact_indices(own), className='num'))
+        rows.append(html.Tr(
+            cells, className='term-pick',
+            title=f'{name} — {desc}' if desc else name,
+            **{'data-insert': name, 'data-kind': 'parm'}))
+    widths, head = ([None, '62px'], ['Parameter', 'Sets']) if many \
+        else ([None], ['Parameter'])
+    return [_table(html, widths, head, rows)], len(listed), sig
 
 
 def _chips(html, sheet):
@@ -1176,7 +1278,17 @@ def _chips(html, sheet):
     ]
 
 
-def _sidebar(html, dcc, uc):
+def _count_label(noun, count):
+    """A table's heading: 'Sets · 3', or just 'Sets' when there are none.
+    The browser rewrites it as a search narrows the table ('Sets · 1 of 3')."""
+    return f'{noun} · {count}' if count else noun
+
+
+def _sidebar(html, dcc, uc, cheat_sheet=True):
+    parm_table, parm_count, parm_sig = _parm_rows(html, uc)
+    # Hidden rather than left out: the dispatch callback outputs to the chips
+    # and takes the example buttons as inputs, so they stay in the layout.
+    hide = None if cheat_sheet else {'display': 'none'}
     return html.Div([
         html.Div([
             html.Span('Data', className='term-label'),
@@ -1200,25 +1312,43 @@ def _sidebar(html, dcc, uc):
                             className='term-example',
                             title=ex['about'])
                 for i, ex in enumerate(EXAMPLES)
-            ], className='term-examples'),
+            ], className='term-examples', style=hide),
         ], className='term-section'),
 
         html.Div([
-            html.Span('Datasets', className='term-label'),
+            html.Span(_count_label('Sets', len(uc.sets)), id='term-sets-label',
+                      className='term-label'),
+            # A title, or set numbers in the library's own shorthand.
+            dcc.Input(id='term-set-search', type='search', debounce=True,
+                      placeholder='search · boost  ·  0:3  ·  -1',
+                      className='term-search', autoComplete='off',
+                      spellCheck=False),
             html.Div(_dataset_rows(html, uc), id='term-datasets'),
+        ], className='term-section'),
+
+        html.Div([
+            html.Span(_count_label('Parameters', parm_count),
+                      id='term-parms-label', className='term-label'),
+            # Filtered in the browser as you type — no round trip per key.
+            dcc.Input(id='term-parm-search', type='search', debounce=True,
+                      placeholder='search · egt  ·  *_in  ·  n?',
+                      className='term-search', autoComplete='off',
+                      spellCheck=False),
+            html.Div(parm_table, id='term-parms'),
+            dcc.Store(id='term-parms-sig', data=parm_sig),
         ], className='term-section'),
 
         html.Div([
             html.Span('Cheat sheet', id='term-cheat-label', className='term-label'),
             html.Div(_chips(html, CHEAT_SHEET), id='term-chips',
                      className='term-chips'),
-        ], className='term-section'),
+        ], className='term-section', style=hide),
 
         html.Div([
             'Click any snippet to put it in the terminal. The full ',
             html.Code('UnichartNotebook'), ' API is available as ',
             html.Code('uc'), '.',
-        ], className='term-note'),
+        ], className='term-note', style=hide),
     ], className='term-side')
 
 
@@ -1280,7 +1410,7 @@ def _entry_divs(html, entries):
 
 
 def build_terminal_app(uc, title=None, banner=True, startup=(),
-                       allow_quit=None, staged=()):
+                       allow_quit=None, staged=(), cheat_sheet=None):
     """Build (but do not run) the terminal explorer.
 
     ``startup`` is a sequence of commands run before the first paint — how the
@@ -1295,12 +1425,18 @@ def build_terminal_app(uc, title=None, banner=True, startup=(),
     the terminal mean it. It defaults to "unless we are in a Jupyter kernel",
     which is the same question :func:`_shutdown` is documented against: closing
     the board ends the process, and in a kernel that process is the user's.
+
+    ``cheat_sheet`` shows the sidebar's example datasets and cheat sheet. It
+    defaults to "only if the notebook has no data yet": they are a way in for
+    a first look, and noise for someone who arrives with their data loaded.
     """
     (Dash, dcc, html, dash_table, no_update,
      Input, Output, State, MATCH, ALL) = _require_dash()
     from dash import ctx
 
     board_title = title or 'Unichart'
+    if cheat_sheet is None:
+        cheat_sheet = not uc.sets
     if allow_quit is None:
         from .dashboard import _in_notebook
         allow_quit = not _in_notebook()
@@ -1355,7 +1491,7 @@ def build_terminal_app(uc, title=None, banner=True, startup=(),
         ], className='term-top'),
 
         html.Div([
-            _sidebar(html, dcc, uc),
+            _sidebar(html, dcc, uc, cheat_sheet),
             html.Div(id='term-grip-v', className='term-grip term-grip-v',
                      title='Drag to resize · double-click to reset'),
             html.Div([
@@ -1396,6 +1532,7 @@ def build_terminal_app(uc, title=None, banner=True, startup=(),
         # after an example has swapped the sheet out.
         dcc.Store(id='term-cheats', data=[list(c) for c in CHEAT_SHEET]),
         dcc.Download(id='term-save-download'),
+        html.Div(id='term-side-sink', className='hidden'),
         html.Div(id='term-resize-sink', className='hidden'),
         _quit_dialog(html) if allow_quit else None,
     ], className='term-app')
@@ -1606,6 +1743,208 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
                 _dataset_rows(html, uc),
                 _reader_template(staged) if staged else '',
                 history, None, download) + sheet_out
+
+    # The parameter table follows the data. term-datasets is rewritten after
+    # every command, so that is the cue; the signature keeps a command that
+    # changed nothing listed from resending the table (and resetting the
+    # search's scroll position).
+    @app.callback(
+        Output('term-parms', 'children'),
+        Output('term-parms-sig', 'data'),
+        Input('term-datasets', 'children'),
+        State('term-parms-sig', 'data'),
+        prevent_initial_call=True,
+    )
+    def _parms(_datasets, sig):
+        with _RUN_LOCK:
+            table, _count, new_sig = _parm_rows(html, uc)
+        if new_sig == sig:
+            return no_update, no_update
+        return table, new_sig
+
+    # The sidebar's search and click-to-insert. Wired once, on first paint;
+    # the search runs on every keystroke and again whenever the table is
+    # replaced, all in the browser. Raw string: the regexes below are
+    # backslashes all the way down.
+    app.clientside_callback(
+        r"""
+        function(_) {
+            if (window._uniSide) { return window.dash_clientside.no_update; }
+            window._uniSide = true;
+            // Is the caret inside a string literal? Python-ish: quotes, escapes,
+            // comments; a newline ends a single-quoted string.
+            const openQuote = function(src) {
+                let q = null;
+                for (let i = 0; i < src.length; i++) {
+                    const c = src[i];
+                    if (q) {
+                        if (c === '\\') { i++; }
+                        else if (c === q || c === '\n') { q = null; }
+                    } else if (c === '#') {
+                        const nl = src.indexOf('\n', i);
+                        if (nl === -1) { return null; }
+                        i = nl;
+                    } else if (c === "'" || c === '"') {
+                        q = c;
+                    }
+                }
+                return q;
+            };
+            const insert = function(text, kind) {
+                const ta = document.getElementById('term-input');
+                if (!ta) { return; }
+                const v = ta.value || '';
+                let before = v.slice(0, ta.selectionStart);
+                const after = v.slice(ta.selectionEnd);
+                // A parameter goes in as a string, unless the caret is
+                // already inside one; a set goes in as its number.
+                let piece = text;
+                const inString = openQuote(before) !== null;
+                if (kind === 'parm' && !inString) {
+                    // JSON's escapes are Python's, for names a plain
+                    // '...' would mangle.
+                    piece = /['\\]/.test(text) ? JSON.stringify(text)
+                                                : "'" + text + "'";
+                }
+                // Picking several in a row builds a list: after a closed
+                // string or a number, add the comma.
+                if (!inString) {
+                    const trimmed = before.replace(/\s+$/, '');
+                    if (/['"]$/.test(trimmed) || /(^|[^\w.])\d+$/.test(trimmed)) {
+                        before = trimmed + ', ';
+                    }
+                }
+                const proto = Object.getPrototypeOf(ta);
+                Object.getOwnPropertyDescriptor(proto, 'value').set
+                    .call(ta, before + piece + after);
+                ta.dispatchEvent(new Event('input', {bubbles: true}));
+                const caret = before.length + piece.length;
+                ta.focus();
+                setTimeout(function() {
+                    ta.selectionStart = ta.selectionEnd = caret;
+                }, 0);
+            };
+            // A name search, as list_parms does it: a substring, or with
+            // * / ? a wildcard pattern for the whole name, ignoring case.
+            const nameTest = function(q) {
+                const pat = q.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+                             .replace(/\*/g, '.*').replace(/\?/g, '.');
+                const re = new RegExp(/[*?]/.test(q) ? '^' + pat + '$' : pat, 'i');
+                return function(text) { return re.test(text || ''); };
+            };
+            // Set numbers in the library's range shorthand ("2", "0:3",
+            // "0,3,7:", "::2", "-1"), with Python's slice rules, as
+            // _get_uset_slice reads them. Anything else is not a selector —
+            // nor is one that picks no set, so "2024" still finds a title.
+            const TOKEN = /^\s*-?\d*\s*(?::\s*-?\d*\s*){0,2}$/;
+            const setSelector = function(q, n) {
+                const tokens = q.split(',');
+                if (!/\d/.test(q) || !tokens.every(function(t) {
+                    return t.trim() && TOKEN.test(t);
+                })) { return null; }
+                const picked = new Set();
+                for (const token of tokens) {
+                    const parts = token.split(':').map(function(x) {
+                        x = x.trim();
+                        return x === '' || x === '-' ? null : parseInt(x, 10);
+                    });
+                    if (parts.length === 1) {
+                        const k = parts[0] === null ? NaN
+                            : (parts[0] < 0 ? parts[0] + n : parts[0]);
+                        if (k >= 0 && k < n) { picked.add(k); }
+                        continue;
+                    }
+                    const step = parts[2] == null ? 1 : parts[2];
+                    if (step === 0) { continue; }
+                    const fix = function(v, dflt, lo, hi) {
+                        if (v == null) { return dflt; }
+                        if (v < 0) { v += n; }
+                        return Math.min(Math.max(v, lo), hi);
+                    };
+                    let a, b;
+                    if (step > 0) { a = fix(parts[0], 0, 0, n); b = fix(parts[1], n, 0, n); }
+                    else { a = fix(parts[0], n - 1, -1, n - 1); b = fix(parts[1], -1, -1, n - 1); }
+                    for (let k = a; step > 0 ? k < b : k > b; k += step) { picked.add(k); }
+                }
+                if (!picked.size) { return null; }
+                return function(index) { return picked.has(index); };
+            };
+            const filterTable = function(boxId, inputId, labelId, noun, makeTest) {
+                const box = document.getElementById(boxId);
+                const input = document.getElementById(inputId);
+                const label = document.getElementById(labelId);
+                if (!box || !input) { return; }
+                const q = input.value.trim();
+                const rows = box.querySelectorAll('tbody tr');
+                const test = q ? makeTest(q, rows.length) : null;
+                let shown = 0;
+                rows.forEach(function(tr) {
+                    const ok = !test || test(tr);
+                    tr.style.display = ok ? '' : 'none';
+                    if (ok) { shown++; }
+                });
+                if (label) {
+                    label.textContent = !rows.length ? noun : noun + ' · '
+                        + (q ? shown + ' of ' + rows.length : rows.length);
+                }
+            };
+            window._uniFilter = function() {
+                filterTable('term-parms', 'term-parm-search', 'term-parms-label',
+                            'Parameters', function(q) {
+                    const t = nameTest(q);
+                    return function(tr) { return t(tr.dataset.insert); };
+                });
+                filterTable('term-datasets', 'term-set-search', 'term-sets-label',
+                            'Sets', function(q, n) {
+                    const sel = setSelector(q, n);
+                    if (sel) {
+                        return function(tr) { return sel(Number(tr.dataset.insert)); };
+                    }
+                    const t = nameTest(q);
+                    return function(tr) {
+                        const cell = tr.querySelector('td.title');
+                        return t(cell ? cell.textContent : '');
+                    };
+                });
+            };
+            document.addEventListener('input', function(e) {
+                const id = e.target && e.target.id;
+                if (id === 'term-parm-search' || id === 'term-set-search') {
+                    window._uniFilter();
+                }
+            });
+            // A row is a pick, not a place to put the focus: keeping the
+            // mousedown from landing leaves the caret in the terminal input,
+            // where the click then inserts.
+            const pickOf = function(e) {
+                return e.target.closest && e.target.closest('.term-side [data-insert]');
+            };
+            document.addEventListener('mousedown', function(e) {
+                if (pickOf(e)) { e.preventDefault(); }
+            });
+            document.addEventListener('click', function(e) {
+                const row = pickOf(e);
+                if (row) { insert(row.dataset.insert, row.dataset.kind); }
+            });
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output('term-side-sink', 'className'),
+        Input('term-side-sink', 'id'),
+    )
+
+    app.clientside_callback(
+        """
+        function(_parms, _sets) {
+            if (window._uniFilter) { window._uniFilter(); }
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output('term-parms', 'className'),
+        Input('term-parms', 'children'),
+        Input('term-datasets', 'children'),
+        prevent_initial_call=True,
+    )
 
     # Enter runs, Shift+Enter adds a line, up/down walks history. All of it is
     # clientside: an arrow key must never cost a server round trip, and the
@@ -2020,7 +2359,8 @@ def _spawn(argv, url):
 
 def terminal(uc=None, data=None, sessions=None, panels=None, title=None,
              port=8050, debug=False, open_browser=None, app_window=False,
-             jupyter_mode=None, dark=None, nb=None, **run_kwargs):
+             jupyter_mode=None, dark=None, cheat_sheet=None, nb=None,
+             **run_kwargs):
     """Launch the terminal explorer. See :func:`unichart.dashboard.explore`.
 
     ``nb=`` is the old name of ``uc=``, still accepted."""
@@ -2031,6 +2371,10 @@ def terminal(uc=None, data=None, sessions=None, panels=None, title=None,
     if uc is None:
         from ._core import UnichartNotebook
         uc = UnichartNotebook()
+    # Judged before data= loads: it is the notebook you brought that says
+    # whether you are new here, not the file you asked the board to open.
+    if cheat_sheet is None:
+        cheat_sheet = not uc.sets
     # The board is dark; match the plots to it unless the caller already chose.
     if not getattr(uc, 'darkmode', False):
         uc.toggle_darkmode(True)
@@ -2065,7 +2409,8 @@ def terminal(uc=None, data=None, sessions=None, panels=None, title=None,
     # is the one layout decision that depends on where we are running.
     in_notebook = _in_notebook()
     app = build_terminal_app(uc, title=title, startup=[c for c in startup if c],
-                             allow_quit=not in_notebook, staged=staged)
+                             allow_quit=not in_notebook, staged=staged,
+                             cheat_sheet=cheat_sheet)
     # A standalone window is a browser window either way, so asking for one
     # from a kernel means the external board rather than the inline iframe.
     standalone = app_window or not in_notebook

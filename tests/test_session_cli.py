@@ -325,7 +325,8 @@ def test_terminal_restores_sessions_as_startup_commands(tmp_path):
         def run(self, **kwargs):
             pass
 
-    def fake_build(notebook, title=None, startup=(), allow_quit=None, staged=()):
+    def fake_build(notebook, title=None, startup=(), allow_quit=None, staged=(),
+                   cheat_sheet=None):
         captured['startup'] = list(startup)
         captured['darkmode_before_startup'] = notebook.darkmode
         return _StubApp()
@@ -361,7 +362,8 @@ def test_terminal_leaves_the_theme_alone_without_dark(tmp_path):
         def run(self, **kwargs):
             pass
 
-    def fake_build(notebook, title=None, startup=(), allow_quit=None, staged=()):
+    def fake_build(notebook, title=None, startup=(), allow_quit=None, staged=(),
+                   cheat_sheet=None):
         captured['startup'] = list(startup)
         return _StubApp()
 

@@ -347,7 +347,8 @@ def test_the_board_can_open_with_a_reader_staged(tmp_path):
         def run(self, **kwargs):
             pass
 
-    def fake_build(notebook, title=None, startup=(), allow_quit=None, staged=()):
+    def fake_build(notebook, title=None, startup=(), allow_quit=None, staged=(),
+                   cheat_sheet=None):
         captured['staged'] = list(staged)
         captured['sets'] = [ds.title for ds in notebook.sets]
         return _StubApp()

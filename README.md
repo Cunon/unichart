@@ -736,8 +736,8 @@ Key options:
 ### Explorer — a plotting terminal
 
 `dashboard()` renders a board you specified in code. `explore()` opens a
-workspace you drive by **typing**: a sidebar with a drop zone, the loaded
-datasets and a clickable cheat sheet; a chart pane showing the latest figure;
+workspace you drive by **typing**: a sidebar with a drop zone, tables of the
+loaded sets and their parameters, and a clickable cheat sheet; a chart pane showing the latest figure;
 and a Python terminal underneath.
 
 ```python
@@ -760,6 +760,16 @@ sheet reads the way the library does, and `uc` covers everything else:
 ```
 
 - **Enter** runs, **Shift+Enter** adds a line, **↑ / ↓** walks history.
+- **Sets and Parameters tables** in the sidebar: `list_sets()` and
+  `list_parms('all')` in compact form, sized to the sidebar's default width
+  (full titles, shapes, queries and parameter descriptions are in the
+  tooltips; unselected sets are dimmed). Each has a search box. The parameter
+  search works like `list_parms`: a substring, or `*` / `?` wildcards for the
+  whole name. The set search takes set numbers in the usual shorthand
+  (`2`, `0:3`, `0,3,7:`, `-1`, `::2`) or otherwise matches titles the same way. Click a parameter to put it in the input at the caret, quoted (or bare
+  if the caret is already inside a string); click a set to put its number in.
+  Picking several in a row adds the commas, so `plot(x='time', y=[` plus two
+  clicks gives `y=['temperature', 'pressure'`.
 - **⧉ copy chart** in the top bar puts the current figure on the clipboard as a
   2× PNG, rasterized from what's on screen (no `kaleido` needed). The same
   `⧉ copy` affordance unichart shows under plots in a notebook — `uc.plot()` in
@@ -786,6 +796,11 @@ sheet reads the way the library does, and `uc` covers everything else:
   An example is appended to what is already loaded, not swapped in: your data
   stays, deselected, and the example's snippets name the set numbers it landed
   on.
+
+  The examples and the cheat sheet are for a first look, so they show only
+  when the notebook has no data yet: `uc.explore()` on a notebook you have
+  already loaded leaves them out. Pass `cheat_sheet=True` to get them anyway,
+  or `cheat_sheet=False` to hide them on an empty board.
 - A trailing expression echoes its value, like any REPL — `1 + 1` prints `2`.
   End the line with `;` to hide it, as in Jupyter: `list_parms();`.
 - Plots go to the chart pane; `table()` / `summary()` / `list_parms()` render as
