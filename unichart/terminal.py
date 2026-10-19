@@ -792,10 +792,7 @@ _ICON_SVG = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
 _ICON_PATH = '_unichart/icon.svg'
 _MANIFEST_PATH = '_unichart/manifest.webmanifest'
 _GALLERY_PATH = '_unichart/gallery.html'
-
-# Mirrors unichart.cli.GALLERY_URL, kept separate so neither module has to
-# import the other. Used when the built page isn't in this install.
-GALLERY_URL = 'https://cunon.github.io/unichart/'
+_OPEN_PATH = '_unichart/open'
 
 
 def _gallery_file():
@@ -813,8 +810,8 @@ def _serve_gallery(app):
 
     The board is an http page, and browsers refuse to follow a ``file://``
     link from one — so the local page has to come off this server or not at
-    all. Returns ``None`` when the page isn't in this install, leaving the
-    caller to fall back to the repository URL.
+    all. Returns ``None`` when the page isn't in this install, and the board
+    then shows no gallery link rather than one to the online copy.
     """
     page = _gallery_file()
     if page is None:
@@ -830,6 +827,31 @@ def _serve_gallery(app):
             return server.response_class(fh.read(), mimetype='text/html')
 
     return app.get_relative_path('/' + _GALLERY_PATH)
+
+
+def _serve_opener(app):
+    """Let the board ask its server to open one of its pages, and return the
+    route's href.
+
+    For a page that can't open a tab itself: a notebook in VS Code shows the
+    board in a sandboxed iframe that allows no popups, so a ``target=_blank``
+    link there does nothing at all. The kernel runs on the same machine, so
+    it opens the link in the system browser instead. Only paths on this
+    server are taken — the route opens the board's own pages, nothing else.
+    """
+    server = app.server
+    prefix = app.config.routes_pathname_prefix or '/'
+
+    @server.route(prefix + _OPEN_PATH, methods=['POST'])
+    def _unichart_open():
+        from flask import request
+        path = request.get_data(as_text=True)
+        if not path.startswith('/') or path.startswith('//'):
+            return server.response_class(status=400)
+        webbrowser.open(request.host_url.rstrip('/') + path)
+        return server.response_class(status=204)
+
+    return app.get_relative_path('/' + _OPEN_PATH)
 
 
 def _serve_icon(app, board_title):
@@ -1024,6 +1046,24 @@ body.term-dragging iframe {{ pointer-events: none; }}
 .term-search .dash-input-element {{ padding: 4px 8px; }}
 .term-search .dash-input-element::placeholder {{ color: {MUTED}; }}
 .term-empty {{ color: {MUTED}; font-size: 12px; font-style: italic; }}
+/* A collapsible section's heading: the label behind a chevron that points
+   down while the section is open, right while it is folded away. */
+.term-fold {{
+  list-style: none; cursor: pointer; user-select: none;
+  display: flex; align-items: center; gap: 6px; margin: 0 0 8px;
+}}
+.term-fold::-webkit-details-marker {{ display: none; }}
+.term-fold::before {{
+  content: ''; flex: none; width: 4px; height: 4px; margin: 0 1px 0 2px;
+  border: solid {MUTED}; border-width: 0 1.5px 1.5px 0;
+  transform: rotate(-45deg); transition: transform 120ms;
+}}
+details[open] > .term-fold::before {{ transform: rotate(45deg) translate(-1px, -1px); }}
+.term-fold .term-label {{ margin: 0; }}
+.term-fold:hover .term-label {{ color: {INK}; }}
+.term-fold:hover::before {{ border-color: {INK}; }}
+.term-fold:focus-visible {{ outline: 1px solid {ACCENT}; outline-offset: 2px;
+                            border-radius: 3px; }}
 
 /* Cheat-sheet snippets: clickable, monospace, wrapped like code. */
 .term-chips {{ display: flex; flex-wrap: wrap; gap: 5px; }}
@@ -1284,6 +1324,14 @@ def _count_label(noun, count):
     return f'{noun} · {count}' if count else noun
 
 
+def _fold(html, label):
+    """The clickable heading of a collapsible sidebar section. The label stays
+    a child of its own, since the browser rewrites its text as a search
+    narrows the table."""
+    return html.Summary(label, className='term-fold',
+                        title='Click to show or hide this list')
+
+
 def _sidebar(html, dcc, uc, cheat_sheet=True):
     parm_table, parm_count, parm_sig = _parm_rows(html, uc)
     # Hidden rather than left out: the dispatch callback outputs to the chips
@@ -1315,20 +1363,22 @@ def _sidebar(html, dcc, uc, cheat_sheet=True):
             ], className='term-examples', style=hide),
         ], className='term-section'),
 
-        html.Div([
-            html.Span(_count_label('Sets', len(uc.sets)), id='term-sets-label',
-                      className='term-label'),
+        # Sets and parameters fold away under their headings, for when a
+        # long list crowds out the rest of the sidebar.
+        html.Details([
+            _fold(html, html.Span(_count_label('Sets', len(uc.sets)),
+                                  id='term-sets-label', className='term-label')),
             # A title, or set numbers in the library's own shorthand.
             dcc.Input(id='term-set-search', type='search', debounce=True,
                       placeholder='search · boost  ·  0:3  ·  -1',
                       className='term-search', autoComplete='off',
                       spellCheck=False),
             html.Div(_dataset_rows(html, uc), id='term-datasets'),
-        ], className='term-section'),
+        ], open=True, className='term-section'),
 
-        html.Div([
-            html.Span(_count_label('Parameters', parm_count),
-                      id='term-parms-label', className='term-label'),
+        html.Details([
+            _fold(html, html.Span(_count_label('Parameters', parm_count),
+                                  id='term-parms-label', className='term-label')),
             # Filtered in the browser as you type — no round trip per key.
             dcc.Input(id='term-parm-search', type='search', debounce=True,
                       placeholder='search · egt  ·  *_in  ·  n?',
@@ -1336,7 +1386,7 @@ def _sidebar(html, dcc, uc, cheat_sheet=True):
                       spellCheck=False),
             html.Div(parm_table, id='term-parms'),
             dcc.Store(id='term-parms-sig', data=parm_sig),
-        ], className='term-section'),
+        ], open=True, className='term-section'),
 
         html.Div([
             html.Span('Cheat sheet', id='term-cheat-label', className='term-label'),
@@ -1461,6 +1511,7 @@ def build_terminal_app(uc, title=None, banner=True, startup=(),
     app.index_string = _index_string(app.config.requests_pathname_prefix)
     _serve_icon(app, board_title)
     gallery_href = _serve_gallery(app)
+    open_href = _serve_opener(app)
     app.layout = html.Div([
         html.Div([
             html.Div('UC', className='term-badge'),
@@ -1476,12 +1527,12 @@ def build_terminal_app(uc, title=None, banner=True, startup=(),
                             className='term-btn',
                             title='Download the data, formatting and current '
                                   'plot as a session file you can reopen'),
-                html.A('Gallery', href=gallery_href or GALLERY_URL,
+                html.A('Gallery', href=gallery_href,
                        target='_blank', className='term-link',
+                       **{'data-fallback': open_href},
                        title='Example gallery — every plot type on one page, '
-                             'each with the code that drew it'),
-                html.A('GitHub', href='https://github.com/Cunon/unichart',
-                       target='_blank', className='term-link'),
+                             'each with the code that drew it')
+                if gallery_href else None,
                 html.Button('✕ close', id='term-quit', n_clicks=0,
                             className='term-btn danger',
                             title='Close unichart — stops the server and ends '
@@ -1925,6 +1976,20 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
             document.addEventListener('click', function(e) {
                 const row = pickOf(e);
                 if (row) { insert(row.dataset.insert, row.dataset.kind); }
+            });
+            // A new-tab link opens through window.open, which comes back
+            // null where the page may not open one (VS Code's notebook
+            // iframe); the server then opens it in the system browser.
+            document.addEventListener('click', function(e) {
+                const a = e.target.closest && e.target.closest('a[data-fallback]');
+                if (!a) { return; }
+                e.preventDefault();
+                let tab = null;
+                try { tab = window.open(a.href, '_blank'); } catch (err) {}
+                if (!tab) {
+                    fetch(a.dataset.fallback,
+                          {method: 'POST', body: a.getAttribute('href')});
+                }
             });
             return window.dash_clientside.no_update;
         }
