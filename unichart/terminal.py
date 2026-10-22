@@ -47,8 +47,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from ._core import (_READER_STUB_BODY, _compact_indices, _reader_name,
-                    sniff_session)
+from ._core import (_READER_STUB_BODY, _SET_ID_COL, _compact_indices,
+                    _reader_name, sniff_session)
 from .dashboard import (_UPLOAD_READERS, _df_from_upload, _pick_port,
                         _require_dash, _upload_bytes)
 
@@ -84,6 +84,10 @@ UI_FONT = ('system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", '
            'Arial, sans-serif')
 MONO_FONT = ('ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, '
              '"Liberation Mono", monospace')
+
+# Rich blocks (table(), summary(), list_parms() ...) kept open in the
+# transcript; older ones fold to a line that reopens them.
+RICH_KEPT = 6
 
 # Methods that would launch another server from inside this one's callback.
 _RECURSIVE = {'explore', 'dashboard', 'dashboard_to_html', 'terminal'}
@@ -498,8 +502,21 @@ class Session:
         if hasattr(value, 'to_plotly_json'):
             self.uc.last_fig = value
             return
-        if isinstance(value, (pd.DataFrame, pd.Series)):
-            print(value.to_string())
+        # Cut down the way a notebook shows it, under pandas' display options:
+        # a full to_string of a wide set runs to tens of megabytes. Not repr,
+        # which wraps columns at 80 characters the transcript doesn't have.
+        if isinstance(value, pd.DataFrame):
+            print(value.to_string(
+                max_rows=pd.get_option('display.max_rows'),
+                min_rows=pd.get_option('display.min_rows'),
+                max_cols=pd.get_option('display.max_columns'),
+                show_dimensions=pd.get_option('display.show_dimensions')))
+            return
+        if isinstance(value, pd.Series):
+            print(value.to_string(
+                max_rows=pd.get_option('display.max_rows'),
+                min_rows=pd.get_option('display.min_rows'),
+                length=pd.get_option('display.show_dimensions')))
             return
         print(repr(value))
 
@@ -1109,6 +1126,11 @@ details[open] > .term-fold::before {{ transform: rotate(45deg) translate(-1px, -
 .term-out {{ color: {INK}; opacity: 0.88; }}
 .term-err {{ color: {ERROR}; }}
 .term-rich {{ border: 0; width: 100%; background: transparent; margin: 4px 0 10px; }}
+.term-folded {{
+  color: {MUTED}; margin: 4px 0 10px; padding: 6px 10px; cursor: pointer;
+  border: 1px dashed {HAIRLINE}; border-radius: 6px; white-space: normal;
+}}
+.term-folded:hover {{ color: {INK}; border-color: {ACCENT}; }}
 
 /* ---- input ---- */
 .term-inputrow {{
@@ -1269,6 +1291,21 @@ def _table(html, widths, head, rows):
     ], className='term-table'), className='term-tablebox')
 
 
+def _owned_columns(uc):
+    """Each set's own columns, in combined-frame order — ``ds.columns`` for
+    every set at once.
+
+    Both sidebar tables are rebuilt after every command. ``ds.columns`` walks
+    the combined frame's labels one pandas scalar at a time, per set, which on
+    a wide file is most of a command's turnaround; reading the labels out
+    once and checking each set's ownership against them is the same answer
+    at a fraction of the cost.
+    """
+    uc._reconcile_columns()
+    labels = [c for c in uc._combined_df.columns.tolist() if c != _SET_ID_COL]
+    return [[c for c in labels if c in ds._own_cols] for ds in uc.sets]
+
+
 def _dataset_rows(html, uc):
     """The sidebar's set table, swatches colored to match the chart's traces.
 
@@ -1280,10 +1317,9 @@ def _dataset_rows(html, uc):
     if not uc.sets:
         return [html.Div('No data loaded.', className='term-empty')]
     rows = []
-    for ds in uc.sets:
+    for ds, own in zip(uc.sets, _owned_columns(uc)):
         n_rows = len(ds._masked_positions())
-        tip = (f'{ds.title_format} · {n_rows} rows × '
-               f'{len(ds._own_col_positions())} cols')
+        tip = f'{ds.title_format} · {n_rows} rows × {len(own)} cols'
         if not ds.select:
             tip += ' · not selected'
         if ds.query:
@@ -1316,9 +1352,10 @@ def _parm_listing(uc):
     that hasn't changed.
     """
     owners = {}
-    for ds in uc.sets:
-        for col in ds.columns:
-            owners.setdefault(col, []).append(ds.index)
+    if uc.sets:
+        for ds, own in zip(uc.sets, _owned_columns(uc)):
+            for col in own:
+                owners.setdefault(col, []).append(ds.index)
     names = sorted(owners, key=lambda c: str(c).lower())
     many = len(uc.sets) > 1
     descs = uc.parm_description_dict
@@ -2394,19 +2431,45 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
     # Append what the latest action added to the transcript, and keep the
     # newest output in view. Appended, never redrawn: earlier rich blocks are
     # iframes, and redrawing would reload every one of them.
+    #
+    # Only the newest RICH_KEPT rich blocks stay open. Each is a whole page —
+    # a table() carries every row it covers — so a long session would
+    # otherwise keep piling them up. An older one folds to a line that opens
+    # it again: a detached iframe drops its page, and reattaching it reloads
+    # from its srcdoc.
     app.clientside_callback(
         """
         function(entries) {
+            const RICH_KEPT = %d;
             const el = document.getElementById('term-scroll');
             if (el && entries && entries.length) {
                 el.insertAdjacentHTML('beforeend', entries.map(function(e) {
                     return e.markup || '';
                 }).join(''));
+                const fold = function(keep) {
+                    const open = el.querySelectorAll('iframe.term-rich');
+                    let extra = open.length - RICH_KEPT;
+                    for (let i = 0; i < open.length && extra > 0; i++) {
+                        if (open[i] === keep) { continue; }
+                        extra -= 1;
+                        const frame = open[i];
+                        const line = document.createElement('div');
+                        line.className = 'term-folded';
+                        line.textContent = 'Earlier output folded to keep the '
+                            + 'console quick. Click to show it again.';
+                        line.addEventListener('click', function() {
+                            line.replaceWith(frame);
+                            fold(frame);
+                        });
+                        frame.replaceWith(line);
+                    }
+                };
+                fold(null);
                 setTimeout(function() { el.scrollTop = el.scrollHeight; }, 30);
             }
             return window.dash_clientside.no_update;
         }
-        """,
+        """ % RICH_KEPT,
         Output('term-scroll', 'className'),
         Input('term-entries', 'data'),
     )

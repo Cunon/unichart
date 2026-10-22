@@ -59,6 +59,7 @@ import keyword
 import os
 import sys
 import base64
+import html
 import struct
 import textwrap
 import zlib
@@ -1660,6 +1661,11 @@ _SET_ID_COL = '_SET_ID'
 # instead of SVG — SVG creates one DOM node per point and locks the browser
 # on dense transient data. Set to None to always use SVG.
 WEBGL_POINT_THRESHOLD = 10_000
+
+# The styled HTML tables (table(), summary(), list_sets(), list_parms()) draw
+# this many body rows up front and the rest on request: every row in the DOM
+# at once froze the page for seconds on a table over every set's rows.
+TABLE_CHUNK_ROWS = 500
 
 
 def _scatter_cls(n_points):
@@ -14423,6 +14429,25 @@ class UnichartNotebook:
         # escape=True so cell text like a dataset query "speed < 20" can't
         # break the markup or inject HTML.
         html_table = display_df.to_html(index=False, escape=True)
+
+        # Past the first chunk, rows ride as cell text for the script to draw
+        # as they're asked for (Show more, or scrolling in max_rows mode);
+        # sort, filter and Copy work on that text, so they still cover every
+        # row. Cut from the one to_html render rather than rendered apart, so
+        # a cell reads exactly as pandas formatted it either way — its float
+        # formatting is per column. The first chunk stays markup, which is
+        # also what a viewer without scripts sees.
+        chunk = max(TABLE_CHUNK_ROWS, (max_rows or 0) + 1)
+        rest_rows = []
+        if len(display_df) > chunk:
+            head, _, body = html_table.partition('<tbody>')
+            body, _, tail = body.partition('</tbody>')
+            rows = list(re.finditer(r'<tr>(.*?)</tr>', body, flags=re.S))
+            rest_rows = [[html.unescape(cell).strip()
+                          for cell in re.findall(r'<td>(.*?)</td>', m.group(1), flags=re.S)]
+                         for m in rows[chunk:]]
+            html_table = (f'{head}<tbody>{body[:rows[chunk - 1].end()]}\n'
+                          f'  </tbody>{tail}')
         if title:
             caption_html = (
                 f'<caption style="caption-side:top;text-align:center;'
@@ -14453,16 +14478,78 @@ class UnichartNotebook:
             var tbody = table.querySelector("tbody");
             var headers = table.querySelectorAll("thead th");
 
+            // The rows as cell text: those drawn as markup, then the rest
+            // Python sent as text. `order` is every row in the current sort,
+            // `view` the ones the filters keep; only the first `shown` of
+            // `view` are in the DOM, CHUNK more at a time, so a table over
+            // every set's rows doesn't freeze the page building them all.
+            var CHUNK = __CHUNK__;
+            var DATA = Array.prototype.map.call(tbody.querySelectorAll("tr"), function(tr) {
+                return Array.prototype.map.call(tr.cells, function(c) {
+                    return c.textContent.trim();
+                });
+            }).concat(__REST_ROWS__);
+            var order = DATA.map(function(_, i) { return i; });
+            var view = order;
+            var shown = tbody.rows.length;
+            var more = container.querySelector(".uc-table-more");
+
+            function escCell(s) {
+                return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+            }
+
             // Zebra striping is applied as classes over the *visible* rows so
             // it stays alternating after any combination of sort and filter
             // (CSS nth-child would keep counting hidden rows).
             function restripe() {
-                var vis = 0;
-                Array.prototype.forEach.call(tbody.querySelectorAll("tr"), function(tr) {
+                Array.prototype.forEach.call(tbody.rows, function(tr, i) {
                     tr.classList.remove("uc-odd", "uc-even");
-                    if (tr.style.display === "none") return;
-                    tr.classList.add((vis % 2 === 0) ? "uc-odd" : "uc-even");
-                    vis++;
+                    tr.classList.add((i % 2 === 0) ? "uc-odd" : "uc-even");
+                });
+            }
+
+            // Column widths only ever grow, so drawing more rows, or a sort
+            // bringing others to the top, never shifts the layout narrower.
+            function pinWidths() {
+                if (DATA.length <= CHUNK) return;
+                headers.forEach(function(th) {
+                    var cs = getComputedStyle(th);
+                    th.style.minWidth = (th.clientWidth - parseFloat(cs.paddingLeft)
+                                         - parseFloat(cs.paddingRight)) + "px";
+                });
+            }
+
+            function draw(count) {
+                var end = Math.min(view.length, shown + count), html = "";
+                for (var k = shown; k < end; k++) {
+                    html += '<tr class="' + (k % 2 === 0 ? "uc-odd" : "uc-even") + '">' +
+                        DATA[view[k]].map(function(c) {
+                            return "<td>" + escCell(c) + "</td>";
+                        }).join("") + "</tr>";
+                }
+                tbody.insertAdjacentHTML("beforeend", html);
+                shown = end;
+                if (more) {
+                    var left = view.length - shown;
+                    more.style.display = left > 0 ? "" : "none";
+                    more.firstChild.textContent = "Showing " + shown.toLocaleString() +
+                        " of " + view.length.toLocaleString() + " rows ";
+                    more.querySelector("button").textContent =
+                        "Show " + Math.min(left, CHUNK).toLocaleString() + " more";
+                }
+                pinWidths();
+            }
+
+            function redraw() {
+                tbody.innerHTML = "";
+                shown = 0;
+                draw(CHUNK);
+            }
+
+            if (more) {
+                more.innerHTML = '<span></span><button type="button"></button>';
+                more.querySelector("button").addEventListener("click", function() {
+                    draw(CHUNK);
                 });
             }
 
@@ -14624,12 +14711,12 @@ class UnichartNotebook:
             }
             function applyFilters() {
                 var parsed = parsedFilters();
-                Array.prototype.forEach.call(tbody.querySelectorAll("tr"), function(tr) {
-                    var show = parsed.every(function(groups, i) {
-                        return matches(groups, tr.cells[i].textContent.trim());
+                view = order.filter(function(r) {
+                    return parsed.every(function(groups, i) {
+                        return matches(groups, DATA[r][i]);
                     });
-                    tr.style.display = show ? "" : "none";
                 });
+                redraw();
                 filterInputs.forEach(function(inp, i) {
                     var active = inp.value.trim() !== "";
                     filterBtns[i].classList.toggle("uc-filter-active", active);
@@ -14638,7 +14725,6 @@ class UnichartNotebook:
                         ? "Filtered: " + inp.value.trim() + " (click to edit, Esc to clear)"
                         : "Filter this column";
                 });
-                restripe();
             }
 
             headers.forEach(function(th, colIdx) {
@@ -14653,10 +14739,9 @@ class UnichartNotebook:
                         h.classList.remove("uc-sort-asc", "uc-sort-desc");
                     });
                     th.classList.add(asc ? "uc-sort-asc" : "uc-sort-desc");
-                    var rows = Array.prototype.slice.call(tbody.querySelectorAll("tr"));
-                    rows.sort(function(a, b) {
-                        var av = a.cells[colIdx].textContent.trim();
-                        var bv = b.cells[colIdx].textContent.trim();
+                    order.sort(function(a, b) {
+                        var av = DATA[a][colIdx];
+                        var bv = DATA[b][colIdx];
                         if (av === "-" && bv === "-") return 0;
                         if (av === "-") return 1;
                         if (bv === "-") return -1;
@@ -14669,8 +14754,7 @@ class UnichartNotebook:
                         }
                         return asc ? cmp : -cmp;
                     });
-                    rows.forEach(function(r) { tbody.appendChild(r); });
-                    restripe();
+                    applyFilters();
                 });
             });
 
@@ -14744,12 +14828,13 @@ class UnichartNotebook:
             });
             table.querySelector("thead").appendChild(filterRow);
             restripe();
+            draw(0);
 
             // max_rows: cap the visible height at the header plus the first
             // N body rows, measured after render so it follows the actual
             // font sizes and padding. Rows past N scroll inside the wrapper
-            // (the header is sticky), and stay in the DOM so sort, filter and
-            // Copy still cover the whole table.
+            // (the header is sticky), drawing more as the scroll nears the
+            // end; sort, filter and Copy cover the whole table either way.
             var maxRows = __MAX_ROWS__;
             var bodyRows = tbody.querySelectorAll("tr");
             if (maxRows > 0 && bodyRows.length > maxRows) {
@@ -14760,6 +14845,12 @@ class UnichartNotebook:
                     wrap.style.maxHeight = cap + "px";
                     wrap.style.overflowY = "auto";
                     wrap.classList.add("uc-scroll");
+                    wrap.addEventListener("scroll", function() {
+                        if (shown < view.length && wrap.scrollTop + wrap.clientHeight
+                                > wrap.scrollHeight - 400) {
+                            draw(CHUNK);
+                        }
+                    });
                 }
             }
 
@@ -14776,12 +14867,7 @@ class UnichartNotebook:
                     data.push(Array.prototype.map.call(headers, function(h) {
                         return h.getAttribute("data-uc-label") || h.textContent.trim();
                     }));
-                    Array.prototype.forEach.call(tbody.querySelectorAll("tr"), function(tr) {
-                        if (tr.style.display === "none") return;
-                        data.push(Array.prototype.map.call(tr.cells, function(c) {
-                            return c.textContent.trim();
-                        }));
-                    });
+                    view.forEach(function(r) { data.push(DATA[r]); });
                     var tsv = data.map(function(r) { return r.join("\\t"); }).join("\\n");
                     var esc = function(s) {
                         return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -14952,11 +15038,18 @@ class UnichartNotebook:
             }
         })();
         </script>
-        """.replace("__UID__", table_uid).replace("__MAX_ROWS__", str(max_rows or 0))
-        # Last, so nothing inside a column name gets taken for a placeholder;
-        # escaping '<' keeps a name like '</script>' from closing the tag.
-        sort_script = sort_script.replace(
-            "__QUERY_COLS__", json.dumps(query_cols).replace("<", "\\u003c"))
+        """.replace("__UID__", table_uid).replace("__MAX_ROWS__", str(max_rows or 0)) \
+           .replace("__CHUNK__", str(chunk))
+        # Last, and in one pass, so nothing inside a column name or a cell
+        # gets taken for a placeholder; escaping '<' keeps a name like
+        # '</script>' from closing the tag.
+        data = {"__QUERY_COLS__": query_cols, "__REST_ROWS__": rest_rows}
+        sort_script = re.sub(
+            "__QUERY_COLS__|__REST_ROWS__",
+            lambda m: json.dumps(data[m.group(0)]).replace("<", "\\u003c"),
+            sort_script)
+        more_bar = (f'<div class="uc-table-more">Showing {chunk:,} of '
+                    f'{len(display_df):,} rows</div>' if rest_rows else '')
 
         query_btn = ("""
                     <button class="uc-query-btn" type="button"
@@ -14976,7 +15069,7 @@ class UnichartNotebook:
                 </div>
                 <div class="uc-table-wrap">
                     {html_table}
-                </div>
+                </div>{more_bar}
             </div>
         </div>
         <style>
@@ -15001,6 +15094,24 @@ class UnichartNotebook:
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
         }}
         #{table_uid} .uc-query-btn {{ margin-left: 4px; }}
+        #{table_uid} .uc-table-more {{
+            margin-top: 6px;
+            color: {pal['text']};
+            opacity: 0.75;
+            font-size: 12px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+        }}
+        #{table_uid} .uc-table-more button {{
+            background-color: {pal['th_bg']};
+            color: {pal['text']};
+            border: 1px solid {pal['wrap_border']};
+            border-radius: 6px;
+            padding: 1px 10px;
+            margin-left: 6px;
+            font-size: 12px;
+            cursor: pointer;
+        }}
+        #{table_uid} .uc-table-more button:hover {{ background-color: {pal['th_hover']}; }}
         #{table_uid} .uc-copy-btn:hover,
         #{table_uid} .uc-query-btn:hover {{ background-color: {pal['th_hover']}; }}
         #{table_uid} .uc-copy-btn.uc-copied,
