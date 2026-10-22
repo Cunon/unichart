@@ -240,10 +240,8 @@ def _post(app, key, outputs, trigger, source='', files=()):
                     for i in range(len(terminal.CHEAT_SHEET))]],
         'state': [{'id': 'term-cheats', 'property': 'data', 'value': None},
                   {'id': 'term-input', 'property': 'value', 'value': source},
-                  {'id': 'term-entries', 'property': 'data', 'value': []},
                   {'id': 'term-history', 'property': 'data', 'value': []},
-                  {'id': 'term-upload', 'property': 'filename', 'value': names},
-                  {'id': 'term-chart', 'property': 'figure', 'value': None}],
+                  {'id': 'term-upload', 'property': 'filename', 'value': names}],
     }
     with redirect_stdout(io.StringIO()):
         reply = app.server.test_client().post('/_dash-update-component', json=body)

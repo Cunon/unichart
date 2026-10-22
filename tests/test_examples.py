@@ -143,10 +143,8 @@ def _click(app, key, outputs, trigger, examples, chips, cheats):
                    ids('term-chip', chips)],
         'state': [{'id': 'term-cheats', 'property': 'data', 'value': cheats},
                   {'id': 'term-input', 'property': 'value', 'value': ''},
-                  {'id': 'term-entries', 'property': 'data', 'value': []},
                   {'id': 'term-history', 'property': 'data', 'value': []},
-                  {'id': 'term-upload', 'property': 'filename', 'value': None},
-                  {'id': 'term-chart', 'property': 'figure', 'value': None}],
+                  {'id': 'term-upload', 'property': 'filename', 'value': None}],
     }
     reply = app.server.test_client().post('/_dash-update-component', json=body)
     assert reply.status_code in (200, 204), reply.data[:500]

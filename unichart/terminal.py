@@ -42,6 +42,7 @@ import tempfile
 import threading
 import traceback
 import webbrowser
+from html import escape as _escape
 from pathlib import Path
 
 import pandas as pd
@@ -264,7 +265,7 @@ def _scoped_output(uc, sink):
     The copy button is a Jupyter affordance and would just be noise here (this
     board has its own chart pane), so it is off for the duration too.
 
-    ``help()`` colors itself with ANSI, which _entry_divs turns into spans. Its
+    ``help()`` colors itself with ANSI, which _ansi_markup turns into spans. Its
     auto-detection can't help us here — commands run under redirect_stdout, so
     it would always see "not a tty" — so the override is set explicitly and
     restored with the rest. NO_COLOR still wins: it is the user's switch, and
@@ -1200,12 +1201,43 @@ def _fit(fig):
     if fig is None:
         return _blank()
     clone = fig.to_dict()
+    _promote_to_webgl(fig, clone.get('data') or [])
     layout = clone.setdefault('layout', {})
     layout.pop('width', None)
     layout.pop('height', None)
     layout['autosize'] = True
     layout['margin'] = {'l': 70, 'r': 30, 't': 50, 'b': 55}
     return clone
+
+
+def _trace_points(trace):
+    """How many points a scatter trace draws."""
+    for values in (trace.x, trace.y):
+        if values is not None:
+            return len(values)
+    return 0
+
+
+def _promote_to_webgl(fig, traces):
+    """Draw a figure's SVG scatters with WebGL once together they are large.
+
+    The plotters choose Scattergl per trace (``_scatter_cls``), so twenty sets
+    of 5000 rows stay SVG — 100k points per y column, each its own DOM node.
+    In this pane that stalls the whole page, typing included, so here the
+    threshold is judged over the figure. Points are counted on ``fig``, whose
+    arrays are real arrays (its ``to_dict`` hands them back base64-encoded);
+    ``traces`` — that dict's, in the same order — are the ones retyped. They
+    belong to the pane's copy, never to ``uc.last_fig``.
+    """
+    from . import _core
+
+    threshold = _core.WEBGL_POINT_THRESHOLD
+    if threshold is None:
+        return
+    svg = [i for i, tr in enumerate(fig.data) if tr.type == 'scatter']
+    if sum(_trace_points(fig.data[i]) for i in svg) > threshold:
+        for i in svg:
+            traces[i]['type'] = 'scattergl'
 
 
 def _blank():
@@ -1271,12 +1303,17 @@ def _dataset_rows(html, uc):
                    ['', '#', 'Title', 'Rows'], rows)]
 
 
-def _parm_rows(html, uc):
-    """The sidebar's parameter table, and a signature of what it lists.
+def _parm_listing(uc):
+    """The sidebar's parameter table as data, its length, and a signature.
 
     ``list_parms('all')`` in sidebar form: every parameter of every set, and —
-    with more than one set — which sets own it. The signature lets the refresh
-    after each command skip resending a table that hasn't changed.
+    with more than one set — which sets own it. Each row is ``[name, sets,
+    tooltip]``, and the browser draws the table from them (``renderParms``
+    in :func:`_register`) rather than the server building it from Dash
+    components: a wide file runs to thousands of parameters, and the page
+    pays for every Dash component on each keystroke anywhere on the board.
+    The signature lets the refresh after each command skip resending a list
+    that hasn't changed.
     """
     owners = {}
     for ds in uc.sets:
@@ -1285,23 +1322,16 @@ def _parm_rows(html, uc):
     names = sorted(owners, key=lambda c: str(c).lower())
     many = len(uc.sets) > 1
     descs = uc.parm_description_dict
-    listed = [(str(c), owners[c] if many else None, descs.get(c)) for c in names]
-    sig = str(hash(repr(listed)))
-    if not listed:
-        return [html.Div('No parameters yet.', className='term-empty')], 0, sig
     rows = []
-    for name, own, desc in listed:
-        cells = [html.Td(name, className='mono')]
+    for col in names:
+        name, desc = str(col), descs.get(col)
+        own = owners[col]
+        sets = None
         if many:
-            cells.append(html.Td('all' if len(own) == len(uc.sets)
-                                 else _compact_indices(own), className='num'))
-        rows.append(html.Tr(
-            cells, className='term-pick',
-            title=f'{name} — {desc}' if desc else name,
-            **{'data-insert': name, 'data-kind': 'parm'}))
-    widths, head = ([None, '62px'], ['Parameter', 'Sets']) if many \
-        else ([None], ['Parameter'])
-    return [_table(html, widths, head, rows)], len(listed), sig
+            sets = 'all' if len(own) == len(uc.sets) else _compact_indices(own)
+        rows.append([name, sets, f'{name} — {desc}' if desc else name])
+    sig = str(hash(repr(rows)))
+    return {'many': many, 'rows': rows}, len(rows), sig
 
 
 def _chips(html, sheet):
@@ -1333,7 +1363,7 @@ def _fold(html, label):
 
 
 def _sidebar(html, dcc, uc, cheat_sheet=True):
-    parm_table, parm_count, parm_sig = _parm_rows(html, uc)
+    parm_data, parm_count, parm_sig = _parm_listing(uc)
     # Hidden rather than left out: the dispatch callback outputs to the chips
     # and takes the example buttons as inputs, so they stay in the layout.
     hide = None if cheat_sheet else {'display': 'none'}
@@ -1384,7 +1414,10 @@ def _sidebar(html, dcc, uc, cheat_sheet=True):
                       placeholder='search · egt  ·  *_in  ·  n?',
                       className='term-search', autoComplete='off',
                       spellCheck=False),
-            html.Div(parm_table, id='term-parms'),
+            # Left empty here: the browser draws the table into it from
+            # term-parms-data, so no callback may ever output to its children.
+            html.Div(id='term-parms'),
+            dcc.Store(id='term-parms-data', data=parm_data),
             dcc.Store(id='term-parms-sig', data=parm_sig),
         ], open=True, className='term-section'),
 
@@ -1407,7 +1440,7 @@ def _sidebar(html, dcc, uc, cheat_sheet=True):
 # than left to show up as a literal "[36m" in the transcript.
 _ANSI_RE = re.compile(r'\x1b\[([0-9;]*)m')
 _ANSI_STYLE = {
-    '1': {'fontWeight': 600},
+    '1': {'font-weight': '600'},
     '2': {'color': MUTED},
     '31': {'color': ERROR},
     '32': {'color': SYNTAX['str']},
@@ -1416,46 +1449,71 @@ _ANSI_STYLE = {
 }
 
 
-def _ansi_spans(html, text):
-    """``text`` as children: plain strings, with ANSI runs wrapped in spans."""
+def _ansi_markup(text):
+    """``text`` as escaped HTML, with ANSI runs wrapped in styled spans."""
     if '\x1b' not in text:
-        return text
-    children, style, pos = [], {}, 0
+        return _escape(text)
+
+    def run(chunk, style):
+        if not style:
+            return _escape(chunk)
+        css = '; '.join(f'{k}: {v}' for k, v in style.items())
+        return f'<span style="{css}">{_escape(chunk)}</span>'
+
+    out, style, pos = [], {}, 0
     for match in _ANSI_RE.finditer(text):
         chunk = text[pos:match.start()]
         if chunk:
-            children.append(html.Span(chunk, style=style) if style else chunk)
+            out.append(run(chunk, style))
         for code in (c for c in match.group(1).split(';') if c) or ['0']:
             style = {} if code == '0' else {**style, **_ANSI_STYLE.get(code, {})}
         pos = match.end()
-    tail = text[pos:]
-    if tail:
-        children.append(html.Span(tail, style=style) if style else tail)
-    return children
+    if text[pos:]:
+        out.append(run(text[pos:], style))
+    return ''.join(out)
 
 
-def _entry_divs(html, entries):
-    """Render the stored transcript. Rich HTML rides in an iframe.
+def _entry_markup(entry):
+    """One transcript entry as HTML. Rich HTML rides in an iframe.
+
+    The transcript is drawn in the browser from these strings rather than
+    sent as Dash components: highlighting makes every token of every command
+    its own span, and the page pays for each Dash component on every
+    keystroke, so a long session would slowly make typing lag.
 
     ``table``/``summary`` emit self-contained HTML carrying their own
     click-to-sort and filter scripts; ``dcc.Markdown`` would strip those, so the
     only faithful container is an iframe with its own document.
     """
+    kind, text = entry.get('kind'), entry.get('text', '')
+    if kind == 'in':
+        lines = [''.join(f'<span class="tk-{cls}">{_escape(piece)}</span>'
+                         for piece, cls in line) or '<span class="tk-nm"></span>'
+                 for line in highlight(text)]
+        return ''.join(
+            f'<div class="{"term-in term-cont" if i else "term-in"}">{line}</div>'
+            for i, line in enumerate(lines))
+    if kind == 'err':
+        return f'<div class="term-err">{_escape(text)}</div>'
+    if kind == 'html':
+        return (f'<iframe class="term-rich" '
+                f'style="height: {int(entry.get("height", 320))}px" '
+                f'srcdoc="{_escape(text, quote=True)}"></iframe>')
+    if text:
+        return f'<div class="term-out">{_ansi_markup(text)}</div>'
+    return ''
+
+
+def _with_markup(entries):
+    """Entries as the browser receives them: each carries its ``markup``.
+
+    A rich block's text is its markup already, so it isn't sent twice."""
     out = []
     for e in entries:
-        kind, text = e.get('kind'), e.get('text', '')
-        if kind == 'in':
-            spans = _code_spans(html, text)
-            out.append(html.Div(spans[0], className='term-in'))
-            out.extend(html.Div(line, className='term-in term-cont')
-                       for line in spans[1:])
-        elif kind == 'err':
-            out.append(html.Div(text, className='term-err'))
-        elif kind == 'html':
-            out.append(html.Iframe(srcDoc=text, className='term-rich',
-                                   style={'height': f"{e.get('height', 320)}px"}))
-        elif text:
-            out.append(html.Div(_ansi_spans(html, text), className='term-out'))
+        sent = {**e, 'markup': _entry_markup(e)}
+        if e.get('kind') == 'html':
+            sent.pop('text', None)
+        out.append(sent)
     return out
 
 
@@ -1555,8 +1613,9 @@ def build_terminal_app(uc, title=None, banner=True, startup=(),
                 html.Div(id='term-grip-h', className='term-grip term-grip-h',
                          title='Drag to resize · double-click to reset'),
                 html.Div([
-                    html.Div(_entry_divs(html, entries), id='term-scroll',
-                             className='term-scroll'),
+                    # Filled in the browser from term-entries (see
+                    # _entry_markup); no callback outputs its children.
+                    html.Div(id='term-scroll', className='term-scroll'),
                     html.Div([
                         html.Span('>>>', className='term-prompt'),
                         html.Div([
@@ -1577,13 +1636,17 @@ def build_terminal_app(uc, title=None, banner=True, startup=(),
             ], className='term-main'),
         ], className='term-body'),
 
-        dcc.Store(id='term-entries', data=entries),
+        # The entries the latest action added — not the whole transcript,
+        # which only the page keeps, so a long session doesn't make every
+        # command resend everything before it.
+        dcc.Store(id='term-entries', data=_with_markup(entries)),
         dcc.Store(id='term-history', data=list(startup)),
         # The cheat sheet on screen, so a chip click resolves to its own text
         # after an example has swapped the sheet out.
         dcc.Store(id='term-cheats', data=[list(c) for c in CHEAT_SHEET]),
         dcc.Download(id='term-save-download'),
         html.Div(id='term-side-sink', className='hidden'),
+        html.Div(id='term-parms-sink', className='hidden'),
         html.Div(id='term-resize-sink', className='hidden'),
         _quit_dialog(html) if allow_quit else None,
     ], className='term-app')
@@ -1657,7 +1720,6 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
 
     @app.callback(
         Output('term-entries', 'data'),
-        Output('term-scroll', 'children'),
         Output('term-chart', 'figure'),
         Output('term-datasets', 'children'),
         Output('term-input', 'value'),
@@ -1674,20 +1736,18 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
         Input({'type': 'term-chip', 'index': ALL}, 'n_clicks'),
         State('term-cheats', 'data'),
         State('term-input', 'value'),
-        State('term-entries', 'data'),
         State('term-history', 'data'),
         State('term-upload', 'filename'),
-        State('term-chart', 'figure'),
         prevent_initial_call=True,
     )
     def _dispatch(submit_n, upload_contents, example_clicks, save_n, chip_clicks,
-                  cheats, source, entries, history, upload_names, current_figure):
+                  cheats, source, history, upload_names):
         trigger = ctx.triggered_id
-        entries = list(entries or [])
+        entries = []               # what this action adds to the transcript
         history = list(history or [])
         download = no_update
         sheet = no_update          # the cheat sheet changes only with an example
-        nothing = (no_update,) * 11
+        nothing = (no_update,) * 10
 
         # A chip only stages text in the input — the user still presses Enter,
         # so a mis-click is editable rather than immediately executed.
@@ -1695,7 +1755,7 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
             if not any(chip_clicks or []):
                 return nothing
             snippet = (cheats or CHEAT_SHEET)[trigger['index']][0]
-            return (no_update, no_update, no_update, no_update,
+            return (no_update, no_update, no_update,
                     snippet) + (no_update,) * 6
 
         commands = []
@@ -1772,7 +1832,10 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
                 return nothing
             commands.append(source.strip())
 
-        figure = current_figure
+        # A command that draws nothing leaves the chart as it is. Not read
+        # back as State: that would upload the whole drawn figure — megabytes
+        # for a few sets of a few thousand rows — on every command.
+        figure = no_update
         for command in commands:
             entries.append({'kind': 'in', 'text': command})
             result = session.run(command)
@@ -1790,17 +1853,17 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
         else:
             sheet_out = (_chips(html, sheet), f"Cheat sheet · {example['label']}",
                          [list(c) for c in sheet])
-        return (entries, _entry_divs(html, entries), figure,
+        return (_with_markup(entries), figure,
                 _dataset_rows(html, uc),
                 _reader_template(staged) if staged else '',
                 history, None, download) + sheet_out
 
     # The parameter table follows the data. term-datasets is rewritten after
     # every command, so that is the cue; the signature keeps a command that
-    # changed nothing listed from resending the table (and resetting the
-    # search's scroll position).
+    # changed nothing listed from resending the list (and resetting the
+    # table's scroll position).
     @app.callback(
-        Output('term-parms', 'children'),
+        Output('term-parms-data', 'data'),
         Output('term-parms-sig', 'data'),
         Input('term-datasets', 'children'),
         State('term-parms-sig', 'data'),
@@ -1808,10 +1871,10 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
     )
     def _parms(_datasets, sig):
         with _RUN_LOCK:
-            table, _count, new_sig = _parm_rows(html, uc)
+            data, _count, new_sig = _parm_listing(uc)
         if new_sig == sig:
             return no_update, no_update
-        return table, new_sig
+        return data, new_sig
 
     # The sidebar's search and click-to-insert. Wired once, on first paint;
     # the search runs on every keystroke and again whenever the table is
@@ -1939,12 +2002,69 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
                         + (q ? shown + ' of ' + rows.length : rows.length);
                 }
             };
-            window._uniFilter = function() {
-                filterTable('term-parms', 'term-parm-search', 'term-parms-label',
-                            'Parameters', function(q) {
+            // The parameter table, drawn from term-parms-data rather than
+            // shipped as Dash components (see _parm_listing). A wide file has
+            // thousands of names, so only the first rows matching the search
+            // go in the DOM, and more are appended as the table scrolls.
+            const PARM_CHUNK = 300;
+            const escHtml = function(s) {
+                return String(s == null ? '' : s).replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;');
+            };
+            const parmRow = function(r, many) {
+                return '<tr class="term-pick" data-kind="parm" data-insert="'
+                    + escHtml(r[0]) + '" title="' + escHtml(r[2]) + '">'
+                    + '<td class="mono">' + escHtml(r[0]) + '</td>'
+                    + (many ? '<td class="num">' + escHtml(r[1]) + '</td>' : '')
+                    + '</tr>';
+            };
+            const renderParms = function() {
+                const box = document.getElementById('term-parms');
+                const data = window._uniParmData;
+                if (!box || !data) { return; }
+                const input = document.getElementById('term-parm-search');
+                const label = document.getElementById('term-parms-label');
+                const rows = data.rows || [];
+                const q = input ? input.value.trim() : '';
+                let matches = rows;
+                if (q) {
                     const t = nameTest(q);
-                    return function(tr) { return t(tr.dataset.insert); };
+                    matches = rows.filter(function(r) { return t(r[0]); });
+                }
+                if (label) {
+                    label.textContent = !rows.length ? 'Parameters' : 'Parameters · '
+                        + (q ? matches.length + ' of ' + rows.length : rows.length);
+                }
+                if (!rows.length) {
+                    box.innerHTML = '<div class="term-empty">No parameters yet.</div>';
+                    return;
+                }
+                const many = !!data.many;
+                box.innerHTML = '<div class="term-tablebox"><table class="term-table">'
+                    + '<colgroup><col>' + (many ? '<col style="width: 62px">' : '')
+                    + '</colgroup><thead><tr><th>Parameter</th>'
+                    + (many ? '<th>Sets</th>' : '') + '</tr></thead>'
+                    + '<tbody></tbody></table></div>';
+                const scroller = box.firstChild;
+                const body = scroller.querySelector('tbody');
+                let drawn = 0;
+                const more = function() {
+                    if (drawn >= matches.length) { return; }
+                    const next = matches.slice(drawn, drawn + PARM_CHUNK);
+                    body.insertAdjacentHTML('beforeend', next.map(function(r) {
+                        return parmRow(r, many);
+                    }).join(''));
+                    drawn += next.length;
+                };
+                more();
+                scroller.addEventListener('scroll', function() {
+                    if (scroller.scrollTop + scroller.clientHeight
+                            > scroller.scrollHeight - 400) { more(); }
                 });
+            };
+            window._uniFilter = function() {
+                renderParms();
                 filterTable('term-datasets', 'term-set-search', 'term-sets-label',
                             'Sets', function(q, n) {
                     const sel = setSelector(q, n);
@@ -1991,6 +2111,8 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
                           {method: 'POST', body: a.getAttribute('href')});
                 }
             });
+            // The parameter list may have landed before this ran.
+            window._uniFilter();
             return window.dash_clientside.no_update;
         }
         """,
@@ -1998,17 +2120,20 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
         Input('term-side-sink', 'id'),
     )
 
+    # Draw the parameter table when its list arrives, and re-run both
+    # searches when either table changes. Called on load too: that is how the
+    # parameter list first reaches the page.
     app.clientside_callback(
         """
-        function(_parms, _sets) {
+        function(parms, _sets) {
+            window._uniParmData = parms;
             if (window._uniFilter) { window._uniFilter(); }
             return window.dash_clientside.no_update;
         }
         """,
-        Output('term-parms', 'className'),
-        Input('term-parms', 'children'),
+        Output('term-parms-sink', 'className'),
+        Input('term-parms-data', 'data'),
         Input('term-datasets', 'children'),
-        prevent_initial_call=True,
     )
 
     # Enter runs, Shift+Enter adds a line, up/down walks history. All of it is
@@ -2266,17 +2391,24 @@ def _register(app, uc, session, uploads, board_title, dcc, html, ctx,
         Input('term-copy', 'n_clicks'),
     )
 
-    # Keep the newest output in view.
+    # Append what the latest action added to the transcript, and keep the
+    # newest output in view. Appended, never redrawn: earlier rich blocks are
+    # iframes, and redrawing would reload every one of them.
     app.clientside_callback(
         """
-        function(children) {
+        function(entries) {
             const el = document.getElementById('term-scroll');
-            if (el) { setTimeout(function() { el.scrollTop = el.scrollHeight; }, 30); }
+            if (el && entries && entries.length) {
+                el.insertAdjacentHTML('beforeend', entries.map(function(e) {
+                    return e.markup || '';
+                }).join(''));
+                setTimeout(function() { el.scrollTop = el.scrollHeight; }, 30);
+            }
             return window.dash_clientside.no_update;
         }
         """,
         Output('term-scroll', 'className'),
-        Input('term-scroll', 'children'),
+        Input('term-entries', 'data'),
     )
 
     if not allow_quit:
