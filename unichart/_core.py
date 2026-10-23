@@ -1657,6 +1657,80 @@ def _union_ranges(ranges):
 
 _SET_ID_COL = '_SET_ID'
 
+# A row-stacked combined frame with more numpy blocks than this is copied
+# into consolidated blocks (see _register_sets). pandas starts warning about
+# fragmentation at 100.
+_MAX_FRAME_BLOCKS = 32
+
+
+# uc.float32 stores a float64 column as float32 only when the rounding stays
+# under this fraction of the column's spread (its range, or its magnitude when
+# constant): about 1/100,000, which no plot or table shows. Large offsets
+# fail it — epoch-second timestamps would round to minutes — and stay float64.
+FLOAT32_TOLERANCE = 1e-5
+
+# float32 rounds to nearest within half a unit in its 24-bit significand.
+_FLOAT32_ROUNDING = 2.0 ** -24
+
+
+def _float32_safe(values):
+    """Whether float64 ``values`` survive float32 within FLOAT32_TOLERANCE.
+    NaN is ignored; a column holding nothing else is safe."""
+    if not values.size:
+        return True
+    lo, hi = values.min(), values.max()     # NaN if any NaN: checked below
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        finite = values[np.isfinite(values)]
+        if not finite.size:
+            return True
+        lo, hi = finite.min(), finite.max()
+    size = max(abs(lo), abs(hi))
+    spread = (hi - lo) or size
+    return bool(size * _FLOAT32_ROUNDING <= FLOAT32_TOLERANCE * spread)
+
+
+def _to_float32(df):
+    """``df`` with every float64 column :func:`_float32_safe` allows stored as
+    float32, and the labels of those it kept as float64.
+
+    Rebuilt from its columns rather than cast in place, so the result comes
+    back consolidated and in its column order; ``df`` itself is untouched. A
+    frame with nothing to convert is returned as it is.
+    """
+    # Plain arrays into the constructor, and items() rather than iloc: on a
+    # wide set the per-column pandas overhead was most of the cost.
+    kept, columns, converted = [], {}, False
+    for i, (label, col) in enumerate(df.items()):
+        if col.dtype == np.float64:
+            values = col.to_numpy()
+            if _float32_safe(values):
+                columns[i] = values.astype(np.float32)
+                converted = True
+                continue
+            kept.append(label)
+        columns[i] = col.array
+    if not converted:
+        return df, kept
+    out = pd.DataFrame(columns, index=df.index)
+    out.columns = df.columns
+    return out, kept
+
+
+def _consolidated(df):
+    """``df``, or a consolidated copy when row-stacking fragmented it.
+
+    Sets that share their columns stack into one block per dtype already, and
+    copying those would hold a second copy of the whole frame for nothing. Each
+    extension-dtype column (strings, categoricals) is its own block however the
+    frame was built, so only numpy blocks count. A pandas without the block
+    internals read here gets the copy, as before.
+    """
+    try:
+        blocks = sum(not b.is_extension for b in df._mgr.blocks)
+    except AttributeError:
+        return df.copy()
+    return df.copy() if blocks > _MAX_FRAME_BLOCKS else df
+
 # Above this many points a scatter trace renders with WebGL (go.Scattergl)
 # instead of SVG — SVG creates one DOM node per point and locks the browser
 # on dense transient data. Set to None to always use SVG.
@@ -4291,19 +4365,49 @@ def _add_contour_overlays(fig, overlay_datasets, x, y, n_subplots, ncols, darkmo
                 **thin,
             ), row=row, col=col)
 
-def _contour_line_style(ds, coloring):
+# How contour boundaries are drawn when ``contour`` / ``polar`` (with z) leave
+# ``color`` / ``linestyle`` / ``linewidth`` at None. Passing ``'set'`` for one
+# of them uses each set's own value instead.
+_CONTOUR_LINE_DEFAULTS = {'color': 'black', 'linestyle': '-', 'linewidth': 2}
+
+
+def _contour_line_style(ds, coloring, color=None, linestyle=None, linewidth=None):
     """The ``go.Contour.line`` dict giving a set's contour boundaries its style.
 
-    Boundaries take the set's normal line style — ``linewidth``, ``linestyle``
-    (mapped to a Plotly dash) and ``color`` — the same values a line plot uses.
-    ``color`` is left out when Plotly would discard it: under
-    ``contours_coloring='lines'`` the boundaries are colored from the
-    colorscale by z, and a line color has no effect there.
+    Each of ``color``, ``linestyle`` (mapped to a Plotly dash) and
+    ``linewidth`` is ``None`` for ``_CONTOUR_LINE_DEFAULTS`` (black, solid,
+    2), ``'set'`` for the set's own — the value a line plot of it uses — or
+    the value to draw with. ``color`` is left out when Plotly would discard
+    it: under ``contours_coloring='lines'`` the boundaries are colored from
+    the colorscale by z, and a line color has no effect there.
     """
-    line = dict(width=ds.linewidth, dash=get_plotly_linestyle(ds.linestyle))
+    def pick(key, value):
+        if value is None:
+            return _CONTOUR_LINE_DEFAULTS[key]
+        return getattr(ds, key) if isinstance(value, str) and value == 'set' else value
+
+    line = dict(width=pick('linewidth', linewidth),
+                dash=get_plotly_linestyle(pick('linestyle', linestyle)))
     if coloring != 'lines':
-        line['color'] = ds.color
+        line['color'] = pick('color', color)
     return line
+
+
+def _check_contour_line_overrides(color, linestyle, linewidth):
+    """Raise for a bad ``color`` / ``linestyle`` / ``linewidth`` override of
+    the contour boundaries (``contour`` and ``polar`` with ``z``). ``'set'``
+    is valid for each (see ``_contour_line_style``)."""
+    if color is not None and not validate_color(color):
+        raise ValueError(f"Invalid color {color!r}: expected a color string or 'set'.")
+    if not (validate_linestyle(linestyle) or linestyle == 'set'
+            or linestyle in LINESTYLE_MAP_MPL_TO_PLOTLY.values()):
+        valid = ', '.join(sorted(map(str, LINESTYLE_MAP_MPL_TO_PLOTLY)))
+        raise ValueError(f"Invalid linestyle '{linestyle}'. Valid: {valid}, or 'set'")
+    if linewidth is not None and linewidth != 'set' and (
+            isinstance(linewidth, bool) or not isinstance(linewidth, numbers.Real)
+            or linewidth < 0):
+        raise ValueError(f"linewidth must be a number of at least 0 or 'set', "
+                         f"got {linewidth!r}")
 
 
 def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=None,
@@ -4312,19 +4416,22 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
                suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
                darkmode=False, figsize=(12, 8), ncols=None, nrows=None,
                axis_limits=None, return_axes=False,
-               hspace=None, vspace=None, spacing_ref=None):
+               hspace=None, vspace=None, spacing_ref=None,
+               color=None, linestyle=None, linewidth=None):
     """
     Create a unified contour plot for a list of datasets.
     Subplots are organized by Z-variables.
 
-    Each set's contour boundaries are drawn in its own style — ``color``,
-    ``linestyle`` and ``linewidth``. With more than one set the default
-    ``contours_coloring='fill'`` becomes ``'none'`` (bare boundaries), since
-    overlapping fills would hide each other and this is what lets the sets'
-    colors tell them apart; the legend then carries the set styles instead of
-    a colorbar. Passing ``contours_coloring='lines'`` explicitly keeps
-    Plotly's colorscale-by-z line coloring, which ignores a line color
-    (``linestyle``/``linewidth`` still apply).
+    Contour boundaries are drawn black, solid, 2 wide by default; ``color``,
+    ``linestyle`` and ``linewidth`` set them for every set, and ``'set'`` for
+    any of them uses each set's own (see ``_contour_line_style``). With more
+    than one set the default ``contours_coloring='fill'`` becomes ``'none'``
+    (bare boundaries), since overlapping fills would hide each other;
+    ``color='set'`` (and ``linestyle='set'``) then tell the sets apart, and
+    the legend carries their styles instead of a colorbar. Passing
+    ``contours_coloring='lines'`` explicitly keeps Plotly's colorscale-by-z
+    line coloring, which ignores a line color (``linestyle``/``linewidth``
+    still apply).
     """
     z_list = z if isinstance(z, list) else [z]
     n_z = len(z_list)
@@ -4340,8 +4447,8 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
     # Filled contours from several sets would hide each other, so a multi-set
     # plot draws bare boundaries instead. 'none' — not Plotly's 'lines'
     # coloring, which paints the boundaries from the colorscale by z and
-    # ignores line.color — is what lets each set keep its own color, linestyle
-    # and linewidth.
+    # ignores line.color — is what lets the boundaries keep their color
+    # (each set's own, with color='set').
     use_coloring = ('none' if len(active_ds) > 1 and contours_coloring == 'fill'
                     else contours_coloring)
     show_colorbars = use_coloring != 'none'
@@ -4407,7 +4514,7 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
                 colorscale=colorscale or ds.hue_palette,
                 contours_coloring=use_coloring,
                 ncontours=ncontours, 
-                line=_contour_line_style(ds, use_coloring),
+                line=_contour_line_style(ds, use_coloring, color, linestyle, linewidth),
                 showscale=(show_colorbars and idx_ds == 0),
                 showlegend=(idx_z == 0),
                 colorbar=dict(
@@ -4436,15 +4543,17 @@ def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', 
                            ncontours=None, overlay_datasets=None,
                            suptitle=None, figsize=(12, 8), ncols=None, nrows=None,
                            darkmode=False, axis_limits=None, return_axes=False,
-                           hspace=None, vspace=None, spacing_ref=None):
+                           hspace=None, vspace=None, spacing_ref=None,
+                           color=None, linestyle=None, linewidth=None):
     """
     Contour plot where Subplots are organized by Dataset.
 
-    Boundaries take the set's ``color``, ``linestyle`` and ``linewidth``. With
-    several z variables in one panel the default ``'fill'`` coloring becomes
-    ``'lines'`` so the fills don't hide each other; each z keeps its own
-    colorbar and colors its lines from the colorscale, so the set's color
-    doesn't apply in that case (its linestyle and linewidth still do).
+    Boundaries are black, solid, 2 wide unless ``color``, ``linestyle`` or
+    ``linewidth`` says otherwise (``'set'``: each set's own). With several z
+    variables in one panel the default ``'fill'`` coloring becomes ``'lines'``
+    so the fills don't hide each other; each z keeps its own colorbar and
+    colors its lines from the colorscale, so ``color`` doesn't apply in that
+    case (``linestyle`` and ``linewidth`` still do).
     """
     active_ds = [d for d in list_of_datasets if d.select]
     z_list = z if isinstance(z, list) else [z]
@@ -4514,7 +4623,7 @@ def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', 
                 colorscale=colorscale or ds.hue_palette,
                 contours_coloring=use_coloring,
                 ncontours=ncontours,
-                line=_contour_line_style(ds, use_coloring),
+                line=_contour_line_style(ds, use_coloring, color, linestyle, linewidth),
                 showscale=(idx_ds == 0),
                 showlegend=(idx_ds == 0),
                 colorbar=dict(
@@ -5511,17 +5620,19 @@ def unipolar_contour(list_of_datasets, x, y, z, contours_coloring='fill', colors
                      direction='counterclockwise', rotation=None, hole=None,
                      suptitle=None, subplot_titles=None, darkmode=False, legend='above',
                      figsize=(12, 8), ncols=None, nrows=None, axis_limits=None,
-                     return_axes=False, hspace=None, vspace=None, spacing_ref=None):
+                     return_axes=False, hspace=None, vspace=None, spacing_ref=None,
+                     color=None, linestyle=None, linewidth=None):
     """
     Polar contour map, a subplot per ``z`` column, the datasets overlaid.
     ``x`` is the angle and ``y`` the radius, as in :func:`unipolar`.
 
     Each set's samples are gridded in (angle, radius) by ``_polar_field``, and
-    all the sets in a panel share its levels and colorbar. Boundaries take the
-    set's ``color``, ``linestyle`` and ``linewidth``. As in :func:`unicontour`,
-    more than one set turns the default ``'fill'`` into bare boundaries
-    (``'none'``), which the set colors tell apart, and ``'lines'`` colors each
-    level's line from the colorscale instead.
+    all the sets in a panel share its levels and colorbar. Boundaries are
+    styled as in :func:`unicontour`: black, solid, 2 wide unless ``color``,
+    ``linestyle`` or ``linewidth`` says otherwise (``'set'``: each set's own).
+    More than one set turns the default ``'fill'`` into bare boundaries
+    (``'none'``), which ``color='set'`` tells apart, and ``'lines'`` colors
+    each level's line from the colorscale instead.
     """
     z_list = z if isinstance(z, list) else [z]
     axis_limits = axis_limits or {}
@@ -5561,7 +5672,8 @@ def unipolar_contour(list_of_datasets, x, y, z, contours_coloring='fill', colors
             scaled.add(cell)
         traces = _polar_field_traces(
             field, _polar_levels(lo, hi, ncontours or _POLAR_NCONTOURS), (lo, hi),
-            coloring, colorscale or ds.hue_palette, _contour_line_style(ds, coloring),
+            coloring, colorscale or ds.hue_palette,
+            _contour_line_style(ds, coloring, color, linestyle, linewidth),
             (f"<b>{ds.title}</b><br>{x}: %{{theta:{num}}}<br>{y}: %{{r:{num}}}<br>"
              f"{zi}: %{{marker.color:{num}}}<extra></extra>"),
             thetaunit, name=f"{ds.index}: {ds.title}", group=f"group_{ds.index}",
@@ -5585,7 +5697,8 @@ def unipolar_contour_per_dataset(list_of_datasets, x, y, z, contours_coloring='f
                                  suptitle=None, darkmode=False, legend='above',
                                  figsize=(12, 8), ncols=None, nrows=None,
                                  axis_limits=None, return_axes=False,
-                                 hspace=None, vspace=None, spacing_ref=None):
+                                 hspace=None, vspace=None, spacing_ref=None,
+                                 color=None, linestyle=None, linewidth=None):
     """
     Polar contour map, a subplot per dataset, its ``z`` columns overlaid.
 
@@ -5594,6 +5707,7 @@ def unipolar_contour_per_dataset(list_of_datasets, x, y, z, contours_coloring='f
     Each ``z`` gets a legend entry and keeps the same levels in every panel,
     so one colorbar per ``z`` reads for them all: it hangs right of the grid,
     or beside the first panel when ``legend='right'`` has that margin.
+    Boundaries are styled as in :func:`unicontour_per_dataset`.
     """
     active = [d for d in list_of_datasets if d.select]
     if not active:
@@ -5641,7 +5755,8 @@ def unipolar_contour_per_dataset(list_of_datasets, x, y, z, contours_coloring='f
             scaled.add(zi)
         traces = _polar_field_traces(
             field, _polar_levels(lo, hi, ncontours or _POLAR_NCONTOURS), (lo, hi),
-            coloring, colorscale or ds.hue_palette, _contour_line_style(ds, coloring),
+            coloring, colorscale or ds.hue_palette,
+            _contour_line_style(ds, coloring, color, linestyle, linewidth),
             (f"<b>{zi}</b><br>{x}: %{{theta:{num}}}<br>{y}: %{{r:{num}}}<br>"
              f"Value: %{{marker.color:{num}}}<extra></extra>"),
             thetaunit, name=zi, group=zi, rank=1000 + z_list.index(zi),
@@ -6781,6 +6896,10 @@ class UnichartNotebook:
         # right-click → Copy Image. Toggle via set_copy_buttons.
         self.copy_buttons = True
 
+        # When True, loaded float64 columns are stored as float32, halving the
+        # memory a large load takes. Toggle via set_float32; see float32.
+        self._float32 = False
+
         self.suptitle = None
         # Optional text box pinned to the bottom of the figure (caption/footnote).
         # Like suptitle: set per-call via footer= or persist as this attribute.
@@ -7024,9 +7143,17 @@ class UnichartNotebook:
         for df, title in frames_and_titles:
             if _SET_ID_COL in df.columns:
                 df = df.drop(columns=_SET_ID_COL)
+            if self._float32:
+                df, _ = _to_float32(df)
             set_id = self._next_set_id
             self._next_set_id += 1
-            tagged = df.copy()
+            # Shallow unless fragmented: adding the id column leaves ``df`` as
+            # it was, and the concat below copies the rows anyway, so a deep
+            # copy is one more copy of every set held at the peak of a load.
+            # But a frame read_csv returns is one block per column, and
+            # stacking those is slower and hungrier than copying it into
+            # consolidated blocks first.
+            tagged = _consolidated(df.copy(deep=False))
             tagged[_SET_ID_COL] = set_id
             tagged_frames.append(tagged)
             metas.append((set_id, title, set(df.columns)))
@@ -7040,12 +7167,12 @@ class UnichartNotebook:
             # with one block per column (a 122-col frame ends up 122 blocks). The
             # concat itself is silent, but the fragmented frame is slow for column
             # access and trips a "DataFrame is highly fragmented" PerformanceWarning
-            # on the next per-column write (e.g. ds['x']=..., set_column). The
-            # trailing .copy() is a deliberate defragmentation — it consolidates the
-            # blocks; do not remove it as a redundant copy.
-            self._combined_df = pd.concat(
-                frames, ignore_index=True, sort=False
-            ).copy()
+            # on the next per-column write (e.g. ds['x']=..., set_column).
+            # _consolidated() is that deliberate defragmentation — done only
+            # when the stack actually fragmented, since it is a second copy of
+            # the whole frame held alongside the first.
+            self._combined_df = _consolidated(pd.concat(
+                frames, ignore_index=True, sort=False))
         self._set_row_pos = {}
         self._snapshot_columns()
 
@@ -7071,16 +7198,19 @@ class UnichartNotebook:
         kept = cdf.loc[cdf[_SET_ID_COL] != set_id]
         if _SET_ID_COL in new_df.columns:
             new_df = new_df.drop(columns=_SET_ID_COL)
-        tagged = new_df.copy()
+        if self._float32:
+            new_df, _ = _to_float32(new_df)
+        tagged = _consolidated(new_df.copy(deep=False))   # see _register_sets
         tagged[_SET_ID_COL] = set_id
         if kept.empty:
             self._combined_df = tagged.reset_index(drop=True)
         else:
-            # Trailing .copy() consolidates the row-stacked blocks; see the note in
-            # _register_set. Without it the frame stays one-block-per-column and the
-            # next per-column write warns about fragmentation.
-            self._combined_df = pd.concat(
-                [kept, tagged], ignore_index=True, sort=False).copy()
+            # Consolidates the row-stacked blocks when they fragmented; see the
+            # note in _register_sets. Without it the frame stays
+            # one-block-per-column and the next per-column write warns about
+            # fragmentation.
+            self._combined_df = _consolidated(pd.concat(
+                [kept, tagged], ignore_index=True, sort=False))
         self._set_row_pos = {}
         # The replacement frame defines this set's columns from scratch. It
         # also severs the link to any source file: the rows no longer come
@@ -7139,7 +7269,10 @@ class UnichartNotebook:
                         set_idx_column=set_idx_column, load_cols_as_vars=load_cols_as_vars))
                 return created
 
-        df = self._dedupe_columns(df).copy()
+        # Shallow: the columns added below stay off the caller's frame, and the
+        # rows are copied once, into the combined frame. A deep copy here held
+        # one more copy of the whole file at the peak of the load.
+        df = self._dedupe_columns(df).copy(deep=False)
 
         # Columns this call adds to the frame, recorded in each set's
         # provenance so a file-referenced session set gets them back on
@@ -7454,17 +7587,24 @@ class UnichartNotebook:
 
         # Runs of Datasets are registered together: one combined-frame rebuild
         # for uc.load(other.sets) instead of one per set.
+        #
+        # Every source is read before any loads, so a bad file loads nothing;
+        # each frame is let go once it is in, so the files already copied
+        # into the combined frame aren't also held as read.
         pending = []
-        for item in coerced:
+        for i, item in enumerate(coerced):
             if isinstance(item, Dataset):
                 pending.append(item)
                 continue
             self._load_datasets(pending, title)
             pending = []
+            coerced[i] = None
             frame, default_title, src_path, custom = item
+            del item
             created = self.load_df(frame, title=resolve_title(frame, default_title),
                                    set_name_column=set_name_column, set_idx_column=set_idx_column,
                                    load_cols_as_vars=load_cols_as_vars)
+            del frame
             annotate(created, src_path, custom)
         self._load_datasets(pending, title)
 
@@ -7633,7 +7773,9 @@ class UnichartNotebook:
         resolved source file, or None for in-memory sources; custom is True when
         a user-supplied reader read the file (see :meth:`_reader_for`)."""
         if isinstance(source, pd.DataFrame):
-            return self._dedupe_columns(source).copy(), None, None, False
+            # Not copied: load_df keeps the caller's frame as it was, and a
+            # copy here was held for every source until the last one loaded.
+            return self._dedupe_columns(source), None, None, False
         if isinstance(source, (str, Path)):
             path = Path(source)
             if not path.is_file():
@@ -7688,7 +7830,7 @@ class UnichartNotebook:
         'suptitle_size', 'footer_size', 'legend_size', 'axes_title_size',
         'axes_tick_size', 'subplot_title_size', 'colorbar_size', 'hover_size',
         'table_header_size', 'table_cell_size',
-        'static_images', 'static_scale', 'copy_buttons',
+        'static_images', 'static_scale', 'copy_buttons', 'float32',
     )
 
     _SESSION_MARKER_SENTINEL = '__MARKER_BY_INDEX__'
@@ -12369,6 +12511,77 @@ class UnichartNotebook:
         state = "on" if self.static_images else "off"
         print(f"Static images {state} (scale={self.static_scale}).")
 
+    @property
+    def float32(self):
+        """Whether loaded float columns are stored as float32 (default False).
+
+        Setting it True converts what is already loaded as well, quietly;
+        :meth:`set_float32` does the same and reports what it converted.
+        Setting it False stores later loads as float64 again and leaves
+        converted columns as they are, since the digits they lost don't come
+        back.
+        """
+        return self._float32
+
+    @float32.setter
+    def float32(self, enabled):
+        enabled = bool(enabled)
+        if enabled and not self._float32:
+            self._float32 = True
+            self._convert_to_float32()
+        self._float32 = enabled
+
+    def _convert_to_float32(self):
+        """Store the loaded float64 columns float32 allows as float32. Returns
+        the labels kept as float64."""
+        self._reconcile_columns()
+        converted, kept = _to_float32(self._combined_df)
+        if converted is not self._combined_df:
+            self._combined_df = converted
+            self._snapshot_columns()
+        return kept
+
+    def set_float32(self, enabled=True):
+        """Store loaded float columns as float32 (``enabled=True``) instead of
+        float64, halving the memory the data takes — and what a large load
+        peaks at.
+
+        float32 keeps about 7 significant digits, which no plot or table
+        shows; float64's 15 or so matter only at the extremes. A column whose
+        rounding would be visible stays float64 regardless: one whose values
+        sit on a large offset from their spread, such as epoch-second
+        timestamps, which float32 would round to minutes (see
+        ``FLOAT32_TOLERANCE``). Each column is checked set by set as it loads,
+        and a column float64 in any set is float64 in all of them.
+
+        Turning it on converts what is already loaded, so it can be set before
+        or after loading; set it first to also save the float64 peak of the
+        load itself. Columns added later through ``ds['x'] = ...`` or
+        :meth:`set_column` stay float64. Saved with the session.
+
+        Examples
+        --------
+        uc.set_float32()          # before loading a large set of files
+        uc.load(paths)
+        uc.set_float32(False)     # later loads keep float64 again
+        """
+        enabled = bool(enabled)
+        if not enabled:
+            self._float32 = False
+            print("Loaded floats stored as float64 from now on "
+                  "(converted columns stay float32).")
+            return
+        before = self._combined_df.memory_usage(deep=False).sum()
+        self._float32 = True
+        kept = self._convert_to_float32()
+        saved = before - self._combined_df.memory_usage(deep=False).sum()
+        print(f"Loaded floats stored as float32"
+              + (f"; {saved / 1e6:,.0f} MB freed" if saved > 0 else "") + ".")
+        if kept:
+            names = ', '.join(map(str, kept[:5])) + (', ...' if len(kept) > 5 else '')
+            print(f"Kept {len(kept)} column(s) as float64, where float32 would "
+                  f"round visibly: {names}")
+
     def set_copy_buttons(self, enabled=True):
         """Show (default) or hide the '⧉ copy' button above interactive plots.
 
@@ -13489,7 +13702,7 @@ class UnichartNotebook:
                     colorscale=None, interpolate=True, interp_res=100, interp_method='linear',
                     ncontours=None, overlay_sets=None,
                     suptitle=None, footer=None, figsize=None, ncols=None, nrows=None, suppress_legends=None,
-                    hspace=None, vspace=None):
+                    hspace=None, vspace=None, color=None, linestyle=None, linewidth=None):
         """
         Unified interface for Contour Plots.
 
@@ -13502,14 +13715,20 @@ class UnichartNotebook:
         are drawn on every subplot (including ``by='sets'``, where each subplot
         is a different dataset). Defaults to ``None`` (no overlay).
 
-        Contour boundaries are drawn in each set's own ``color``,
-        ``linestyle`` and ``linewidth``. ``contours_coloring`` defaults to
-        ``'fill'``; when a single plot would stack several filled fields on
-        each other (more than one set with ``by='vars'``, or more than one
-        ``z`` with ``by='sets'``) it drops to bare boundaries so they stay
-        readable. The one mode where a set's color has no effect is an
-        explicit ``contours_coloring='lines'``, which is Plotly's
-        "color the lines from the colorscale by z" mode.
+        ``color``, ``linestyle`` and ``linewidth`` style the contour
+        boundaries of every set. Left at ``None`` they are black, solid
+        (``'-'``) and 2 wide; ``'set'`` for any of them uses each set's own
+        instead (e.g. ``color='set'`` to tell several sets apart, or all
+        three for the sets' full line style). Overlay sets keep their own
+        style.
+
+        ``contours_coloring`` defaults to ``'fill'``; when a single plot
+        would stack several filled fields on each other (more than one set
+        with ``by='vars'``, or more than one ``z`` with ``by='sets'``) it
+        drops to bare boundaries so they stay readable — all black unless
+        ``color='set'``. The one mode where ``color`` has no effect is
+        ``contours_coloring='lines'``, which is Plotly's "color the lines
+        from the colorscale by z" mode.
 
         ``suppress_legends`` (default False) falls back to the
         ``set_default_format`` default when not passed.
@@ -13530,6 +13749,8 @@ class UnichartNotebook:
             print("Error: Contour plots require a 'z' variable to map to color.")
             return
 
+        _check_contour_line_overrides(color, linestyle, linewidth)
+
         overlay_datasets = (self._get_uset_slice(overlay_sets)
                             if overlay_sets is not None else [])
 
@@ -13544,6 +13765,7 @@ class UnichartNotebook:
                 ncontours=ncontours, overlay_datasets=overlay_datasets,
                 suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True,
+                color=color, linestyle=linestyle, linewidth=linewidth,
                 **self._spacing_kwargs(hspace, vspace),
             )
         else:
@@ -13554,6 +13776,7 @@ class UnichartNotebook:
                 ncontours=ncontours, overlay_datasets=overlay_datasets,
                 suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True,
+                color=color, linestyle=linestyle, linewidth=linewidth,
                 **self._spacing_kwargs(hspace, vspace),
             )
             
@@ -13573,7 +13796,8 @@ class UnichartNotebook:
 
         return fig
 
-    contour_defaults = _method_defaults_setter(contour, "colorscale='Viridis', ncontours=20")
+    contour_defaults = _method_defaults_setter(
+        contour, "colorscale='Viridis', ncontours=20, color='set', linewidth=1")
 
     # ------------------------------------------------------------------
     # The polar Command
@@ -13585,7 +13809,8 @@ class UnichartNotebook:
               interp_res=100, interp_method='linear', ncontours=None,
               overlay_sets=None, color=None, subplot_titles=None, suptitle=None,
               footer=None, figsize=None, ncols=None, nrows=None, legend=None,
-              suppress_legends=None, hspace=None, vspace=None, marker_interval=None):
+              suppress_legends=None, hspace=None, vspace=None, marker_interval=None,
+              linestyle=None, linewidth=None):
         """Polar plot: ``x`` is the angle and ``y`` the radius. Given ``z``, a
         polar contour map of ``z`` over the angle/radius plane instead.
 
@@ -13622,9 +13847,9 @@ class UnichartNotebook:
             Fraction of the radius left empty in the middle (0 to below 1).
         contours_coloring : {'fill', 'lines', 'none'}
             With ``z``. 'fill' (default) fills the bands between levels and
-            outlines them in the set's line style; 'lines' draws each level
-            in its colorscale color; 'none' draws the levels in the set's
-            color alone. As in ``contour``, more than one set (by='vars') or
+            outlines them in the boundary style (``color``, ``linestyle``,
+            ``linewidth``); 'lines' draws each level in its colorscale
+            color; 'none' draws the levels in the boundary color alone. As in ``contour``, more than one set (by='vars') or
             ``z`` column (by='sets') turns 'fill' into 'none' / 'lines', so
             the fields don't hide each other.
         colorscale : str or list, optional
@@ -13649,7 +13874,14 @@ class UnichartNotebook:
             With ``z``: datasets drawn over the field as points or lines, as
             in ``contour``.
         color : str, optional
-            One color for every dataset (without ``z``, by='vars').
+            Without ``z`` (by='vars'): one color for every dataset. With
+            ``z``: the color of every set's contour boundaries — black when
+            ``None``, each set's own with ``'set'`` (no effect under
+            ``contours_coloring='lines'``).
+        linestyle, linewidth : optional
+            With ``z``: the linestyle / linewidth of every set's contour
+            boundaries, as in ``contour``: solid (``'-'``) and 2 when
+            ``None``, each set's own with ``'set'``.
         marker_interval : optional
             Without ``z``: show only some of each trace's markers, as in
             ``plot``.
@@ -13704,6 +13936,7 @@ class UnichartNotebook:
                                         or val < low):
                     raise ValueError(f"{name} must be a whole number of at least {low}, "
                                      f"got {val!r}")
+            _check_contour_line_overrides(color, linestyle, linewidth)
 
         legend = self._apply_default('legend', legend, 'above')
         suppress_legends = self._apply_default('suppress_legends', suppress_legends, False)
@@ -13728,16 +13961,20 @@ class UnichartNotebook:
                              f"column, got x={x!r}, y={y!r}; put several fields in z.")
         per_set = by in ('sets', 'datasets')
         ignored = [name for name, val, unused in (
-            ('color', color, contour or per_set),
+            ('color', color, per_set and not contour),
             ('marker_interval', marker_interval, contour),
-            ('overlay_sets', overlay_sets, not contour)) if val is not None and unused]
+            ('overlay_sets', overlay_sets, not contour),
+            ('linestyle', linestyle, not contour),
+            ('linewidth', linewidth, not contour)) if val is not None and unused]
         if ignored:
             # stacklevel 3: past the _uses_method_defaults wrapper, to the
             # caller's line.
             warnings.warn(f"polar() ignores {', '.join(ignored)} here: marker_interval= is "
                           "for points/lines (without z), color= is for "
                           "points/lines with by='vars' (by='sets' colors by variable; "
-                          "use var_format), overlay_sets= is for contours (with z).",
+                          "use var_format) or for contour boundaries (with z), "
+                          "overlay_sets=, linestyle= and linewidth= are for contours "
+                          "(with z).",
                           UserWarning, stacklevel=3)
 
         x_list = x if isinstance(x, list) else [x]
@@ -13763,6 +14000,7 @@ class UnichartNotebook:
                 interp_method=interp_method, ncontours=ncontours,
                 overlay_datasets=(self._get_uset_slice(overlay_sets)
                                   if overlay_sets is not None else []),
+                color=color, linestyle=linestyle, linewidth=linewidth,
                 **common)
             if per_set:
                 fig = unipolar_contour_per_dataset(**contour_kw)
@@ -13777,7 +14015,8 @@ class UnichartNotebook:
                 display_parms=self.display_parms, marker_interval=marker_interval, **common)
             cells = [(x_list[0], y_list[0])] * len(active_sets)
         else:
-            fig = unipolar(list_of_datasets=self.sets, x=x, y=y, color=color,
+            fig = unipolar(list_of_datasets=self.sets, x=x, y=y,
+                           color=None if color == 'set' else color,
                            display_parms=self.display_parms,
                            subplot_titles=subplot_titles, marker_interval=marker_interval,
                            variable_formats=self.variable_formats, **common)
@@ -13809,7 +14048,7 @@ class UnichartNotebook:
         return self._finalize(fig, suppress_legends, footer=footer or self.footer)
 
     polar_defaults = _method_defaults_setter(
-        polar, "direction='clockwise', interp_method='cubic'")
+        polar, "direction='clockwise', interp_method='cubic', linestyle='--'")
 
     def table_read(self, uset_slice, x_col, y_col, x_in,
                    kind=None, fill_value='extrapolate', bounds_error=False):
@@ -14298,7 +14537,7 @@ class UnichartNotebook:
         decimal string (never scientific notation). Non-floats (e.g. the ``'-'``
         fill value or string columns) pass through unchanged.
         """
-        if not isinstance(v, float) or not np.isfinite(v):
+        if not isinstance(v, (float, np.floating)) or not np.isfinite(v):
             return v
         if v == 0:
             return f"{0:.{sig_figs - 1}f}"
@@ -14315,7 +14554,7 @@ class UnichartNotebook:
         the ``'-'`` fill value or string columns) pass through unchanged, as in
         :meth:`_sig_fig_str`.
         """
-        if not isinstance(v, float) or not np.isfinite(v):
+        if not isinstance(v, (float, np.floating)) or not np.isfinite(v):
             return v
         return f"{v:.{decimals}f}"
 
@@ -14332,7 +14571,7 @@ class UnichartNotebook:
         for col in display_df.columns:
             if display_df[col].dtype.kind in ('f', 'O'):
                 display_df[col] = display_df[col].apply(
-                    lambda x: f"{x:{fmt}}" if isinstance(x, float) else x)
+                    lambda x: f"{x:{fmt}}" if isinstance(x, (float, np.floating)) else x)
         return display_df
 
     def _build_table_figure(self, final_df, title=None):
@@ -15713,7 +15952,7 @@ class UnichartNotebook:
             # No explicit argument: each set's own sig_figs / decimals (see
             # :meth:`sig_figs`, :meth:`decimals`), falling back to .4g.
             stat_fmt = lambda v, f: (f(v) if f else
-                                     (f"{v:.4g}" if isinstance(v, float) else v))
+                                     (f"{v:.4g}" if isinstance(v, (float, np.floating)) else v))
         set_fmt = {ds.index: self._set_display_fmt(ds.sig_figs, ds.decimals)
                    for ds in self.sets}
         row_fmt = [set_fmt.get(i) for i in final_df["Set"]]
