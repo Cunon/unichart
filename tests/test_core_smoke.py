@@ -110,6 +110,114 @@ def test_by_sets_with_selection_and_query():
     _draw(call)
 
 
+def test_subplot_queries():
+    """Each subplot keeps only the rows its query matches; a single y gets a
+    panel per query, titled by it, and a set's legend entry lands on the
+    first panel it is actually drawn in."""
+    nb = _notebook()
+    with redirect_stdout(io.StringIO()):
+        nb.plot('time_s', 'cht_c', subplot_queries=['rpm > 1e9', 'phase == "idle"'])
+    fig = nb.last_fig
+    assert [a.text for a in fig.layout.annotations][:2] == ['rpm > 1e9', 'phase == "idle"']
+    assert {t.xaxis for t in fig.data} == {'x2'}       # nothing matched panel 1
+    assert all(t.showlegend for t in fig.data)
+    idle = pd.read_csv(DATA_CSV).query('phase == "idle"')
+    assert sum(len(t.x) for t in fig.data) == len(idle)
+
+    with redirect_stdout(io.StringIO()):
+        nb.plot('time_s', ['cht_c', 'egt_c'], subplot_queries=[None, 'rpm > 3000'])
+    full, part = ([t for t in nb.last_fig.data if t.xaxis == ax] for ax in ('x', 'x2'))
+    assert sum(len(t.x) for t in part) < sum(len(t.x) for t in full)
+
+    try:
+        with redirect_stdout(io.StringIO()):
+            nb.plot('time_s', 'cht_c', subplot_queries=['no_such_col > 1', None])
+    except ValueError as e:
+        assert 'no_such_col' in str(e)
+    else:
+        raise AssertionError('a query no set can evaluate should raise')
+
+
+def test_subplot_scales():
+    """Per-subplot ranges, keyed by parameter like scale(), override scale()
+    on whichever axis shows the parameter: None keeps scale()'s limit and
+    'auto' drops it."""
+    nb = _notebook()
+    with redirect_stdout(io.StringIO()):
+        nb.scale('egt_c', (0, 1000))
+        nb.plot('time_s', 'egt_c', subplot_scales=[
+            None, {'egt_c': (100, 200), 'time_s': None},
+            {'time_s': (0, 60), 'egt_c': 'auto'}])
+    lay = nb.last_fig.layout
+    assert tuple(lay.yaxis.range) == (0, 1000)
+    assert tuple(lay.yaxis2.range) == (100, 200) and lay.xaxis2.range is None
+    assert lay.yaxis3.range is None and tuple(lay.xaxis3.range) == (0, 60)
+    assert not lay.annotations                       # scales alone: no titles
+
+    with warnings.catch_warnings(record=True) as caught, \
+            redirect_stdout(io.StringIO()):
+        warnings.simplefilter('always')
+        nb.plot('time_s', ['cht_c', 'egt_c'],
+                subplot_scales=[{'cht_c': (0, 300)}, {'cht': (0, 1)}])
+    assert any("['cht']" in str(w.message) for w in caught)
+    assert tuple(nb.last_fig.layout.yaxis.range) == (0, 300)
+
+    for bad in ([(1, 2)], [{'egt_c': (1, 2, 3)}], {'egt_c': (0, 1)}):
+        try:
+            nb.plot('time_s', 'egt_c', subplot_scales=bad)
+        except TypeError:
+            pass
+        else:
+            raise AssertionError(f'subplot_scales={bad!r} should raise')
+
+
+def test_subplot_sets_queries_and_scales_together():
+    """The three lists line up panel by panel, need the same length, are
+    recorded in their JSON form, and are ignored (with a warning) by by='sets'."""
+    nb = _notebook()
+    with redirect_stdout(io.StringIO()):
+        nb.plot('time_s', 'egt_c', subplot_sets=['0:2', 3],
+                subplot_queries=[None, 'rpm > 2000'], subplot_scales=[None, {'egt_c': (0, 900)}])
+    fig = nb.last_fig
+    assert [a.text for a in fig.layout.annotations][:2] == ['Sets 0, 1', 'Set 3 · rpm > 2000']
+    assert tuple(fig.layout.yaxis2.range) == (0, 900)
+    assert nb._last_plot_call['kwargs']['subplot_scales'] == [None, {'egt_c': [0, 900]}]
+
+    try:
+        nb.plot('time_s', 'egt_c', subplot_sets=[0, 1], subplot_queries=['rpm > 1'])
+    except ValueError as e:
+        assert 'same number of entries' in str(e)
+    else:
+        raise AssertionError('mismatched lists should raise')
+
+    with warnings.catch_warnings(record=True) as caught, \
+            redirect_stdout(io.StringIO()):
+        warnings.simplefilter('always')
+        nb.plot('time_s', 'egt_c', by='sets', subplot_queries=['rpm > 1'],
+                subplot_scales=[{'egt_c': (0, 1)}])
+    said = [str(w.message) for w in caught]
+    assert any('ignores subplot_queries' in s for s in said)
+    assert any('ignores subplot_scales' in s for s in said)
+
+
+def test_subplot_queries_and_scales_session():
+    """A saved session replays them, and a column whitelist keeps the columns
+    a subplot query names."""
+    nb = _notebook()
+    with tempfile.TemporaryDirectory() as tmp, redirect_stdout(io.StringIO()):
+        nb.plot('time_s', 'cht_c', subplot_queries=['rpm > 3000', None],
+                subplot_scales=[{'cht_c': (0, 300)}, None])
+        path = Path(tmp) / 'session.json'
+        nb.save_session(path, embed_data='all', parms=['time_s', 'cht_c'])
+
+        fresh = UnichartNotebook()
+        fresh.set_copy_buttons(False)
+        fresh.load_session(path)
+    assert 'rpm' in fresh.sets[0].columns
+    assert [len(t.x) for t in fresh.last_fig.data] == [len(t.x) for t in nb.last_fig.data]
+    assert tuple(fresh.last_fig.layout.yaxis.range) == (0, 300)
+
+
 def test_formatting_and_decorations():
     def call(nb):
         nb.var_format('cht_c', color='firebrick', linestyle='--')
