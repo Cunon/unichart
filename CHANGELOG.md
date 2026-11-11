@@ -30,3 +30,20 @@ First release on PyPI.
   radius. It has a `polar_defaults()` sister, and works as a dashboard panel and
   a CLI `--panel` method. The explorer has a new "Inlet survey" example for it,
   and the gallery an "In the round" section.
+- Subplot titles no longer land on the legend. The top row's titles get room
+  of their own above the plot, sized from their font and line count, and the
+  above-legend is sized by its measured height. Without an above-legend the
+  titles clear the suptitle instead. `title_gap` and `legend_gap` (px, default
+  12) set the space under the suptitle and under the legend:
+  `uc.legend_gap = 24`, `set_default_format(title_gap=, legend_gap=)` or
+  `new_uc(...)`. See `demo_notebooks/subplot_title_spacing_demo.ipynb`.
+- `markersize(..., 0)` now turns that set's (or variable's) markers off, as
+  `marker('none')` does. Before, Plotly still drew each size-0 marker's outline.
+- `bar(..., overlay_sets=)` compares bars against other datasets' values of
+  the same variable: the chosen sets draw one marker per category (the `agg`
+  of their own rows) in their own color and symbol instead of bars, selected
+  or not. In `by='sets'` they appear on every panel over the matching bar.
+  A dict pairs them with particular bar sets instead,
+  `overlay_sets={0: 1, 3: [2, 4]}`: set 1's markers sit over set 0's bars and
+  sets 2 and 4 over set 3's (in `by='sets'`, on those sets' panels only).
+  `by='dataset_x'` ignores them with a warning.

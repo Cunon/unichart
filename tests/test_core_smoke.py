@@ -218,6 +218,80 @@ def test_subplot_queries_and_scales_session():
     assert tuple(fresh.last_fig.layout.yaxis.range) == (0, 300)
 
 
+def _axis_titles(fig, cells, secondary_y=False):
+    """``(x title, y title)`` of each ``(row, col)`` subplot in ``cells``."""
+    subs = [fig.get_subplot(r, c, secondary_y=secondary_y) for r, c in cells]
+    return [(s.xaxis.title.text, s.yaxis.title.text) for s in subs]
+
+
+def test_axis_labels():
+    """labels='all' (the default) titles every subplot; 'auto' keeps a title
+    its column / row shares only on the outer subplot, and 'outer' keeps only
+    those whatever the others say."""
+    nb = _notebook()
+    cells = [(1, 1), (1, 2), (2, 1)]
+    y = ['cht_c', 'egt_c', 'rpm']
+    with redirect_stdout(io.StringIO()):
+        nb.plot('time_s', y, ncols=2)
+    assert _axis_titles(nb.last_fig, cells) == [('time_s', v) for v in y]
+
+    with redirect_stdout(io.StringIO()):
+        nb.plot('time_s', y, ncols=2, labels='auto')
+    # Column 1's x title moves to its bottom subplot; column 2's single
+    # subplot is its bottom one. Row 1's y titles differ, so both stay.
+    assert _axis_titles(nb.last_fig, cells) == [
+        (None, 'cht_c'), ('time_s', 'egt_c'), ('time_s', 'rpm')]
+    assert nb._last_plot_call['kwargs']['labels'] == 'auto'
+
+    with redirect_stdout(io.StringIO()):
+        nb.plot('time_s', y, ncols=2, labels='outer')
+    assert _axis_titles(nb.last_fig, cells) == [
+        (None, 'cht_c'), ('time_s', None), ('time_s', 'rpm')]
+
+    nb.y_label = 'Temperature'
+    with redirect_stdout(io.StringIO()):
+        nb.plot('time_s', ['cht_c', 'egt_c'], labels='auto')
+    assert _axis_titles(nb.last_fig, [(1, 1), (1, 2)]) == [
+        ('time_s', 'Temperature'), ('time_s', None)]
+
+    try:
+        nb.plot('time_s', y, labels='shared')
+    except ValueError as e:
+        assert 'shared' in str(e)
+    else:
+        raise AssertionError('an unknown labels mode should raise')
+
+
+def test_axis_labels_by_sets_and_elsewhere():
+    """by='sets' places its secondary y title on the last subplot of each row;
+    'ymult' warns that it ignores labels; bar keeps its outer titles."""
+    nb = _notebook()
+    cells = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    with redirect_stdout(io.StringIO()):
+        nb.plot('time_s', ['cht_c', 'egt_c'], by='sets', ncols=2, labels='auto')
+    fig = nb.last_fig
+    assert _axis_titles(fig, cells) == [
+        (None, 'cht_c'), (None, None), ('time_s', 'cht_c'), ('time_s', None)]
+    assert [y2 for _, y2 in _axis_titles(fig, cells, secondary_y=True)] == [
+        None, 'egt_c', None, 'egt_c']
+
+    with redirect_stdout(io.StringIO()):
+        nb.plot('time_s', ['cht_c', 'egt_c'], by='sets', ncols=2)
+    assert {t for pair in _axis_titles(nb.last_fig, cells) for t in pair} == {
+        'time_s', 'cht_c'}
+
+    with warnings.catch_warnings(record=True) as caught, \
+            redirect_stdout(io.StringIO()):
+        warnings.simplefilter('always')
+        nb.plot('time_s', ['cht_c', 'egt_c'], by='ymult', labels='outer')
+    assert any("ignores labels='outer'" in str(w.message) for w in caught)
+
+    with redirect_stdout(io.StringIO()):
+        nb.bar('phase', ['fuel_kgh', 'eta_pct', 'rpm'], ncols=2)
+    assert [x for x, _ in _axis_titles(nb.last_fig, [(1, 1), (1, 2), (2, 1)])] == [
+        None, 'phase', 'phase']
+
+
 def test_formatting_and_decorations():
     def call(nb):
         nb.var_format('cht_c', color='firebrick', linestyle='--')
@@ -228,6 +302,40 @@ def test_formatting_and_decorations():
         nb.highlight('time_s', (300, 450), color='orange', alpha=0.12)
         nb.plot(x='time_s', y='cht_c')
     _draw(call)
+
+
+def test_markersize_zero_hides_markers():
+    """markersize 0 turns a set's (or a variable's) markers off, as marker
+    'none' does, in every builder that draws points."""
+    def modes(nb, call):
+        with redirect_stdout(io.StringIO()):
+            call()
+        return {tr.name: tr.mode for tr in nb.last_fig.data
+                if tr.type in ('scatter', 'scattergl', 'scatterpolar')}
+
+    nb = _notebook()
+    nb.markersize(0, 0)
+    got = modes(nb, lambda: nb.plot(x='time_s', y='cht_c'))
+    off = [m for n, m in got.items() if n.startswith('0:')]
+    assert off and all('markers' not in m for m in off), got
+    assert any('markers' in m for n, m in got.items() if not n.startswith('0:')), got
+
+    nb.linestyle(0, '-')
+    got = modes(nb, lambda: nb.plot(x='time_s', y='cht_c'))
+    assert all(m == 'lines' for n, m in got.items() if n.startswith('0:')), got
+
+    nb.markersize('all', 0)
+    for call in (lambda: nb.plot(x='time_s', y='cht_c', by='sets'),
+                 lambda: nb.plot_marginal(x='rpm', y='torque_nm'),
+                 lambda: nb.polar(x='time_s', y='rpm')):
+        got = modes(nb, call)
+        assert got and all('markers' not in m for m in got.values()), got
+
+    nb = _notebook()
+    nb.markersize('cht_c', 0)
+    got = modes(nb, lambda: nb.plot_ymult(x='time_s', y=['cht_c', 'rpm']))
+    assert all('markers' not in m for n, m in got.items() if 'cht_c' in n), got
+    assert any('markers' in m for n, m in got.items() if 'rpm' in n), got
 
 
 def test_full_legend_with_reference_line():
@@ -562,6 +670,8 @@ PLOT_DEFAULT_ATTRS = {
     'nrows': (3, (-1, 2.0)),
     'legend_scroll': (False, (0, 'no')),
     'suppress_legends': (True, (1, 'yes')),
+    'title_gap': (20, (-1, 'wide', True)),
+    'legend_gap': (24.5, (-3, '20px', False)),
 }
 
 
@@ -715,6 +825,31 @@ def test_font_size_attributes():
     assert len([w for w in caught if 'unusually large' in str(w.message)]) == 1
 
 
+def test_font_sizes_reach_hue_colorbars_and_group_titles():
+    """colorbar_size reaches a numeric hue's colorbar, which lives on a layout
+    coloraxis rather than a trace, and legend_size a grouped legend's titles."""
+    def hue(nb):
+        nb.set_font_sizes(colorbar=21, legend=17)
+        nb.plot('time_s', 'cht_c', hue='rpm')
+    fig = _draw(hue)
+    used = {t.marker.coloraxis for t in fig.data if t.marker.coloraxis}
+    assert used
+    for ca in used:
+        cb = fig.layout[ca].colorbar
+        assert cb.tickfont.size == cb.title.font.size == 21
+
+    def no_hue(nb):
+        nb.set_font_sizes(colorbar=21)
+        nb.plot('time_s', 'cht_c')
+    assert not _draw(no_hue).layout.coloraxis.to_plotly_json()   # unused: left alone
+
+    def grouped(nb):
+        nb.set_font_sizes(legend=17)
+        nb.plot_ymult('time_s', ['cht_c', 'egt_c'])
+    legend = _draw(grouped).layout.legend
+    assert legend.font.size == legend.grouptitlefont.size == 17
+
+
 def test_plot_size_attribute():
     """nb.plot_size is set_plot_size's setting, in the same inches."""
     nb = _notebook()
@@ -774,6 +909,74 @@ def test_plot_size_in_sessions():
             older = UnichartNotebook()
             older.load_session(path)
         assert older.plot_size == (4.6, None)
+
+
+TWO = dict(x='rpm', y=['torque_nm', 'power_kw'])
+
+
+def _top(call):
+    """``(top margin, legend y, height)`` of the figure ``call(nb)`` draws."""
+    lay = _draw(call).layout
+    return lay.margin.t, lay.legend.y, lay.height
+
+
+def _band_growth(titles, setup=lambda nb: None, **kwargs):
+    """How much the top margin grows when the panels get ``titles``."""
+    def draw(subplot_titles):
+        def call(nb):
+            setup(nb)
+            nb.plot(**TWO, subplot_titles=subplot_titles, **kwargs)
+        return _top(call)[0]
+    return draw(titles) - draw(None)
+
+
+def test_top_band_makes_room_for_subplot_titles():
+    """The top row's subplot titles hang above the panels, into the top
+    margin: it grows by their height so they clear the legend (or, without
+    one, the suptitle), and a taller title — bigger font, more lines — gets
+    more."""
+    line = 16.7 * 1.3                        # matplotlib style's 12 pt titles
+    one = _band_growth(['Torque', 'Power'])
+    assert one >= line
+    assert _band_growth(['Torque<br>(N·m)', 'Power']) >= one + line - 0.5
+    big = _band_growth(['Torque', 'Power'],
+                       setup=lambda nb: nb.set_font_sizes(subplot_title=30))
+    assert big >= one + (30 - 16.7) * 1.3 - 0.5
+    # A side legend: the titles clear the suptitle instead.
+    assert _band_growth(['Torque<br>(N·m)', 'Power'], legend='right') >= line
+    # Pinned plot area: same room, and the pinned panel height holds.
+    pinned = _band_growth(['Torque', 'Power'],
+                          setup=lambda nb: nb.set_plot_size(4, 2.5))
+    assert pinned >= line
+
+    def pinned_titled(nb):
+        nb.set_plot_size(4, 2.5)
+        nb.plot(**TWO, subplot_titles=['Torque<br>(N·m)', 'Power'])
+    fig = _draw(pinned_titled)
+    yax = fig.layout.yaxis.domain
+    m = fig.layout.margin
+    paper_h = fig.layout.height - m.t - (80 if m.b is None else m.b)
+    assert abs(paper_h * (yax[1] - yax[0]) - 250) < 1
+
+
+def test_title_and_legend_gaps():
+    """title_gap is the space under the suptitle (the legend moves down by
+    it), legend_gap the space under the legend; each grows the top margin by
+    exactly the change, and 0 still keeps the subplot titles off the legend."""
+    def gaps(title_gap=None, legend_gap=None):
+        def call(nb):
+            nb.title_gap, nb.legend_gap = title_gap, legend_gap
+            nb.plot(**TWO, subplot_titles=['Torque', 'Power'], suptitle='Dyno')
+        return _top(call)
+    t0, y0, h = gaps()
+    t1, y1, _ = gaps(title_gap=40)
+    assert abs((t1 - t0) - 28) < 1e-6 and abs((y0 - y1) * h - 28) < 1e-6
+    t2, y2, _ = gaps(legend_gap=40)
+    assert abs((t2 - t0) - 28) < 1e-6 and y2 == y0
+    t3, _, _ = gaps(title_gap=0, legend_gap=0)
+    assert t0 - t3 == 24
+    assert _band_growth(['Torque', 'Power'], setup=lambda nb: setattr(
+        nb, 'legend_gap', 0)) >= 16.7 * 1.3
 
 
 def test_session_skips_a_bad_attribute_value():
@@ -994,6 +1197,126 @@ def test_method_defaults_in_sessions():
         assert 'bar_defaults(legend=) ignored' in out.getvalue()
         assert "defaults for 'teleport' ignored" in out.getvalue()
         assert newer.bar_defaults() == {'agg': 'sum'}
+
+
+def _set_means(nb, idx, col):
+    """``col``'s per-phase mean and row count for set ``idx``, by phase."""
+    g = nb.sets[idx].cols(['phase', col]).groupby('phase')[col]
+    return g.mean().to_dict(), g.count().to_dict()
+
+
+def test_bar_overlay_sets():
+    """overlay_sets draws the chosen sets as one marker per category (the agg
+    of their own rows) in their own style, never as bars, selected or not."""
+    nb = _notebook()
+    nb.select(0)
+    with redirect_stdout(io.StringIO()):
+        fig = nb.bar(x='phase', y='fuel_kgh', overlay_sets=[1, 2])
+    bars = [t for t in fig.data if t.type == 'bar']
+    marks = [t for t in fig.data if t.type == 'scatter']
+    assert [t.name for t in bars] == [nb.sets[0].title_format]
+    assert [t.name for t in marks] == [nb.sets[1].title_format, nb.sets[2].title_format]
+    for t, idx in zip(marks, (1, 2)):
+        means, counts = _set_means(nb, idx, 'fuel_kgh')
+        drawn = dict(zip(t.x, t.y))
+        assert drawn.keys() == means.keys()
+        assert all(abs(drawn[k] - means[k]) < 1e-9 for k in means)
+        assert dict(zip(t.x, t.customdata)) == counts       # the set's own n
+        assert t.marker.color == nb.sets[idx].color
+        assert t.offsetgroup == 'overlay_sets' and t.showlegend
+    assert marks[0].marker.symbol != marks[1].marker.symbol
+    assert nb._last_plot_call['kwargs']['overlay_sets'] == [1, 2]
+
+    # A selected overlay set is drawn as markers only, not as bars too.
+    nb.select('all')
+    with redirect_stdout(io.StringIO()):
+        fig = nb.bar(x='phase', y=['fuel_kgh', 'eta_pct'], overlay_sets='1:3')
+    bar_names = {t.name for t in fig.data if t.type == 'bar'}
+    assert bar_names == {nb.sets[0].title_format, nb.sets[3].title_format}
+    marks = [t for t in fig.data if t.type == 'scatter']
+    assert len(marks) == 4                                  # 2 sets x 2 panels
+    assert sum(t.showlegend for t in marks) == 2            # one entry per set
+
+
+def test_bar_overlay_sets_by_sets_and_errors():
+    """by='sets' repeats each overlay set on every panel over the variable's
+    bar; dataset_x ignores it with a warning; bad input says why."""
+    nb = _notebook()
+    nb.select([0, 3])
+    with redirect_stdout(io.StringIO()):
+        fig = nb.bar(x='phase', y=['fuel_kgh', 'eta_pct'], by='sets', overlay_sets=1)
+    marks = [t for t in fig.data if t.type == 'scatter']
+    # 2 panels (sets 0 and 3; set 1 gets none) x 2 variables
+    assert len(fig.layout.annotations) >= 2
+    assert {a.text for a in fig.layout.annotations} >= {nb.sets[0].title_format,
+                                                       nb.sets[3].title_format}
+    assert nb.sets[1].title_format not in {a.text for a in fig.layout.annotations}
+    assert len(marks) == 4
+    assert {t.offsetgroup for t in marks} == {'var_fuel_kgh', 'var_eta_pct'}
+    assert sum(t.showlegend for t in marks) == 1
+
+    with warnings.catch_warnings(record=True) as caught, \
+            redirect_stdout(io.StringIO()):
+        warnings.simplefilter('always')
+        nb.bar(y='fuel_kgh', by='dataset_x', overlay_sets=1)
+    assert any('overlay_sets' in str(w.message) for w in caught)
+
+    nb.select(1)
+    out = io.StringIO()
+    with redirect_stdout(out):
+        assert nb.bar(x='phase', y='fuel_kgh', overlay_sets=1) is None
+    assert 'every selected set is an overlay set' in out.getvalue()
+
+    nb.select(0)
+    nb.sets[0]['only_in_set_0'] = 1.0
+    try:
+        nb.bar(x='phase', y='only_in_set_0', overlay_sets=1)
+    except ValueError as e:
+        assert 'overlay set' in str(e)
+    else:
+        raise AssertionError('a y missing from every overlay set should raise')
+
+
+def test_bar_overlay_sets_paired():
+    """A dict pairs overlay sets with particular bar sets: their markers ride
+    those sets' bars (by='vars') or panels (by='sets'); bad pairings raise;
+    the pairing survives a session save (JSON turns the keys into strings)."""
+    nb = _notebook()
+    nb.select([0, 3])
+    with redirect_stdout(io.StringIO()):
+        fig = nb.bar(x='phase', y=['fuel_kgh', 'eta_pct'], overlay_sets={0: 1, 3: [1, 2]})
+    groups = sorted((t.name, t.offsetgroup) for t in fig.data if t.type == 'scatter')
+    s1, s2 = nb.sets[1].title_format, nb.sets[2].title_format
+    # per panel: set 1 over sets 0 and 3, set 2 over set 3 -> doubled for 2 panels
+    assert groups == sorted([(s1, 'set_0'), (s1, 'set_3'), (s2, 'set_3')] * 2)
+    marks = [t for t in fig.data if t.type == 'scatter']
+    assert sum(t.showlegend for t in marks) == 2
+
+    with redirect_stdout(io.StringIO()):
+        fig = nb.bar(x='phase', y='fuel_kgh', by='sets', overlay_sets={0: 1, 3: 2})
+    on_panel = {(t.name, t.xaxis) for t in fig.data if t.type == 'scatter'}
+    assert on_panel == {(s1, 'x'), (s2, 'x2')}
+
+    for spec, text in (({2: 1}, 'is not selected'),
+                       ({0: 3, 3: 1}, 'is itself an overlay set'),
+                       ({0: 99}, 'matches no dataset')):
+        try:
+            with redirect_stdout(io.StringIO()):
+                nb.bar(x='phase', y='fuel_kgh', overlay_sets=spec)
+        except ValueError as e:
+            assert text in str(e), (spec, str(e))
+        else:
+            raise AssertionError(f'{spec} should raise')
+
+    with tempfile.TemporaryDirectory() as tmp, redirect_stdout(io.StringIO()):
+        fig = nb.bar(x='phase', y='fuel_kgh', overlay_sets={0: 1, 3: 2})
+        path = Path(tmp) / 'session.json'
+        nb.save_session(path, embed_data='all')
+        fresh = UnichartNotebook()
+        fresh.set_copy_buttons(False)
+        fresh.load_session(path)
+    replayed = [(t.name, t.offsetgroup) for t in fresh.last_fig.data if t.type == 'scatter']
+    assert replayed == [(t.name, t.offsetgroup) for t in fig.data if t.type == 'scatter']
 
 
 def test_warnings_still_point_at_the_callers_line():

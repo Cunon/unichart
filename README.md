@@ -177,7 +177,7 @@ All plotting methods return an interactive Plotly `go.Figure` (cached in
 | `plot(x, y, by=...)` | Line / scatter. `by='vars'` = one subplot per Y variable (default); `by='sets'` = one subplot per dataset; `by='ymult'` = single plot with multiple Y axes. |
 | `plot_ymult(x, y)` | One plot, multiple stacked/overlaid Y axes for differently-scaled variables. |
 | `plot_marginal(x, y, marginal=)` | Scatter with marginal distribution strips: `x`'s distribution above the plot, `y`'s to its right (`'histogram'` default, or `'box'`, `'violin'`, `'rug'`, `'kde'`; `marginal_x`/`marginal_y` set one side or drop it with `False`). Also `plot(x, y, by='marginal')`. |
-| `bar(x, y, barmode=, agg=)` | Bar charts: one bar per dataset and `x` category, height = `agg` of `y` over that category's rows (`'mean'` default; any pandas reducer name, a callable, or `agg=False` for pre-reduced rows). Grouped or stacked; hover shows the reducer and row count. |
+| `bar(x, y, barmode=, agg=, overlay_sets=)` | Bar charts: one bar per dataset and `x` category, height = `agg` of `y` over that category's rows (`'mean'` default; any pandas reducer name, a callable, or `agg=False` for pre-reduced rows). Grouped or stacked; hover shows the reducer and row count. `overlay_sets` draws other datasets' values of the same `y` as markers over the bars; a dict (`{0: 1, 3: 2}`) pairs each with particular bar sets. |
 | `box(x, y, points=, notched=)` | Box / distribution plots. |
 | `histogram(x, histfunc=, nbins=)` | Histograms with configurable binning and normalization. |
 | `contour(x, y, z, overlay_sets=)` | Filled/line contour maps from scattered data, with optional scatter overlays. |
@@ -188,6 +188,8 @@ All plotting methods return an interactive Plotly `go.Figure` (cached in
 uc.plot(x='time', y='temp', by='sets', ncols=2, suptitle='Per run')
 uc.plot_marginal(x='rpm', y='torque', marginal='kde')
 uc.bar(x='config', y='efficiency', barmode='group', agg='mean')
+uc.bar(x='config', y='efficiency', overlay_sets=[1, 2])   # sets 1, 2 as markers
+uc.bar(x='config', y='efficiency', overlay_sets={0: 1, 3: 2})  # 1 on 0's bars, 2 on 3's
 uc.histogram(x='error', nbins=40, histnorm='probability')
 uc.contour(x='rpm', y='torque', z='efficiency', overlay_sets=[1, 2])
 uc.polar(x='angle', y='spl', direction='clockwise')

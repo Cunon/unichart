@@ -559,7 +559,16 @@ _TITLE_LINE_FACTOR = 1.45       # title line height = font size * this
 # multi-line title is anchored this many ems lower to land where one line does.
 _TITLE_CAP_SHIFT = 0.7
 _LEGEND_ROW_PX = 26             # space reserved per legend row
-_LEGEND_GAP    = 12             # gap title→legend and legend→plot
+# Built-in gaps title→legend and legend→plot (or →the top row's subplot
+# titles). set_default_format(title_gap=, legend_gap=) overrides each.
+_LEGEND_GAP    = 12
+# Subplot titles hang above their panel's top edge (make_subplots anchors them
+# yanchor='bottom' there), so the top row's sit in the top margin and need
+# room of their own. Plotly sets annotation lines 1.3 em apart and pads the
+# text by borderpad (1 px) on each side.
+_SUBPLOT_TITLE_LINE_FACTOR = 1.3
+_SUBPLOT_TITLE_PAD_PX = 2
+_DEFAULT_SUBPLOT_TITLE_FONT_PX = 16   # make_subplots' subplot-title font
 # Extra top margin reserved only when set_plot_size is pinning the height:
 # Plotly's rendered legend runs taller than _LEGEND_ROW_PX, and without the
 # slack its autoexpand takes the difference out of the plot area.
@@ -778,8 +787,28 @@ def _title_lines(text):
     return text.replace('\n', '<br>').count('<br>') + 1
 
 
+def _subplot_title_px(fig):
+    """Height (px) of the subplot titles over the top row of panels: 0 when
+    it has none. They are the paper annotations ``make_subplots`` (and
+    ``plot_marginal``'s block titles) hang from the top edge of the paper with
+    ``yanchor='bottom'``, so the band sits in the top margin. Reference-line
+    labels are skipped."""
+    tallest = 0.0
+    for ann in fig.layout.annotations or ():
+        if ((getattr(ann, 'name', None) or '').startswith(_LINE_LABEL_NAME)
+                or ann.yref != 'paper' or ann.yanchor != 'bottom'
+                or ann.y is None or ann.y < 1 - 1e-6 or not ann.text):
+            continue
+        size = ann.font.size or _DEFAULT_SUBPLOT_TITLE_FONT_PX
+        lines = _title_lines(ann.text)
+        tallest = max(tallest, lines * size * _SUBPLOT_TITLE_LINE_FACTOR
+                      + _SUBPLOT_TITLE_PAD_PX)
+    return tallest
+
+
 def _top_space(title_text, figsize, has_above_legend, title_font_size=None,
-               legend_rows=1):
+               legend_rows=1, legend_px=None, subplot_title_px=0,
+               title_gap=None, legend_gap=None):
     """Geometry that reserves vertical space for a (possibly multi-line)
     suptitle so a horizontal "above" legend can't cover it.
 
@@ -788,7 +817,14 @@ def _top_space(title_text, figsize, has_above_legend, title_font_size=None,
     title font still gets enough room. ``legend_rows`` is the number of rows
     the above-legend is expected to wrap to (see ``_legend_rows``); the top
     margin reserves space for all of them so a wrapping legend can't spill
-    over the subplot titles.
+    over the subplot titles. ``legend_px``, when given, is the legend's
+    measured height and is reserved instead.
+
+    ``subplot_title_px`` is the height of the top row's subplot titles (see
+    ``_subplot_title_px``), reserved between the legend — or the suptitle,
+    without one — and the plot. ``title_gap`` and ``legend_gap`` (px; ``None``
+    = ``_LEGEND_GAP``) are the clear space under the suptitle and under the
+    legend, measured to whatever comes next.
 
     Returns ``(top_margin_px, title_pos, legend_pos)``. ``title_pos`` is merged
     into ``layout.title`` (pins it to the top of the figure container);
@@ -804,11 +840,17 @@ def _top_space(title_text, figsize, has_above_legend, title_font_size=None,
     # Headroom above the first line grows with the font so large titles aren't
     # clipped at the figure's top edge.
     top_pad = _TITLE_TOP_PAD + max(0.0, font - _DEFAULT_TITLE_FONT_PX) * 0.9
-    title_band = top_pad + n_lines * line_px + _LEGEND_GAP
+    title_gap = _LEGEND_GAP if title_gap is None else title_gap
+    legend_gap = _LEGEND_GAP if legend_gap is None else legend_gap
+    title_band = top_pad + n_lines * line_px + title_gap
     if has_above_legend:
-        top_margin = title_band + max(1, legend_rows) * _LEGEND_ROW_PX + _LEGEND_GAP
+        legend_band = (max(1, legend_rows) * _LEGEND_ROW_PX if legend_px is None
+                       else legend_px)
+        top_margin = title_band + legend_band + legend_gap + subplot_title_px
     else:
-        top_margin = title_band + _TITLE_TOP_PAD
+        # Subplot titles may use the pad under the title band; past that they
+        # push the plot down, keeping title_gap clear under the suptitle.
+        top_margin = title_band + max(_TITLE_TOP_PAD, subplot_title_px)
 
     anchor_px = top_pad + (_TITLE_CAP_SHIFT * font if n_lines > 1 else 0.0)
     title_pos = {'y': 1.0 - anchor_px / height, 'yanchor': 'top', 'yref': 'container'}
@@ -873,9 +915,6 @@ def _base_layout(darkmode, suptitle, figsize, **extra):
         'template': "plotly_dark" if darkmode else "plotly_white",
         'title': merged_title,
         'margin': merged_margin,
-        # Stashed so _apply_fonts can re-reserve the same legend rows when it
-        # redoes the top-space math for a custom suptitle font.
-        'meta': {'uc_legend_rows': legend_rows},
         **extra
     }
     if legend_pos is not None:
@@ -902,19 +941,55 @@ def _show_or_return(fig, return_axes):
     fig.show()
     return fig
 
-def _label_outer_axes(fig, n, nrows, ncols, xlabel=None, ylabel=None):
-    """Axis titles for an ``n``-panel subplot grid without per-panel repetition,
-    mirroring matplotlib's ``label_outer()``: the x title goes only on each
-    column's bottom-most *occupied* panel (the last grid row may have empty
-    trailing cells), and the y title only on the first column."""
-    for c in range(1, ncols + 1):
-        occupied = [(i // ncols) + 1 for i in range(n) if (i % ncols) + 1 == c]
-        if occupied and xlabel:
-            fig.update_xaxes(title_text=xlabel, row=max(occupied), col=c)
-    if ylabel:
-        for r in range(1, nrows + 1):
-            if (r - 1) * ncols < n:     # row has at least one panel
-                fig.update_yaxes(title_text=ylabel, row=r, col=1)
+_AXIS_LABEL_MODES = ('all', 'auto', 'outer')
+
+
+def _check_axis_labels(value):
+    """``value`` as a ``labels`` setting; raises on anything else. 'all' puts
+    every panel's axis titles on it, 'outer' keeps only the outer ones and
+    'auto' does that where a column / row shares its title."""
+    if value not in _AXIS_LABEL_MODES:
+        raise ValueError(f"labels must be one of {', '.join(map(repr, _AXIS_LABEL_MODES))}; "
+                         f"got {value!r}")
+    return value
+
+
+def _kept_axis_titles(titles, ncols, axis, mode, edge='first'):
+    """Which panels of an ``ncols`` grid, in panel order, keep their ``axis``
+    ('x' or 'y') title from ``titles`` (None for a panel without one, which
+    neither keeps nor counts) under labels ``mode``. 'all' keeps every one.
+    'outer' mirrors matplotlib's ``label_outer()``: an x title only on its
+    column's bottom-most titled panel (the last grid row may have empty
+    trailing cells), a y title only on its row's first — or, with
+    ``edge='last'``, its last, for a right-hand secondary axis. 'auto' does the
+    same for a column / row whose titles are all the same, and keeps every
+    title of one where they differ."""
+    keep = [bool(t) for t in titles]
+    if mode == 'all':
+        return keep
+    groups = {}
+    for i, t in enumerate(titles):
+        if t:
+            r, c = divmod(i, ncols)
+            groups.setdefault(c if axis == 'x' else r, []).append(i)
+    for idx in groups.values():
+        if mode == 'auto' and len({titles[i] for i in idx}) > 1:
+            continue
+        outer = idx[-1] if axis == 'x' or edge == 'last' else idx[0]
+        for i in idx:
+            keep[i] = i == outer
+    return keep
+
+
+def _label_outer_axes(fig, n, ncols, xlabel=None, ylabel=None):
+    """Axis titles for an ``n``-panel subplot grid without per-panel repetition:
+    ``xlabel`` and ``ylabel`` placed as ``labels='outer'`` places them (see
+    ``_kept_axis_titles``)."""
+    for axis, label in (('x', xlabel), ('y', ylabel)):
+        update = fig.update_xaxes if axis == 'x' else fig.update_yaxes
+        for i, keep in enumerate(_kept_axis_titles([label] * n, ncols, axis, 'outer')):
+            if keep:
+                update(title_text=label, row=i // ncols + 1, col=i % ncols + 1)
 
 
 def _subplot_refs(row, col, ncols):
@@ -1611,6 +1686,40 @@ def _whisker_stem_kw(x, values, bar_values, color, alpha, dash, width):
     return dict(x=xs, y=ys, mode='lines',
                 line=dict(color=color, dash=dash, width=width),
                 opacity=alpha, hoverinfo='skip', showlegend=False)
+
+
+def _overlay_set_frames(overlay_sets, x, y_list, agg_func):
+    """``(dataset, values, counts)`` per bar-chart overlay set (``bar(...,
+    overlay_sets=)``), in draw order: each set's ``y`` columns reduced per
+    ``x`` category exactly as its bars would be (see ``_bar_frame``), so the
+    marker is the value the set's bar would have had. Sets without ``x`` are
+    skipped."""
+    frames = []
+    for ds in _in_draw_order(overlay_sets or ()):
+        if x not in ds.columns:
+            continue
+        df = ds.cols([c for c in dict.fromkeys([x] + y_list) if c in ds.columns])
+        df, n_df = _bar_frame(df, x, list(df.columns), agg_func)
+        frames.append((ds, df, n_df))
+    return frames
+
+
+def _overlay_set_marker_kw(ds, edge_default):
+    """``marker`` and ``opacity`` kwargs for a bar-chart overlay set: the set's
+    own symbol, size, color, ``fill``, edge and alpha, as contour overlays
+    draw them. The marker is all an overlay set draws, so a set whose markers
+    are off (``marker=None`` / ``markersize=0``) falls back to its index's
+    symbol and the default size instead of vanishing."""
+    symbol = ds.marker if ds.marker is not None else marker_map(ds.index)
+    size = ds.markersize or 10
+    marker = dict(
+        symbol=get_plotly_marker(symbol), size=size,
+        color=ds.color if ds.fill else 'rgba(0,0,0,0)',
+        line=dict(width=ds.edgewidth if ds.fill else _hollow_edgewidth(ds.edgewidth),
+                  color=ds.color if not ds.fill else (ds.edge_color or edge_default)),
+    )
+    opacity = _split_alpha(ds.get_format_dict(), ds.color, marker, {})
+    return dict(marker=marker, opacity=opacity)
 
 
 # Added to a hollow (fill=False) marker's edgewidth: the outline is the whole
@@ -2941,6 +3050,12 @@ def _guard_marker_interval(fig):
                                                if b not in remove])
 
 
+def _markers_on(marker, markersize):
+    """Whether a trace draws markers: ``marker=None`` or ``markersize=0``
+    turns them off (Plotly would still draw a size-0 marker's outline)."""
+    return marker is not None and markersize != 0
+
+
 def _marker_line_style(fmt, color, marker, markersize, linewidth, linestyle,
                        hue, df, numeric_hue_info):
     """``marker`` / ``line`` dicts plus trace opacity for one dataset's scatter
@@ -2983,7 +3098,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             legend='above', legend_ncols=1, figsize=(12, 8), ncols=None, nrows=None, x_lim=None, y_lim=None,
             axis_limits=None, hspace=None, vspace=None, spacing_ref=None,
             marker_interval=None, variable_formats=None, subplot_sets=None,
-            subplot_queries=None):
+            subplot_queries=None, labels='all'):
     # ``marker_interval`` (see _check_marker_interval) overrides every set's for this call;
     # of ``variable_formats`` only the marker_interval key is read here.
     # ``subplot_sets``: one entry per x/y pair — the datasets that subplot
@@ -2991,6 +3106,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
     # selected sets.
     # ``subplot_queries``: one entry per x/y pair — a query string that
     # subplot's rows must also match, on top of each set's own query — or None.
+    # ``labels``: which panels carry axis titles (see _kept_axis_titles).
 
     marker_interval = _check_marker_interval(marker_interval)
     axis_limits = axis_limits or {}
@@ -3143,10 +3259,10 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
 
             # A line shows when a linestyle is set (regression draws its own
             # trace, so the raw series stays point-only). Markers show unless
-            # explicitly turned off with marker=None; if neither is on, the
-            # trace draws nothing ('none').
+            # explicitly turned off with marker=None or markersize=0; if
+            # neither is on, the trace draws nothing ('none').
             show_line = bool(cur_linestyle) and not cur_reg_order
-            show_marker = cur_marker is not None
+            show_marker = _markers_on(cur_marker, cur_markersize)
             mode_parts = []
             if show_line: mode_parts.append('lines')
             if show_marker: mode_parts.append('markers')
@@ -3191,15 +3307,17 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
 
     _apply_hue_coloraxes(fig, numeric_hue_info)
 
-    for idx_p, (x_name, yi) in enumerate(pairs):
+    y_titles = [ylabel if ylabel else yi for _, yi in pairs]
+    x_titles = [xlabel if xlabel else x_name for x_name, _ in pairs]
+    keep_y = _kept_axis_titles(y_titles, ncols, 'y', labels)
+    keep_x = _kept_axis_titles(x_titles, ncols, 'x', labels)
+    for idx_p in range(n_plots):
         row = idx_p // ncols + 1
         col = idx_p % ncols + 1
-
-        axis_title = ylabel if ylabel else yi
-        x_axis_title = xlabel if xlabel else x_name
-
-        fig.update_yaxes(title_text=axis_title, title_standoff=15, row=row, col=col)
-        fig.update_xaxes(title_text=x_axis_title, title_standoff=15, row=row, col=col)
+        if keep_y[idx_p]:
+            fig.update_yaxes(title_text=y_titles[idx_p], title_standoff=15, row=row, col=col)
+        if keep_x[idx_p]:
+            fig.update_xaxes(title_text=x_titles[idx_p], title_standoff=15, row=row, col=col)
 
     for idx_p, (x_name, yi) in enumerate(pairs):
         row = idx_p // ncols + 1
@@ -3217,8 +3335,8 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
                         darkmode=False, x_lim=None, y_lim=None,
                         axis_limits=None, return_axes=False,
                         hspace=None, vspace=None, spacing_ref=None,
-                        marker_interval=None, variable_formats=None):
-    # ``marker_interval`` / ``variable_formats``: as in uniplot.
+                        marker_interval=None, variable_formats=None, labels='all'):
+    # ``marker_interval`` / ``variable_formats`` / ``labels``: as in uniplot.
     marker_interval = _check_marker_interval(marker_interval)
     active_datasets = [d for d in list_of_datasets if d.select]
     if not active_datasets:
@@ -3256,6 +3374,9 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
     color_cycle = px.colors.qualitative.Plotly
     primary_y = y_list[0]
     secondary_ys = y_list[1:]
+    # Each panel's axis titles, None where it has none; placed after the loop,
+    # once every panel's are known (see _kept_axis_titles).
+    x_titles, y_titles, y2_titles = ([None] * n_sets for _ in range(3))
 
     for idx_ds, dataset in enumerate(active_datasets):
         row = (idx_ds // ncols) + 1
@@ -3296,7 +3417,8 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
             color0 = color_cycle[0]
             ht = (f"<b>{dataset.title}</b><br>{x_col}: %{{x:{num_fmt}}}"
                   f"<br>{primary_y}: %{{y:{num_fmt}}}{hover_suffix}<extra></extra>")
-            mode = 'lines+markers' if dataset.linestyle else 'markers'
+            mode = '+'.join(['lines'] * bool(dataset.linestyle)
+                            + ['markers'] * (dataset.markersize != 0)) or 'none'
             fig.add_trace(
                 _scatter_cls(len(df))(
                     x=df[x_col], y=df[primary_y],
@@ -3315,8 +3437,8 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
                 row=row, col=col,
                 secondary_y=False if use_secondary else None,
             )
-            kw = dict(title_text=primary_y,
-                      title_font=dict(color=color0),
+            y_titles[idx_ds] = primary_y
+            kw = dict(title_font=dict(color=color0),
                       tickfont=dict(color=color0),
                       row=row, col=col)
             if primary_y in axis_limits:
@@ -3332,7 +3454,8 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
             color_k = color_cycle[(k + 1) % len(color_cycle)]
             ht = (f"<b>{dataset.title}</b><br>{x_col}: %{{x:{num_fmt}}}"
                   f"<br>{yi}: %{{y:{num_fmt}}}{hover_suffix}<extra></extra>")
-            mode = 'lines+markers' if dataset.linestyle else 'markers'
+            mode = '+'.join(['lines'] * bool(dataset.linestyle)
+                            + ['markers'] * (dataset.markersize != 0)) or 'none'
             fig.add_trace(
                 _scatter_cls(len(df))(
                     x=df[x_col], y=df[yi],
@@ -3355,17 +3478,30 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
 
         if use_secondary and secondary_ys:
             color1 = color_cycle[1]
-            kw = dict(title_text=secondary_ys[0],
-                      title_font=dict(color=color1),
+            y2_titles[idx_ds] = secondary_ys[0]
+            kw = dict(title_font=dict(color=color1),
                       tickfont=dict(color=color1),
                       showgrid=False, row=row, col=col)
             if secondary_ys[0] in axis_limits:
                 kw['range'] = axis_limits[secondary_ys[0]]
             fig.update_yaxes(secondary_y=True, **kw)
 
-        fig.update_xaxes(title_text=x, row=row, col=col)
+        x_titles[idx_ds] = x
         if x_lim:
             fig.update_xaxes(range=x_lim, row=row, col=col)
+
+    for titles, axis, secondary, edge in ((x_titles, 'x', None, 'first'),
+                                          (y_titles, 'y', False, 'first'),
+                                          (y2_titles, 'y', True, 'last')):
+        for idx_ds, keep in enumerate(_kept_axis_titles(titles, ncols, axis, labels, edge)):
+            if not keep:
+                continue
+            row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
+            if axis == 'x':
+                fig.update_xaxes(title_text=titles[idx_ds], row=row, col=col)
+            else:
+                fig.update_yaxes(title_text=titles[idx_ds], row=row, col=col,
+                                 secondary_y=secondary if use_secondary else None)
 
     return _show_or_return(fig, return_axes)
 
@@ -3373,7 +3509,8 @@ def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
            barmode='group', color=None, agg='mean', categorical_x=True,
            suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
            darkmode=False, figsize=(12, 8), ncols=None, nrows=None,
-           y_lim=None, return_axes=False, hspace=None, vspace=None, spacing_ref=None):
+           y_lim=None, return_axes=False, hspace=None, vspace=None, spacing_ref=None,
+           overlay_sets=None, overlay_anchors=None):
     """
     Grouped Bar Chart. Subplots are organized by Y-variable.
 
@@ -3393,6 +3530,14 @@ def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
     default each panel names its own variable on the y-axis (no subplot
     titles); passing ``ylabel`` reverts to a single shared y title on the
     first column, and ``subplot_titles`` restores per-panel titles.
+
+    ``overlay_sets`` (Datasets) draw each ``y`` as a marker in the set's own
+    style instead of as bars, whether or not they are selected, and are never
+    drawn as bars. With ``barmode='group'`` the markers sit at the category
+    center (over the bar when a single set draws bars). Their ``markers``
+    columns are not drawn. ``overlay_anchors`` maps ``id(overlay set)`` to the
+    bar Datasets it is paired with: its markers then sit over each of those
+    sets' bars instead of the category center.
     """
     y_list = y if isinstance(y, list) else [y]
     markers_list = markers if isinstance(markers, list) else ([markers] if markers else [])
@@ -3400,17 +3545,22 @@ def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
     agg_func, agg_name = _resolve_agg(agg)
     n_y = len(y_list)
     nrows, ncols = _calc_grid(n_y, nrows, ncols)
-    active_ds = _in_draw_order(d for d in list_of_datasets if d.select)
+    overlay_ids = {id(d) for d in overlay_sets or ()}
+    active_ds = _in_draw_order(d for d in list_of_datasets
+                               if d.select and id(d) not in overlay_ids)
+    overlay_frames = _overlay_set_frames(overlay_sets, x, y_list, agg_func)
 
     # Expected legend entries, for row estimation: one bar entry per set, one
     # figure-wide entry per styled marker column, one per (set, column) for
-    # unstyled marker columns. Mirrors the legend bookkeeping below.
+    # unstyled marker columns, one per overlay set. Mirrors the legend
+    # bookkeeping below.
     legend_names = [f"{d.index}: {d.title}" for d in active_ds]
     for m_col in markers_list:
         if variable_formats.get(m_col):
             legend_names.append(m_col)
         else:
             legend_names += [f"{d.index}: {d.title} — {m_col}" for d in active_ds]
+    legend_names += [f"{d.index}: {d.title}" for d, _, _ in overlay_frames]
 
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles,
                         **_subplot_spacing(nrows, ncols, figsize, hspace, vspace, spacing_ref))
@@ -3538,7 +3688,46 @@ def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
                                        m_color, m_alpha, m_dash, m_lw),
                 ), row=row, col=col)
 
-    _label_outer_axes(fig, n_y, nrows, ncols, xlabel or x, ylabel)
+    # Overlay sets: one marker per category per y panel. An alignment group
+    # of their own centers them on the category rather than over whichever
+    # set's bar comes first; legend entries sit among the bar sets by index.
+    overlay_group = ({'offsetgroup': 'overlay_sets', 'alignmentgroup': 'overlay_sets'}
+                     if barmode == 'group' else {})
+    # A paired overlay set (overlay_anchors) instead rides each of its bar
+    # sets' offsetgroups, once per bar set, skipping a panel where that bar
+    # set has no bar.
+    overlay_anchors = overlay_anchors or {}
+    for ds, df, n_df in overlay_frames:
+        style_kw = _overlay_set_marker_kw(ds, edge_default)
+        anchors = overlay_anchors.get(id(ds))
+        placements = ([(a, {'offsetgroup': f"set_{a.index}", 'alignmentgroup': "bars"}
+                        if barmode == 'group' else {}) for a in anchors]
+                      if anchors else [(None, overlay_group)])
+        listed = False
+        for idx_y, yi in enumerate(y_list):
+            if yi not in df.columns: continue
+            row, col = (idx_y // ncols) + 1, (idx_y % ncols) + 1
+            for anchor, group_kw in placements:
+                if anchor is not None and (x not in anchor.columns
+                                           or yi not in anchor.columns):
+                    continue
+                fig.add_trace(go.Scatter(
+                    x=df[x], y=df[yi],
+                    mode='markers',
+                    name=f"{ds.index}: {ds.title}",
+                    legendgroup=f"group_{ds.index}",
+                    legendrank=1000 + ds.index,
+                    **group_kw,
+                    **style_kw,
+                    showlegend=not listed,
+                    customdata=None if n_df is None else n_df[yi],
+                    hovertemplate=(f"<b>{ds.title}</b><br>{x}: %{{x}}<br>"
+                                   f"{_agg_hover(agg_name, yi, n_df, ds.sig_figs, ds.decimals)}"
+                                   f"<extra></extra>")
+                ), row=row, col=col)
+                listed = True
+
+    _label_outer_axes(fig, n_y, ncols, xlabel or x, ylabel)
     if not ylabel:
         # No shared ylabel: each panel names its own variable on the y-axis,
         # replacing the subplot titles that used to carry that information.
@@ -3556,7 +3745,8 @@ def unibar_per_dataset(list_of_datasets, x, y, markers=None, variable_formats=No
                        suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
                        figsize=(12, 8), ncols=None, nrows=None,
                        darkmode=False, y_lim=None, return_axes=False,
-                       hspace=None, vspace=None, spacing_ref=None):
+                       hspace=None, vspace=None, spacing_ref=None,
+                       overlay_sets=None, overlay_anchors=None):
     """
     Grouped Bar Chart. Subplots are organized by Dataset.
 
@@ -3574,14 +3764,22 @@ def unibar_per_dataset(list_of_datasets, x, y, markers=None, variable_formats=No
 
     The x-axis title appears only on each column's bottom-most panel;
     ``ylabel``, when given, only on the first column.
+
+    ``overlay_sets`` (Datasets) get no panel of their own: each is drawn on
+    every panel as markers in the set's own style, one per ``y`` variable over
+    that variable's bar, whether or not the set is selected. One paired with
+    bar sets in ``overlay_anchors`` (``id(overlay set)`` -> bar Datasets)
+    appears only on those sets' panels.
     """
-    active_ds = [d for d in list_of_datasets if d.select]
+    overlay_ids = {id(d) for d in overlay_sets or ()}
+    active_ds = [d for d in list_of_datasets if d.select and id(d) not in overlay_ids]
     y_list = y if isinstance(y, list) else [y]
     markers_list = markers if isinstance(markers, list) else ([markers] if markers else [])
     variable_formats = variable_formats or {}
     agg_func, agg_name = _resolve_agg(agg)
     n_sets = len(active_ds)
     nrows, ncols = _calc_grid(n_sets, nrows, ncols)
+    overlay_frames = _overlay_set_frames(overlay_sets, x, y_list, agg_func)
 
     fig = make_subplots(rows=nrows, cols=ncols,
                         subplot_titles=subplot_titles or [d.title_format for d in active_ds])
@@ -3590,7 +3788,8 @@ def unibar_per_dataset(list_of_datasets, x, y, markers=None, variable_formats=No
         darkmode, suptitle or "Dataset Bar Comparison", figsize,
         barmode=barmode,
         legend=dict(orientation="h"),
-        legend_rows=_legend_rows(y_list + markers_list,
+        legend_rows=_legend_rows(y_list + markers_list
+                                 + [f"{d.index}: {d.title}" for d, _, _ in overlay_frames],
                                  figsize[0] * 100 if figsize else None),
         **({'scattermode': 'group'} if barmode == 'group' else {})
     ))
@@ -3603,6 +3802,7 @@ def unibar_per_dataset(list_of_datasets, x, y, markers=None, variable_formats=No
     # variables first and overlays trailing regardless of which set showed them.
     bar_legend_shown = set()
     marker_legend_shown = set()
+    overlay_legend_shown = set()
 
     for idx_ds, ds in enumerate(active_ds):
         row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
@@ -3694,7 +3894,36 @@ def unibar_per_dataset(list_of_datasets, x, y, markers=None, variable_formats=No
                                        m_color, m_alpha, m_dash, m_lw),
                 ), row=row, col=col)
 
-    _label_outer_axes(fig, n_sets, nrows, ncols, xlabel or x, ylabel)
+        # Overlay sets on this panel: each y value over that variable's bar
+        # (skipped where this panel's set has no such bar). One legend entry
+        # per overlay set, after the variables and marker columns.
+        for o_ds, o_df, o_n in overlay_frames:
+            anchors = (overlay_anchors or {}).get(id(o_ds))
+            if anchors and all(a is not ds for a in anchors):
+                continue                      # paired with other panels' sets
+            style_kw = _overlay_set_marker_kw(o_ds, edge_default)
+            for yi in y_list:
+                if yi not in o_df.columns or yi not in df.columns: continue
+                show = o_ds.index not in overlay_legend_shown
+                if show:
+                    overlay_legend_shown.add(o_ds.index)
+                fig.add_trace(go.Scatter(
+                    x=o_df[x], y=o_df[yi],
+                    mode='markers',
+                    name=f"{o_ds.index}: {o_ds.title}",
+                    legendgroup=f"overlay_{o_ds.index}",
+                    legendrank=3000 + o_ds.index,
+                    **({'offsetgroup': f"var_{yi}", 'alignmentgroup': "bars"}
+                       if barmode == 'group' else {}),
+                    **style_kw,
+                    showlegend=show,
+                    customdata=None if o_n is None else o_n[yi],
+                    hovertemplate=(f"<b>{o_ds.title}</b><br>{x}: %{{x}}<br>"
+                                   f"{_agg_hover(agg_name, yi, o_n, o_ds.sig_figs, o_ds.decimals)}"
+                                   f"<extra></extra>")
+                ), row=row, col=col)
+
+    _label_outer_axes(fig, n_sets, ncols, xlabel or x, ylabel)
     if y_lim: fig.update_yaxes(range=y_lim)
     if categorical_x: fig.update_xaxes(type='category')
 
@@ -3750,7 +3979,7 @@ def unibox(list_of_datasets, x, y, boxmode='group', points='outliers', notched=F
             ), row=row, col=col)
             listed = True
 
-    _label_outer_axes(fig, n_y, nrows, ncols, xlabel or x, ylabel)
+    _label_outer_axes(fig, n_y, ncols, xlabel or x, ylabel)
     if not ylabel:
         # No shared ylabel: each panel names its own variable on the y-axis,
         # replacing the subplot titles that used to carry that information.
@@ -4244,7 +4473,7 @@ def _render_marginal(panels, marginal_x, marginal_y, marginal_size,
             ht += "".join(hover_lines) + "<extra></extra>"
 
             show_line = bool(cur_linestyle) and not cur_reg_order
-            show_marker = cur_marker is not None
+            show_marker = _markers_on(cur_marker, cur_markersize)
             mode_parts = (['lines'] if show_line else []) + (['markers'] if show_marker else [])
             mode = "+".join(mode_parts) if mode_parts else 'none'
 
@@ -4421,9 +4650,9 @@ def _add_contour_overlays(fig, overlay_datasets, x, y, n_subplots, ncols, darkmo
             df = df.sort_values(by=ds.order)
 
         # A linestyle means "draw a line" (trace a boundary); markers show
-        # unless turned off with marker=None.
+        # unless turned off with marker=None or markersize=0.
         want_lines = bool(ds.linestyle)
-        want_markers = ds.marker is not None
+        want_markers = _markers_on(ds.marker, ds.markersize)
         mode = '+'.join(['lines'] * want_lines + ['markers'] * want_markers) or 'none'
 
         marker_dict = dict(
@@ -5575,10 +5804,11 @@ def unipolar(list_of_datasets, x, y, color=None, display_parms=None,
                   f"{xi}: %{{theta:{num_fmt}}}<br>{yi}: %{{r:{num_fmt}}}"
                   + "".join(hover_lines) + "<extra></extra>")
             show_line = bool(cur_linestyle) and not cur_reg_order
+            cur_markersize = fmt.get('markersize', 10)
             mode = '+'.join(['lines'] * show_line
-                            + ['markers'] * (cur_marker is not None)) or 'none'
+                            + ['markers'] * _markers_on(cur_marker, cur_markersize)) or 'none'
             marker_dict, line_dict, cur_opacity = _marker_line_style(
-                fmt, cur_color, cur_marker, fmt.get('markersize', 10), cur_linewidth,
+                fmt, cur_color, cur_marker, cur_markersize, cur_linewidth,
                 cur_linestyle, cur_hue, df, numeric_hue_info)
             row, col = i // ncols + 1, i % ncols + 1
             # Plain (SVG) Scatterpolar at any size: the copy button's WebGL
@@ -5669,7 +5899,7 @@ def unipolar_per_dataset(list_of_datasets, x, y, variable_formats=None, color_cy
         for yi in ys:
             vf = _resolve_var_format(dataset, yi, formats)
             mode = '+'.join(['lines'] * bool(vf['linestyle'])
-                            + ['markers'] * (vf['marker'] is not None)) or 'none'
+                            + ['markers'] * _markers_on(vf['marker'], vf['markersize'])) or 'none'
             marker_dict, line_dict, opacity = _marker_line_style(
                 vf, vf['color'], vf['marker'], vf['markersize'] or 6, vf['linewidth'],
                 vf['linestyle'], None, df, {})
@@ -6341,7 +6571,7 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
             parts = []
             if fmt['linestyle']:
                 parts.append('lines')
-            if fmt['marker'] is not None:   # marker=None turns markers off
+            if _markers_on(fmt['marker'], fmt['markersize']):   # marker=None / markersize=0 turn them off
                 parts.append('markers')
             mode = '+'.join(parts) if parts else 'none'
 
@@ -6629,6 +6859,15 @@ def _check_positive_int(name, val):
 def _check_bool(name, val):
     if not isinstance(val, bool):
         raise TypeError(f"{name} must be bool, got {type(val).__name__}")
+    return val
+
+
+def _check_gap(name, val):
+    """A ``title_gap`` / ``legend_gap``: a number of px, 0 or more."""
+    if isinstance(val, bool) or not isinstance(val, numbers.Real):
+        raise TypeError(f"{name} must be a number of px, got {type(val).__name__}")
+    if val < 0:
+        raise ValueError(f"{name} must be >= 0, got {val}")
     return val
 
 
@@ -7019,12 +7258,12 @@ class UnichartNotebook:
         # None = unset, so the relevant plot method falls back to its own built-in
         # (resolved through _apply_default). An explicit per-call argument always
         # wins over the stored default. Cleared by set_default_format(reset=True).
-        # hspace, vspace, ncols, nrows, legend_scroll and suppress_legends are
-        # also attributes (uc.ncols = 2), properties over this dict.
+        # hspace, vspace, title_gap, legend_gap, ncols, nrows, legend_scroll and
+        # suppress_legends are also attributes (uc.ncols = 2), properties over this dict.
         self._plot_defaults = {
             'legend': None, 'suppress_legends': None, 'legend_scroll': None,
             'ncols': None, 'nrows': None, 'hspace': None, 'vspace': None,
-            'barmode': None, 'agg': None, 'histfunc': None,
+            'title_gap': None, 'legend_gap': None, 'barmode': None, 'agg': None, 'histfunc': None,
             'histnorm': None, 'alpha': None, 'boxmode': None, 'points': None,
         }
 
@@ -9918,16 +10157,44 @@ class UnichartNotebook:
         stored = self._plot_defaults.get(key)
         return stored if stored is not None else builtin
 
+    def _resolve_overlay_sets(self, spec):
+        """``bar(overlay_sets=)`` as ``(overlay datasets, anchors)``.
+
+        A selector (int / list / str / 'all' / Dataset) gives unpaired overlay
+        sets and no anchors. A dict maps bar set(s) to the overlay set(s)
+        drawn on them, ``{bar: overlay}``, each side a selector (a key can be
+        an int or range string, so a dict saved to JSON, whose keys come back
+        as strings, replays the same). ``anchors`` maps ``id(overlay)`` to the
+        list of bar Datasets it sits on; an overlay paired with several bar
+        sets is listed once. A key or value matching no dataset raises."""
+        if not isinstance(spec, dict):
+            return self._get_uset_slice(spec), {}
+        overlays, anchors = [], {}
+        for key, val in spec.items():
+            bar_sets = self._get_uset_slice(key)
+            over_sets = self._get_uset_slice(val)
+            for side, sel, found in (('key', key, bar_sets), ('value', val, over_sets)):
+                if not found:
+                    raise ValueError(f"overlay_sets {side} {sel!r} matches no dataset.")
+            for o_ds in over_sets:
+                if id(o_ds) not in anchors:
+                    overlays.append(o_ds)
+                    anchors[id(o_ds)] = []
+                anchors[id(o_ds)] += [a for a in bar_sets
+                                      if all(a is not b for b in anchors[id(o_ds)])]
+        return overlays, anchors
+
     @staticmethod
-    def _check_bar_columns(active_sets, columns):
+    def _check_bar_columns(active_sets, columns, what='selected dataset'):
         """Fail loudly on a column no selected dataset has, warn on one only some
         have. Bar charts tolerate heterogeneous datasets (a column is drawn where
         present), but a column absent everywhere would otherwise yield a blank
-        panel or a bare pandas KeyError with no hint of which name was wrong."""
+        panel or a bare pandas KeyError with no hint of which name was wrong.
+        ``what`` names the sets in the error ('overlay set' for overlay_sets)."""
         for col in dict.fromkeys(c for c in columns if c is not None):
             lacking = [f"{d.index}: {d.title}" for d in active_sets if col not in d.columns]
             if len(lacking) == len(active_sets):
-                raise ValueError(f"Column {col!r} not found in any selected dataset "
+                raise ValueError(f"Column {col!r} not found in any {what} "
                                  f"({', '.join(lacking)}).")
             if lacking:
                 # stacklevel 4: past bar and its _uses_method_defaults
@@ -10002,6 +10269,19 @@ class UnichartNotebook:
         entry, making the figure taller so the plot area keeps its size.
         ``save_png`` and static images always show the whole legend. The same
         setting as ``set_default_format(legend_scroll=)``.""")
+
+    title_gap = _plot_default_attr('title_gap', _check_gap, """\
+        Clear space in px under the suptitle, down to the above-legend (or,
+        without one, to the subplot titles or the plot): ``uc.title_gap = 20``.
+        ``None`` (the default) gives the built-in 12 px. The same setting as
+        ``set_default_format(title_gap=)``.""")
+
+    legend_gap = _plot_default_attr('legend_gap', _check_gap, """\
+        Clear space in px under the above-legend, down to the top row's
+        subplot titles (or the plot, where it has none):
+        ``uc.legend_gap = 20``. Room for the subplot titles themselves is
+        always reserved on top of it. ``None`` (the default) gives the built-in
+        12 px. The same setting as ``set_default_format(legend_gap=)``.""")
 
     suppress_legends = _plot_default_attr('suppress_legends', _check_bool, """\
         ``True`` starts every plot with its traces hidden, to be clicked on in
@@ -10087,7 +10367,7 @@ class UnichartNotebook:
                            decimals=None, alpha_marker=_UNSET,
                            alpha_line=_UNSET, marker_interval=_UNSET, figsize=None, legend=None,
                            suppress_legends=None, ncols=None, nrows=None,
-                           hspace=None, vspace=None,
+                           hspace=None, vspace=None, title_gap=None, legend_gap=None,
                            barmode=None, agg=None, histfunc=None, histnorm=None,
                            boxmode=None, points=None, legend_scroll=None,
                            reset=False):
@@ -10100,15 +10380,15 @@ class UnichartNotebook:
         *future* loaded datasets; already-loaded sets keep their styling until
         ``reset_format()`` re-applies the new defaults. **Figure / per-call
         defaults** (figsize, legend, suppress_legends, legend_scroll, ncols, nrows,
-        hspace, vspace, barmode, agg, histfunc, histnorm, points, boxmode) seed the matching argument of the
+        hspace, vspace, title_gap, legend_gap, barmode, agg, histfunc, histnorm, points, boxmode) seed the matching argument of the
         plot methods whenever a call doesn't pass its own value; an explicit
         per-call argument always wins, and so does one stored for that method
         alone by ``plot_defaults`` / ``bar_defaults`` / ... Only the values you pass change; others
         persist — except ``sig_figs`` and ``decimals``, two spellings of one
         knob, which clear each other. Color remains controlled by ``color_map``.
 
-        figsize, ncols, nrows, hspace, vspace, legend_scroll and
-        suppress_legends are also attributes holding the same setting
+        figsize, ncols, nrows, hspace, vspace, title_gap, legend_gap,
+        legend_scroll and suppress_legends are also attributes holding the same setting
         (``uc.ncols = 2``), which is how to clear just one (``uc.ncols = None``).
 
         ``reset=True`` restores *all* of the above — per-dataset styles, figsize,
@@ -10170,6 +10450,13 @@ class UnichartNotebook:
             rows; contour and secondary-axis plots reserve more for their
             colorbars and extra axes) whatever the grid size, instead of
             Plotly's grid-relative fractions.
+        title_gap, legend_gap : number (px, >= 0)
+            Spacing in the band above the plot, for every plot method.
+            ``title_gap`` is the clear space under the suptitle; ``legend_gap``
+            the clear space under the above-legend, down to the top row's
+            subplot titles (or the plot). Room for the subplot titles
+            themselves is always reserved, so a ``legend_gap`` of 0 still keeps
+            them off the legend. Built-in 12 px each.
         barmode : 'group' | 'stack' | 'overlay' | 'relative'
             Default bar mode for ``bar`` (built-in 'group') and ``histogram``
             (built-in 'overlay'). Validated against the union of both; a value
@@ -10187,6 +10474,7 @@ class UnichartNotebook:
         uc.set_default_format(figsize=(10, 6), legend='right', ncols=2)
         uc.set_default_format(legend_scroll=False)  # never scroll the legend
         uc.set_default_format(vspace=100, hspace=0.05)  # 100 px rows, 5% columns
+        uc.set_default_format(legend_gap=24)  # more room under the legend
         uc.set_default_format(reset=True)    # clear styles, figsize, and defaults
         """
         if reset:
@@ -10282,6 +10570,9 @@ class UnichartNotebook:
             if _val is not None:
                 _parse_spacing(_name, _val)   # validates; the raw value is stored
                 pd_updates[_name] = _val
+        for _name, _val in (('title_gap', title_gap), ('legend_gap', legend_gap)):
+            if _val is not None:
+                pd_updates[_name] = _check_gap(_name, _val)
         if barmode is not None:
             valid = ('group', 'stack', 'overlay', 'relative')
             if barmode not in valid:
@@ -11607,22 +11898,17 @@ class UnichartNotebook:
 
         Only called from ``_enforce_plot_size``, so figures without a pinned
         size keep their previous geometry exactly."""
-        title = fig.layout.title.text
         leg = fig.layout.legend
         has_above = (leg.orientation == 'h' and leg.yref == 'container')
         rows = self._legend_row_estimate(fig) if has_above else 1
-        top_margin, _, _ = _top_space(
-            title, (None, (fig.layout.height or 800) / 100), has_above,
-            title_font_size=self._font_size('suptitle_size'), legend_rows=rows)
+        top_margin, _, _ = self._top_space_for(fig, has_above, legend_rows=rows)
         # Plotly measures the rendered legend, whose rows run taller than the
         # _LEGEND_ROW_PX estimate (~31px vs 26px) and by a little more with each
         # row. Without this slack autoexpand fires for the difference and the
         # height pin lands a few px short.
         if has_above:
             top_margin += _PINNED_TOP_SLACK + _PINNED_ROW_SLACK * rows
-        meta = dict(fig.layout.meta or {})
-        meta['uc_legend_rows'] = rows
-        fig.update_layout(margin=dict(t=top_margin), meta=meta)
+        fig.update_layout(margin=dict(t=top_margin))
         return top_margin
 
     def _anchor_top(self, fig):
@@ -11630,13 +11916,9 @@ class UnichartNotebook:
         top, now that the figure's final height is known. Their stored ``y``
         values are container *fractions*, so they only mean the intended offset
         at the height they were computed for."""
-        rows = (fig.layout.meta or {}).get('uc_legend_rows', 1)
         leg = fig.layout.legend
         has_above = (leg.orientation == 'h' and leg.yref == 'container')
-        _, title_pos, legend_pos = _top_space(
-            fig.layout.title.text, (None, (fig.layout.height or 800) / 100),
-            has_above, title_font_size=self._font_size('suptitle_size'),
-            legend_rows=rows)
+        _, title_pos, legend_pos = self._top_space_for(fig, has_above)
         if fig.layout.title.text:
             fig.update_layout(title=dict(y=title_pos['y']))
         if legend_pos is not None:
@@ -11720,11 +12002,28 @@ class UnichartNotebook:
 
     def _title_band(self, fig):
         """Height (px) of the suptitle band an above-legend is pinned just
-        below (the ``title_band`` of ``_top_space``)."""
-        no_legend, _, _ = _top_space(
+        below (the ``title_band`` of ``_top_space``, where it anchors the
+        legend's top)."""
+        _, _, legend_pos = self._top_space_for(fig, True)
+        return (1 - legend_pos['y']) * (fig.layout.height or 800)
+
+    def _top_space_for(self, fig, has_above, **kw):
+        """``_top_space`` for ``fig`` at its own height, with the notebook's
+        suptitle font and ``title_gap`` / ``legend_gap`` and the measured
+        height of the top row's subplot titles. ``kw`` carries the legend's
+        size (``legend_rows`` or ``legend_px``)."""
+        return _top_space(
             fig.layout.title.text, (None, (fig.layout.height or 800) / 100),
-            False, title_font_size=self._font_size('suptitle_size'))
-        return no_legend - _TITLE_TOP_PAD
+            has_above, title_font_size=self._font_size('suptitle_size'),
+            subplot_title_px=_subplot_title_px(fig),
+            title_gap=self._gap('title_gap'), legend_gap=self._gap('legend_gap'),
+            **kw)
+
+    def _gap(self, key):
+        """A top-band gap in px: the ``set_default_format`` value for ``key``
+        (``'title_gap'`` / ``'legend_gap'``), else the built-in ``_LEGEND_GAP``."""
+        value = self._plot_defaults.get(key)
+        return _LEGEND_GAP if value is None else value
 
     def _fit_full_legend(self, fig):
         """Show every legend entry instead of letting Plotly scroll the legend,
@@ -11766,9 +12065,14 @@ class UnichartNotebook:
         has_above = (leg.orientation == 'h' and leg.yref == 'container')
         delta = 0
         if has_above:
-            legend_bottom = self._title_band(fig) + self._above_legend_height(fig)
-            if legend_bottom > top:
-                delta = legend_bottom + _LEGEND_GAP + _PINNED_TOP_SLACK - top
+            # What has to fit above the plot: the legend, then the gap and
+            # the top row's subplot titles under it.
+            needed = (self._title_band(fig) + self._above_legend_height(fig)
+                      + self._gap('legend_gap') + _subplot_title_px(fig))
+            # Within a px is a fit: _reserve_top_band sized the band from the
+            # same terms, which may not sum back to it exactly.
+            if needed > top + 1:
+                delta = needed + _PINNED_TOP_SLACK - top
                 fig.update_layout(margin=dict(t=top + delta),
                                   height=height + delta)
         else:
@@ -12338,17 +12642,16 @@ class UnichartNotebook:
         if suptitle_size is not None:
             layout_updates['title_font'] = dict(size=suptitle_size)
         if legend_size is not None:
-            layout_updates['legend'] = dict(font=dict(size=legend_size))
+            # Group titles (plot_ymult's grouped legend) otherwise take the
+            # figure's base font, not the legend's. Same size as the entries,
+            # as matplotlib draws legend titles, and as _legend_metrics sizes
+            # a title row.
+            layout_updates['legend'] = dict(font=dict(size=legend_size),
+                                            grouptitlefont=dict(size=legend_size))
         if hover_size is not None:
             layout_updates['hoverlabel'] = dict(font=dict(size=hover_size))
         if layout_updates:
             fig.update_layout(**layout_updates)
-
-        # With the (possibly larger) custom title font now applied, re-reserve
-        # the top space so a bigger suptitle can't collide with an above-legend.
-        # _base_layout sized it for the default font; redo it for the real size.
-        if suptitle_size is not None and fig.layout.title.text:
-            self._reserve_top_band(fig, suptitle_size)
 
         sp_size = self._font_size('subplot_title_size')
         if sp_size is not None and fig.layout.annotations:
@@ -12358,6 +12661,16 @@ class UnichartNotebook:
                 if (getattr(ann, 'name', None) or '').startswith(_LINE_LABEL_NAME):
                     continue
                 ann.font = dict(size=sp_size)
+
+        # With the real suptitle, legend and subplot-title fonts now applied,
+        # re-reserve the top band: _base_layout sized it for default fonts and
+        # a guessed legend, with no room for the top row's subplot titles.
+        # Only where _base_layout set the top margin in the first place.
+        if fig.layout.margin.t is not None:
+            leg = fig.layout.legend
+            if (fig.layout.title.text or _subplot_title_px(fig)
+                    or (leg.orientation == 'h' and leg.yref == 'container')):
+                self._reserve_top_band(fig)
 
         axes_title_size = self._font_size('axes_title_size')
         axes_tick_size = self._font_size('axes_tick_size')
@@ -12379,32 +12692,48 @@ class UnichartNotebook:
 
         cb_size = self._font_size('colorbar_size')
         if cb_size is not None:
+            colorbars = []
             for trace in fig.data:
                 cb = getattr(trace, 'colorbar', None)
                 marker = getattr(trace, 'marker', None)
                 if cb is None and marker is not None and getattr(marker, 'showscale', None):
                     cb = marker.colorbar           # a polar contour field's colorbar
                 if cb is not None:
-                    cb.tickfont = dict(size=cb_size)
-                    if cb.title is not None:
-                        try:
-                            cb.title.font = dict(size=cb_size)
-                        except (AttributeError, ValueError):
-                            cb.title = dict(text=str(cb.title), font=dict(size=cb_size))
+                    colorbars.append(cb)
+            # A numeric hue's colorbar belongs to its layout coloraxis
+            # (_apply_hue_coloraxes), not to any trace. Only the coloraxes a
+            # trace draws with: the layout always lists a bare 'coloraxis'.
+            used = {ca for tr in fig.data
+                    for ca in (getattr(tr, 'coloraxis', None),
+                               getattr(getattr(tr, 'marker', None), 'coloraxis', None))
+                    if ca}
+            colorbars += [fig.layout[ca].colorbar for ca in sorted(used)]
+            for cb in colorbars:
+                cb.tickfont = dict(size=cb_size)
+                if cb.title is not None:
+                    try:
+                        cb.title.font = dict(size=cb_size)
+                    except (AttributeError, ValueError):
+                        cb.title = dict(text=str(cb.title), font=dict(size=cb_size))
 
         return fig
 
-    @staticmethod
-    def _reserve_top_band(fig, title_font_size):
-        """Re-reserve the top band (suptitle, then an above-legend of
-        ``meta['uc_legend_rows']`` rows) at the figure's own height, the way
-        ``_base_layout`` first reserved it."""
+    def _reserve_top_band(self, fig):
+        """Re-reserve the top band — suptitle, above-legend, the top row's
+        subplot titles — at the figure's own height, the way ``_base_layout``
+        first reserved it but with the real fonts and the notebook's gaps (see
+        ``_top_space_for``). The legend is sized by its measured height
+        (``_above_legend_height``) rather than ``_base_layout``'s row guess,
+        so a legend that wraps further than guessed can't land on the subplot
+        titles; capped at half the figure, where Plotly starts scrolling it."""
         leg = fig.layout.legend
         has_above = (leg.orientation == 'h' and leg.yref == 'container')
-        legend_rows = (fig.layout.meta or {}).get('uc_legend_rows', 1)
-        top_margin, title_pos, legend_pos = _top_space(
-            fig.layout.title.text, (None, (fig.layout.height or 800) / 100),
-            has_above, title_font_size=title_font_size, legend_rows=legend_rows)
+        legend_px = None
+        if has_above:
+            legend_px = min(self._above_legend_height(fig),
+                            0.5 * (fig.layout.height or 800))
+        top_margin, title_pos, legend_pos = self._top_space_for(
+            fig, has_above, legend_px=legend_px)
         geo = {'margin': dict(t=top_margin)}
         if fig.layout.title.text:
             geo['title'] = dict(y=title_pos['y'])
@@ -12419,20 +12748,11 @@ class UnichartNotebook:
 
         Called from ``_finalize`` after the plot style is applied, since an
         entry without a color takes the template's text color, and before
-        the font and plot-size steps, which reserve the above-legend's rows.
-        When the new entries add rows by ``_legend_rows``' estimate (the one
-        an unpinned figure is reserved with) the band grows by as many; a
-        pinned figure re-estimates the whole legend anyway."""
+        the font and plot-size steps, which size the above-legend's band
+        from the entries it then holds (``_reserve_top_band``,
+        ``_pin_top_space``)."""
         if fig is None or not self._custom_legend or fig.layout.showlegend is False:
             return []
-        leg = fig.layout.legend
-        has_above = (leg.orientation == 'h' and leg.yref == 'container')
-
-        def rows():
-            return _legend_rows([n for _, _, n in self._legend_items(fig)],
-                                fig.layout.width)
-
-        rows_before = rows() if has_above else 0
 
         fmt = self.default_format
         text_color = (fig.layout.template.layout.font.color
@@ -12465,14 +12785,6 @@ class UnichartNotebook:
                             line=dict(width=fmt.get('edgewidth', 1),
                                       color=fmt.get('edge_color', 'black')))))
             added.append(fig.data[-1])
-
-        if has_above:
-            extra = rows() - rows_before
-            if extra > 0:
-                meta = dict(fig.layout.meta or {})
-                meta['uc_legend_rows'] = meta.get('uc_legend_rows', 1) + extra
-                fig.update_layout(meta=meta)
-                self._reserve_top_band(fig, self._font_size('suptitle_size'))
         return added
 
     # legendgroup prefixes the plot builders tag a dataset's traces with.
@@ -12906,7 +13218,7 @@ class UnichartNotebook:
     def plot(self, x=None, y=None, by='vars', figsize=None, ncols=None, nrows=None,
                 subplot_titles=None, suptitle=None, footer=None, suppress_legends=None,
                 legend=None, hspace=None, vspace=None, subplot_sets=None,
-                subplot_queries=None, subplot_scales=None, **kwargs):
+                subplot_queries=None, subplot_scales=None, labels='all', **kwargs):
         """
         Main plotting wrapper.
 
@@ -12963,6 +13275,24 @@ class UnichartNotebook:
             For ``by='vars'`` only, like ``subplot_sets``. When several of
             ``subplot_sets``, ``subplot_queries`` and ``subplot_scales`` are
             given, each needs the same number of entries.
+        labels : str, optional
+            Which subplots carry axis titles (default 'all'):
+            'all'   - every subplot titles both its axes.
+            'auto'  - a title the subplots of a grid column (x) or row (y) all
+                      share goes only on the outer one, the bottom subplot of
+                      the column or the first of the row; a column or row
+                      whose titles differ keeps them all::
+
+                          uc.plot('time', ['T', 'P', 'V', 'Q'], ncols=2,
+                                  labels='auto')   # 'time' on the bottom row
+
+            'outer' - only the outer subplots carry titles, as with 'auto'
+                      but whether or not the others' titles match.
+            With ``by='sets'`` a secondary y title goes on the last subplot of
+            its row. Tick labels stay on every subplot, since subplots may
+            show different ranges. ``plot_defaults(labels='auto')`` makes it
+            the default. For ``by='vars'`` and ``by='sets'``; ``'ymult'`` and
+            ``'marginal'`` ignore it with a warning.
         legend : str, optional
             Legend placement, matching ``plot_ymult`` (default 'above', or the
             ``set_default_format(legend=)`` default):
@@ -12993,6 +13323,11 @@ class UnichartNotebook:
         subplot_sets = _check_subplot_sets(subplot_sets)
         subplot_queries = _check_subplot_queries(subplot_queries)
         subplot_scales = _check_subplot_scales(subplot_scales)
+        labels = _check_axis_labels(labels)
+        if by in ('ymult', 'marginal') and labels != 'all':
+            warnings.warn(f"plot() ignores labels={labels!r} with by={by!r}: it "
+                          "places the axis titles of a by='vars' or by='sets' "
+                          "subplot grid.", UserWarning, stacklevel=3)
         if by in ('sets', 'datasets', 'ymult', 'marginal'):
             for name, value, what in (
                     ('subplot_sets', subplot_sets, "picks the sets of"),
@@ -13048,6 +13383,7 @@ class UnichartNotebook:
                 return_axes=True,
                 marker_interval=kwargs.get('marker_interval'),
                 variable_formats=self.variable_formats,
+                labels=labels,
                 **self._spacing_kwargs(hspace, vspace),
             )
             mode = 'sets'
@@ -13078,6 +13414,7 @@ class UnichartNotebook:
                 'nrows': nrows,
                 'axis_limits': self.axis_limits,
                 'variable_formats': self.variable_formats,
+                'labels': labels,
                 **self._spacing_kwargs(hspace, vspace),
             }
             plot_args.update(kwargs)
@@ -13510,7 +13847,7 @@ class UnichartNotebook:
     @_uses_method_defaults
     def bar(self, x=None, y=None, markers=None, by='vars', barmode=None, agg=None,
             color=None, suptitle=None, footer=None, figsize=None, ncols=None, nrows=None, suppress_legends=None,
-            hspace=None, vspace=None):
+            hspace=None, vspace=None, overlay_sets=None):
         """
         Bar chart: one bar per (dataset, ``x`` category), whose height is the
         ``agg`` of ``y`` over the rows in that category.
@@ -13549,6 +13886,12 @@ class UnichartNotebook:
         suptitle, footer, figsize, ncols, nrows, suppress_legends
             The usual layout options. ``ncols``/``nrows`` do not apply to the
             single-panel ``by='dataset_x'`` view.
+        overlay_sets : int, list, str, 'all', Dataset or dict, optional
+            Dataset(s), by the usual selector, drawn as markers instead of
+            bars, to compare the same ``y`` across sets; or a dict
+            ``{bar set: overlay set(s)}`` pairing them with particular bar
+            sets. See "Overlay sets" below. Ignored, with a warning, by
+            ``by='dataset_x'``.
 
         ``barmode``, ``agg`` and ``suppress_legends`` fall back to the
         ``set_default_format`` defaults when not passed. ``x`` and ``y`` fall
@@ -13588,6 +13931,39 @@ class UnichartNotebook:
         ``scale()`` accepts an overlay column too, since the overlay shares the
         bar's y-axis. Its range is unioned with the paired bar variable's own
         scale so both the bars and the limit line stay in frame.
+
+        Overlay sets
+        ~~~~~~~~~~~~
+        ``overlay_sets`` compares the bars against other datasets' values of
+        the same variable::
+
+            uc.bar(x='PHASE', y='EGT', overlay_sets=[1, 2])
+
+        Set 0 (and any other selected set) draws bars; sets 1 and 2 each draw
+        a marker per category at the ``agg`` of their own rows, so the marker
+        is the height their bar would have had. Hover reports that set's own
+        row count. Each overlay set keeps its own style (``color``,
+        ``marker``, ``markersize``, ``fill``, ``alpha``); one with markers
+        turned off falls back to its default symbol. Overlay sets are drawn
+        whether or not they are selected and are never drawn as bars, and
+        only their ``y`` columns are drawn (not ``markers``).
+
+        In ``by='vars'`` the markers sit at the category center, over the bar
+        when a single set draws bars. In ``by='sets'`` they appear on every
+        panel, over the matching variable's bar.
+
+        To pair overlay sets with particular bar sets, pass a dict mapping
+        each bar set to the overlay set(s) drawn on it (both sides take the
+        usual selector)::
+
+            uc.bar(x='PHASE', y='EGT', overlay_sets={0: 1, 3: [2, 4]})
+
+        Set 1's markers sit over set 0's bars, sets 2 and 4 over set 3's. An
+        overlay set may be paired with several bar sets (``{0: 1, 3: 1}``) and
+        is drawn over each. In ``by='sets'`` a paired overlay set appears only
+        on its bar sets' panels. Every key must be a selected set that draws
+        bars, or ``ValueError`` says which pairing has nothing to sit on.
+        Bar sets left out of the dict simply get no markers.
         """
         if figsize is None: figsize = self.figsize
 
@@ -13601,7 +13977,9 @@ class UnichartNotebook:
         if by == 'dataset_x':
             ignored = [name for name, val in (('x', x), ('barmode', barmode),
                                               ('color', color), ('ncols', ncols),
-                                              ('nrows', nrows)) if val is not None]
+                                              ('nrows', nrows),
+                                              ('overlay_sets', overlay_sets))
+                       if val is not None]
             # stacklevel 3: past the _uses_method_defaults wrapper, to the
             # caller's line.
             if ignored:
@@ -13637,11 +14015,29 @@ class UnichartNotebook:
         y_list = y if isinstance(y, list) else [y]
         markers_list = markers if isinstance(markers, list) else ([markers] if markers else [])
 
-        active_sets = [d for d in self.sets if d.select]
+        # Overlay sets draw markers, never bars (by='dataset_x' ignores them,
+        # warned above).
+        overlay_datasets, overlay_anchors = (
+            self._resolve_overlay_sets(overlay_sets)
+            if overlay_sets is not None and by != 'dataset_x' else ([], {}))
+        overlay_ids = {id(d) for d in overlay_datasets}
+        active_sets = [d for d in self.sets if d.select and id(d) not in overlay_ids]
         if not active_sets:
-            print("No datasets selected.")
+            print("No datasets left to draw as bars: every selected set is an "
+                  "overlay set." if overlay_datasets else "No datasets selected.")
             return None
+        bar_ids = {id(d) for d in active_sets}
+        for o_ds in overlay_datasets:
+            for a_ds in overlay_anchors.get(id(o_ds), ()):
+                if id(a_ds) not in bar_ids:
+                    why = ("is itself an overlay set" if id(a_ds) in overlay_ids
+                           else "is not selected")
+                    raise ValueError(f"overlay_sets pairs {o_ds.title_format} with "
+                                     f"{a_ds.title_format}, which {why}, so it has "
+                                     "no bars to sit on.")
         self._check_bar_columns(active_sets, ([x] if needs_x else []) + y_list + markers_list)
+        if overlay_datasets:
+            self._check_bar_columns(overlay_datasets, [x] + y_list, what='overlay set')
 
         categorical_x = x not in self.axis_limits
 
@@ -13665,6 +14061,7 @@ class UnichartNotebook:
                 suptitle=suptitle or self.suptitle, xlabel=self.x_label, ylabel=self.y_label,
                 figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, return_axes=True,
+                overlay_sets=overlay_datasets, overlay_anchors=overlay_anchors,
                 **self._spacing_kwargs(hspace, vspace),
             )
         else:
@@ -13675,6 +14072,7 @@ class UnichartNotebook:
                 suptitle=suptitle or self.suptitle, xlabel=self.x_label, ylabel=self.y_label,
                 figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, return_axes=True,
+                overlay_sets=overlay_datasets, overlay_anchors=overlay_anchors,
                 **self._spacing_kwargs(hspace, vspace),
             )
 
@@ -16711,6 +17109,8 @@ def new_uc(
     nrows=None,
     hspace=None,
     vspace=None,
+    title_gap=None,
+    legend_gap=None,
     barmode=AUTO,
     agg='mean',
     histfunc='sum',
@@ -16768,7 +17168,7 @@ def new_uc(
         *and* the histogram / marginal-strip opacity (built-in 0.7), so passing a
         value changes both.
     figsize, legend, suppress_legends, legend_scroll, ncols, nrows, hspace,
-    vspace, barmode, agg, histfunc, histnorm, boxmode, points
+    vspace, title_gap, legend_gap, barmode, agg, histfunc, histnorm, boxmode, points
         Figure and per-call plot defaults, as in ``set_default_format``. An
         explicit argument to a plot method still wins over any of them.
         ``barmode`` is ``auto`` because its built-in differs per method
@@ -16840,7 +17240,8 @@ def new_uc(
         'sig_figs': sig_figs, 'decimals': decimals,
         'figsize': figsize, 'legend': legend, 'suppress_legends': suppress_legends,
         'legend_scroll': legend_scroll, 'ncols': ncols, 'nrows': nrows,
-        'hspace': hspace, 'vspace': vspace, 'barmode': barmode, 'agg': agg,
+        'hspace': hspace, 'vspace': vspace, 'title_gap': title_gap,
+        'legend_gap': legend_gap, 'barmode': barmode, 'agg': agg,
         'histfunc': histfunc, 'histnorm': histnorm, 'boxmode': boxmode,
         'points': points,
     }
