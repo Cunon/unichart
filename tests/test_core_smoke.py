@@ -22,7 +22,9 @@ import warnings
 from contextlib import redirect_stdout
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+import pytest
 import plotly.graph_objects as go
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -509,6 +511,42 @@ def test_delta_sets_plot():
         nb.select([before, before + 1])
         nb.plot(x='time_s', y=['DL_cht_c', 'DLPCT_eta_pct'])
     _draw(call)
+
+
+def test_delta_multi_key_and_match_modes():
+    """align_on takes several keys (a flight envelope); match= picks nearest,
+    interp, exact or positional pairing. A study 2% above a linear base reads
+    exactly 2% under N-D linear interpolation, at off-grid study points."""
+    f = lambda h, m: 1000 + 0.01 * h + 500 * m
+    A, M = np.meshgrid(np.arange(0, 40001, 5000), np.arange(0.3, 0.91, 0.1))
+    base = pd.DataFrame({'altitude': A.ravel(), 'mach_number': M.ravel()})
+    base['thrust'] = f(base.altitude, base.mach_number)
+    rng = np.random.default_rng(0)
+    study = pd.DataFrame({'altitude': rng.uniform(2000, 38000, 30),
+                          'mach_number': rng.uniform(0.35, 0.85, 30)})
+    study['thrust'] = 1.02 * f(study.altitude, study.mach_number)
+    with redirect_stdout(io.StringIO()):
+        nb = UnichartNotebook()
+        nb.set_copy_buttons(False)
+        nb.load_df(base, title='base')
+        nb.load_df(study, title='study')
+        keys = ['altitude', 'mach_number']
+        interp = nb.delta(0, 1, align_on=keys, delta_parms='thrust', match='interp')[0]
+        near = nb.delta(0, 1, align_on=keys, delta_parms='thrust', keep_parms=True)[0]
+        tight = nb.delta(0, 1, align_on=keys, delta_parms='thrust',
+                         tolerance={'altitude': 1, 'mach_number': 0.001})[0]
+        grid = nb.delta(0, 1, align_on=keys, delta_parms='thrust',
+                        x_ins=[(10000, 0.5), (50000, 0.5)])[0]
+        row = nb.delta(0, 1, match='row', delta_parms='thrust')[0]
+    np.testing.assert_allclose(interp.df['DLPCT_thrust'], 2.0)
+    assert list(interp.df.columns[:2]) == keys
+    assert near.df['thrust_BASE'].isin(base['thrust']).all()
+    assert tight.df['DL_thrust'].isna().all()
+    assert grid.df['DLPCT_thrust'].iloc[0] == pytest.approx(2.0)
+    assert np.isnan(grid.df['DLPCT_thrust'].iloc[1])     # outside the envelope
+    assert len(row.df) == len(study)
+    assert interp.delta_sets['align_on'] == keys
+    assert interp.delta_sets['match'] == 'interp'
 
 
 def test_summary_and_table_frames():

@@ -10927,7 +10927,7 @@ class UnichartNotebook:
               passed_parms=None, keep_parms=None,
               direction='nearest', tolerance=None,
               x_ins=None, interp='both', kind=None, name_as_study=False,
-              name_by='index'):
+              name_by='index', match='nearest'):
         """Compute deltas (absolute and %) between each study dataset and the base.
 
         The resulting delta dataset is anchored on the STUDY dataset's rows: every
@@ -10959,14 +10959,46 @@ class UnichartNotebook:
         'reset')``). Pass ``name_as_study=True`` to also title it after the
         study set.
 
+        Matching rows
+        -------------
+        ``align_on`` names the key column(s) that pair each study row with base
+        data, and ``match`` says how:
+
+            'nearest'  (default) the base row whose key is closest. With one
+                       ordered key this is a ``merge_asof`` honoring
+                       ``direction`` and ``tolerance``. With several ordered
+                       keys — e.g. ``align_on=['altitude', 'mach_number']`` to
+                       compare across a flight envelope — it is the nearest
+                       base point in key space, each key scaled by the base
+                       set's span so feet and Mach weigh equally.
+            'interp'   base values interpolated at each study row's key(s):
+                       piecewise-linear for one key, linear over a Delaunay
+                       triangulation of the (scaled) keys for several. Use it
+                       when the two sets were not sampled at the same points.
+                       Study rows outside the base's range (one key) or convex
+                       hull (several keys) get NaN rather than an
+                       extrapolation.
+            'exact'    keys must be equal (a left join). For integer or
+                       categorical test-point IDs; floats rarely compare equal.
+            'row'      no key: study row *i* pairs with base row *i*, in each
+                       set's current order. For sets with no usable index
+                       column that list the same conditions in the same order.
+                       ``align_on`` is ignored.
+
+        Non-numeric keys (strings, categoricals) are always matched exactly,
+        and the ordered keys are matched within each such group — e.g.
+        ``align_on=['config', 'alpha']`` pairs each study row with the nearest
+        ``alpha`` of the base rows sharing its ``config``.
+
         Parameters
         ----------
         base_idx : int
             Index of the baseline (reference) dataset.
         study_indices : int | list | 'all'
             Dataset(s) to compare against the base. The base itself is always skipped.
-        align_on : str | None
-            Column to align on (nearest-match merge). Defaults to last_x.
+        align_on : str | list | None
+            Key column(s) to align on. Defaults to last_x. Ignored when
+            ``match='row'``.
         delta_parms : str | list | None
             Columns to compute deltas for. Defaults to last_y.
         passed_parms : str | list | None
@@ -10976,43 +11008,51 @@ class UnichartNotebook:
             Which delta parameters' raw BASE values to keep, as ``<name>_BASE``.
             Pass a subset of delta_parms, or True / 'all' to keep every one.
             None / False keeps no base values (only the deltas and study columns).
+        match : 'nearest' | 'interp' | 'exact' | 'row'
+            How study rows are paired with base data (see *Matching rows*).
         direction : 'nearest' | 'forward' | 'backward'
             Passed to merge_asof — controls which base row matches each study row.
-            Only used in the default (non-``x_ins``) row-matching mode.
-        tolerance : numeric | None
-            Maximum allowed distance between matched align_on values. Unmatched rows get NaN.
-            Only used in the default (non-``x_ins``) row-matching mode.
+            Only applies to ``match='nearest'`` with a single ordered key.
+        tolerance : numeric | dict | None
+            Maximum allowed distance between matched key values; rows with no
+            base row that close get NaN. A dict gives a tolerance per key, in
+            that key's units (``{'altitude': 500, 'mach_number': 0.02}``); a
+            scalar applies to every key. Only used by ``match='nearest'``.
 
         Interpolation mode (``x_ins``)
         ------------------------------
-        By default the result is anchored on the study dataset's rows, with each
-        base row matched by a nearest/forward/backward ``merge_asof``. Pass
-        ``x_ins`` (a scalar or list-like of ``align_on`` values) to instead place
-        the result rows at exactly those ``align_on`` values, reading the base
-        and/or study values off an interpolated curve at each point — mirroring
-        :meth:`table`'s interpolation.
+        By default the result is anchored on the study dataset's rows. Pass
+        ``x_ins`` to instead place the result rows at exactly the requested
+        ``align_on`` values, reading the base and/or study values off an
+        interpolated curve at each point — mirroring :meth:`table`'s
+        interpolation.
 
-        x_ins : scalar | list | None
-            ``align_on`` values that define the rows of the new dataset. When
-            given, ``align_on`` must be numeric. ``None`` (default) keeps the
-            original ``merge_asof`` row-matching behavior.
+        x_ins : scalar | list | dict | DataFrame | None
+            ``align_on`` values that define the rows of the new dataset; every
+            key must be numeric. With one key, a scalar or list. With several,
+            a DataFrame or dict holding each key (``{'altitude': [...],
+            'mach_number': [...]}``) or a list of ``(altitude, mach)`` tuples in
+            ``align_on`` order. ``None`` (default) anchors on the study rows.
         interp : 'base' | 'study' | 'both'
             Which side(s) to interpolate onto ``x_ins`` (default ``'both'``).
             The non-selected side — and any non-numeric column on either side —
-            is read from the row whose ``align_on`` is nearest each requested
-            value. Note every column of an interpolated side is fitted, including
+            is read from the row whose key is nearest each requested point.
+            Note every column of an interpolated side is fitted, including
             study context columns that are not delta parameters, since the whole
-            row is synthetic.
+            row is synthetic. With several keys, points outside a side's convex
+            hull read NaN.
         kind : str | tuple | None
             Regression/interpolation spec applied to the interpolated side(s),
             accepting the same specs as ``reg_order`` (e.g. ``'poly2'``, ``'log'``,
             ``'exp'``, ``'power'``, ``(kind, param)`` tuples). When ``None`` each
             side falls back to its own dataset's ``reg_order``; when no spec is
             set at all, values are interpolated piecewise-linearly through the raw
-            points. The result gains ``BASE_METHOD`` / ``STUDY_METHOD`` columns
-            naming how each side's numeric values were produced (the regression
-            label, ``'Table'`` for 1-D linear interpolation, or ``'Nearest'``).
-            Only used when ``x_ins`` is given.
+            points. Regression specs are one-dimensional, so with several keys
+            the interpolation is always linear over the triangulated keys. The
+            result gains ``BASE_METHOD`` / ``STUDY_METHOD`` columns naming how
+            each side's numeric values were produced (the regression label,
+            ``'Table'`` for 1-D linear interpolation, ``'Linear ND'`` for
+            several keys, or ``'Nearest'``). Only used when ``x_ins`` is given.
         name_as_study : bool
             When ``True``, title each delta set after its study set instead of the
             default ``'Set {study} rel. to Set {base}'``. The study set's
@@ -11022,18 +11062,37 @@ class UnichartNotebook:
             uses the set indices, ``'name'`` uses the set titles. Ignored when
             ``name_as_study=True``.
         """
+        from scipy.spatial import cKDTree, Delaunay
+        from scipy.interpolate import LinearNDInterpolator
+
+        if match not in ('nearest', 'interp', 'exact', 'row'):
+            raise ValueError("match must be 'nearest', 'interp', 'exact' or 'row'.")
+        if direction not in ('nearest', 'forward', 'backward'):
+            raise ValueError("direction must be 'nearest', 'forward' or 'backward'.")
         if x_ins is not None and interp not in ('base', 'study', 'both'):
             raise ValueError("interp must be 'base', 'study', or 'both'.")
+        if x_ins is not None and match in ('exact', 'row'):
+            raise ValueError(f"x_ins places rows at requested align_on values, so it "
+                             f"cannot be combined with match='{match}'.")
         if name_by not in ('index', 'name', 'title', 'settitle'):
             raise ValueError("name_by must be 'index' or 'name'.")
-        # Resolve align_on from last plot state
-        if align_on is None:
-            lx = self.last_x
-            align_on = lx[0] if isinstance(lx, list) else lx
-        if align_on is None:
-            raise ValueError("align_on is required when no prior plot exists.")
-        if isinstance(align_on, list):
-            raise ValueError("align_on must be a single column name, not a list.")
+
+        # Resolve the alignment key(s). 'row' pairs rows by position and has none.
+        if match == 'row':
+            if align_on is not None:
+                print("Note: match='row' pairs rows by position — ignoring align_on.")
+            keys = []
+        else:
+            if align_on is None:
+                lx = self.last_x
+                align_on = lx[0] if isinstance(lx, list) else lx
+            if align_on is None:
+                raise ValueError("align_on is required when no prior plot exists "
+                                 "(or pass match='row' to pair rows by position).")
+            keys = (list(dict.fromkeys(align_on)) if isinstance(align_on, (list, tuple))
+                    else [align_on])
+            if not keys:
+                raise ValueError("align_on must name at least one column.")
 
         # Resolve delta_parms from last plot state
         if delta_parms is None:
@@ -11045,18 +11104,19 @@ class UnichartNotebook:
         if not delta_parms:
             raise ValueError("delta_parms is required when no prior plot exists.")
 
-        # align_on is the merge key, not a delta target. If it slipped into
+        # The keys are merge keys, not delta targets. If one slipped into
         # delta_parms (e.g. a SETNUMBER/INDEX column that is also last_x, or an
         # explicit list that includes the align column), drop it — the base side
-        # keeps the key un-renamed, so a '<align_on>_BASE' column never exists and
-        # deltaing the key against itself is meaningless.
-        if align_on in delta_parms:
-            print(f"Note: '{align_on}' is the alignment key, not a delta parameter — "
-                  f"ignoring it in delta_parms.")
-            delta_parms = [p for p in delta_parms if p != align_on]
+        # keeps the keys un-renamed, so a '<key>_BASE' column never exists and
+        # deltaing a key against itself is meaningless.
+        key_parms = [p for p in delta_parms if p in keys]
+        if key_parms:
+            print(f"Note: {key_parms} {'is an alignment key' if len(key_parms) == 1 else 'are alignment keys'}, "
+                  f"not a delta parameter — ignoring in delta_parms.")
+            delta_parms = [p for p in delta_parms if p not in keys]
             if not delta_parms:
                 raise ValueError(
-                    "delta_parms contained only the alignment column; nothing to delta.")
+                    "delta_parms contained only alignment columns; nothing to delta.")
 
         # Normalize study-side passthrough specs
         def _as_list(v):
@@ -11077,12 +11137,203 @@ class UnichartNotebook:
             raise IndexError(f"base_idx {base_idx} is out of range (have {len(self.sets)} datasets).")
 
         base_ds = self.sets[base_idx]
-        if align_on not in base_ds.columns:
-            raise ValueError(f"align_on column '{align_on}' not found in base dataset '{base_ds.title}'.")
-        if x_ins is not None and not pd.api.types.is_numeric_dtype(base_ds[align_on]):
-            raise ValueError(
-                f"x_ins interpolation requires a numeric align_on; '{align_on}' is "
-                f"not numeric in base dataset '{base_ds.title}'.")
+        missing_keys = [k for k in keys if k not in base_ds.columns]
+        if missing_keys:
+            raise ValueError(f"align_on column(s) {missing_keys} not found in base "
+                             f"dataset '{base_ds.title}'.")
+
+        # Ordered keys (numbers, datetimes, timedeltas) are matched by distance;
+        # the rest (strings, categoricals) are matched exactly, as groups.
+        def _is_ordered(s):
+            return ((pd.api.types.is_numeric_dtype(s) and not pd.api.types.is_bool_dtype(s))
+                    or pd.api.types.is_datetime64_any_dtype(s)
+                    or pd.api.types.is_timedelta64_dtype(s))
+        ord_keys = [k for k in keys if _is_ordered(base_ds[k])]
+        cat_keys = [k for k in keys if k not in ord_keys]
+
+        if x_ins is not None:
+            bad = [k for k in keys if k not in ord_keys
+                   or not pd.api.types.is_numeric_dtype(base_ds[k])]
+            if bad:
+                raise ValueError(
+                    f"x_ins interpolation requires numeric align_on; {bad} "
+                    f"{'is' if len(bad) == 1 else 'are'} not numeric in base dataset "
+                    f"'{base_ds.title}'.")
+        if match == 'interp' and not ord_keys:
+            raise ValueError("match='interp' needs at least one numeric align_on column; "
+                             "use match='exact' for purely categorical keys.")
+        mode = match
+        if mode == 'nearest' and keys and not ord_keys:
+            print(f"Note: align_on {keys} has no numeric key to measure distance on — "
+                  f"matching exactly.")
+            mode = 'exact'
+        if mode == 'nearest' and len(ord_keys) > 1 and direction != 'nearest':
+            raise ValueError(f"direction='{direction}' only applies to a single ordered "
+                             f"align_on key; with {ord_keys} use direction='nearest'.")
+        if tolerance is not None and mode != 'nearest':
+            print(f"Note: tolerance only applies to match='nearest' — ignored for "
+                  f"match='{mode}'.")
+        if isinstance(tolerance, dict):
+            unknown = sorted(set(tolerance) - set(ord_keys))
+            if unknown:
+                print(f"Warning: tolerance given for non-ordered or unknown key(s) "
+                      f"(ignored): {unknown}")
+
+        def _key_float(s):
+            """An ordered key column as float (datetimes as ns), NaN for missing."""
+            if isinstance(s.dtype, pd.DatetimeTZDtype):
+                s = s.dt.tz_convert('UTC').dt.tz_localize(None)
+            if pd.api.types.is_datetime64_any_dtype(s) or pd.api.types.is_timedelta64_dtype(s):
+                out = s.to_numpy().view('int64').astype(float)
+                out[s.isna().to_numpy()] = np.nan
+                return out
+            return s.to_numpy(dtype=float, na_value=np.nan)
+
+        def _key_matrix(df, cols, scale):
+            """(n, k) float matrix of the key columns, each divided by its scale."""
+            if not len(cols):
+                return np.empty((len(df), 0))
+            return np.column_stack([_key_float(df[c]) for c in cols]) / scale
+
+        def _tol_float(t):
+            if isinstance(t, (pd.Timedelta, np.timedelta64)) or hasattr(t, 'total_seconds'):
+                return float(pd.Timedelta(t).value)
+            return float(t)
+
+        # Each ordered key's span in the base set: N-D distances, tolerances and
+        # triangulations all work in these units, so altitude (ft) and Mach
+        # carry equal weight.
+        def _spans(df, cols):
+            out = []
+            for c in cols:
+                v = _key_float(df[c])
+                v = v[np.isfinite(v)]
+                span = float(v.max() - v.min()) if v.size else 0.0
+                out.append(span if span > 0 else 1.0)
+            return np.asarray(out, dtype=float)
+        scale = _spans(base_ds.cols(ord_keys), ord_keys) if ord_keys else np.empty(0)
+
+        tol_vec = None
+        if tolerance is not None and mode == 'nearest' and ord_keys:
+            t = [tolerance.get(k) if isinstance(tolerance, dict) else tolerance
+                 for k in ord_keys]
+            tol_vec = np.array([np.inf if v is None else _tol_float(v) for v in t]) / scale
+
+        def _read_at(src, cols, P, Q, do_interp, tol=None):
+            """Read ``cols`` of ``src`` at query points ``Q``.
+
+            ``P`` holds ``src``'s scaled key coordinates (all finite), ``Q`` the
+            scaled query points (rows with NaN read NaN). Numeric columns with
+            ``do_interp`` are interpolated (1-D linear, or linear over a
+            Delaunay triangulation for several keys) and read NaN outside the
+            data; everything else takes the nearest row, gated by ``tol``.
+            Returns ``({col: Series indexed 0..m-1}, set of method labels)``.
+            """
+            m, k = Q.shape
+            q_ok = np.isfinite(Q).all(axis=1) if k else np.ones(m, bool)
+            out, methods = {}, set()
+            if not len(src) or not q_ok.any():
+                for c in cols:
+                    out[c] = pd.Series(np.nan, index=range(m))
+                return out, methods
+            src = src.reset_index(drop=True)
+            near = np.full(m, -1, dtype=np.intp)
+            _, idx = cKDTree(P).query(Q[q_ok])
+            ok = np.ones(len(idx), bool)
+            if tol is not None:
+                ok = (np.abs(Q[q_ok] - P[idx]) <= tol * (1 + 1e-12)).all(axis=1)
+            near[np.flatnonzero(q_ok)[ok]] = idx[ok]
+
+            tri = None
+            for c in cols:
+                col = src[c]
+                numeric = (pd.api.types.is_numeric_dtype(col)
+                           and not pd.api.types.is_bool_dtype(col))
+                if not (do_interp and numeric):
+                    out[c] = col.reindex(near).reset_index(drop=True)
+                    if numeric:
+                        methods.add('Nearest')
+                    continue
+                y = col.to_numpy(dtype=float, na_value=np.nan)
+                y_ok = np.isfinite(y)
+                vals = np.full(m, np.nan)
+                if k == 1:
+                    if y_ok.any():
+                        # Average repeated keys so np.interp sees a strictly
+                        # increasing abscissa.
+                        g = pd.Series(y[y_ok]).groupby(P[y_ok, 0]).mean()
+                        vals[q_ok] = np.interp(Q[q_ok, 0], g.index.to_numpy(), g.to_numpy(),
+                                               left=np.nan, right=np.nan)
+                    methods.add('Linear')
+                else:
+                    try:
+                        if y_ok.all():
+                            if tri is None:
+                                tri = Delaunay(P)
+                            t = tri
+                        else:
+                            t = Delaunay(P[y_ok])
+                        vals[q_ok] = LinearNDInterpolator(t, y[y_ok])(Q[q_ok])
+                        methods.add('Linear ND')
+                    except Exception as e:   # too few / degenerate points (Qhull)
+                        print(f"Warning: cannot triangulate '{c}' over {ord_keys} "
+                              f"({type(e).__name__}); reading the nearest point instead.")
+                        out[c] = col.reindex(near).reset_index(drop=True)
+                        methods.add('Nearest')
+                        continue
+                out[c] = pd.Series(vals, index=range(m))
+            return out, methods
+
+        def _match_by_points(df_study, df_base, val_cols, do_interp, tol):
+            """Base ``val_cols`` read at each study row, ordered keys matched
+            within each group of exactly-equal categorical keys."""
+            n = len(df_study)
+            if cat_keys:
+                gkey = cat_keys if len(cat_keys) > 1 else cat_keys[0]
+                s_groups = df_study.groupby(gkey, sort=False, dropna=False).indices
+                b_groups = df_base.groupby(gkey, sort=False, dropna=False).indices
+            else:
+                s_groups = {None: np.arange(n)}
+                b_groups = {None: np.arange(len(df_base))}
+            Q_all = _key_matrix(df_study, ord_keys, scale)
+            P_all = _key_matrix(df_base, ord_keys, scale)
+            pieces = {c: [] for c in val_cols}
+            for g, s_pos in s_groups.items():
+                b_pos = b_groups.get(g, np.empty(0, dtype=np.intp))
+                P = P_all[b_pos]
+                fin = np.isfinite(P).all(axis=1)
+                vals, _ = _read_at(df_base.iloc[b_pos[fin]], val_cols, P[fin],
+                                   Q_all[s_pos], do_interp, tol)
+                for c in val_cols:
+                    pieces[c].append(vals[c].set_axis(s_pos))
+            return pd.DataFrame(
+                {c: pd.concat(pieces[c]).sort_index().reindex(range(n)) for c in val_cols},
+                index=range(n))
+
+        # Parse multi-key x_ins into an (m, k) array of raw key values.
+        x_arr = None
+        if x_ins is not None:
+            if len(keys) == 1:
+                x_arr = np.atleast_1d(x_ins).astype(float)
+            else:
+                if isinstance(x_ins, (dict, pd.DataFrame)):
+                    xi = pd.DataFrame(x_ins)
+                    gone = [k for k in keys if k not in xi.columns]
+                    if gone:
+                        raise ValueError(f"x_ins is missing align_on key(s) {gone}.")
+                    x_arr = xi[keys].to_numpy(dtype=float)
+                else:
+                    x_arr = np.asarray(x_ins, dtype=float)
+                    if x_arr.ndim == 1:
+                        x_arr = x_arr.reshape(1, -1)
+                    if x_arr.ndim != 2 or x_arr.shape[1] != len(keys):
+                        raise ValueError(
+                            f"x_ins must give a value for each of the {len(keys)} align_on "
+                            f"keys {keys} — a DataFrame/dict of columns, or a list of "
+                            f"{len(keys)}-tuples.")
+                if kind is not None:
+                    print("Note: regression specs (kind) are one-dimensional — with several "
+                          "align_on keys, x_ins reads values linearly over the triangulated keys.")
 
         def _nearest_key(src_df, xcol):
             """Sort permutation and sorted x for ``xcol`` — computed once per side
@@ -11132,16 +11383,31 @@ class UnichartNotebook:
         # result now carries the STUDY set, so the full-width prep is per-study.
         base_cols = list(base_ds.columns)
 
+        # One ordered key + nearest is a merge_asof (honors direction); sort on
+        # that key. Otherwise sort on the keys for a tidy result; 'row' keeps
+        # each set's own order, since position IS the alignment.
+        asof = mode == 'nearest' and len(ord_keys) == 1 and x_ins is None
+        sort_cols = ord_keys if asof else keys
+
         created = []
 
         for study_ds in targets:
             study_cols = study_ds.columns
-            if align_on not in study_cols:
-                print(f"Warning: skipping '{study_ds.title}' — align_on column '{align_on}' not found.")
+            missing = [k for k in keys if k not in study_cols]
+            if missing:
+                print(f"Warning: skipping '{study_ds.title}' — align_on column(s) "
+                      f"{missing} not found.")
                 continue
-            if x_ins is not None and not pd.api.types.is_numeric_dtype(study_ds[align_on]):
-                print(f"Warning: skipping '{study_ds.title}' — x_ins interpolation needs a "
-                      f"numeric align_on, but '{align_on}' is not numeric there.")
+            if x_ins is not None:
+                bad = [k for k in keys if not pd.api.types.is_numeric_dtype(study_ds[k])]
+                if bad:
+                    print(f"Warning: skipping '{study_ds.title}' — x_ins interpolation needs "
+                          f"numeric align_on, but {bad} not numeric there.")
+                    continue
+            bad = [k for k in ord_keys if not _is_ordered(study_ds[k])]
+            if bad:
+                print(f"Warning: skipping '{study_ds.title}' — align_on {bad} numeric in "
+                      f"the base but not here.")
                 continue
 
             valid_parms = [p for p in delta_parms
@@ -11154,68 +11420,122 @@ class UnichartNotebook:
                 continue
 
             # Resolve base-side keep (a subset of delta parms) and passthrough columns.
-            # align_on is always the merge key and is never duplicated as a *_BASE col.
-            keep_valid = [p for p in keep_parms if p != align_on and p in valid_parms]
-            keep_dropped = [p for p in keep_parms if p != align_on and p not in valid_parms]
+            # Keys are always the merge keys and are never duplicated as *_BASE cols.
+            keep_valid = [p for p in keep_parms if p not in keys and p in valid_parms]
+            keep_dropped = [p for p in keep_parms if p not in keys and p not in valid_parms]
             if keep_dropped:
                 print(f"Warning: keep_parms not among valid delta columns (ignored): "
                       f"{sorted(set(keep_dropped))}")
 
             passed_valid = [c for c in passed_parms
-                            if c != align_on and c in base_cols]
+                            if c not in keys and c in base_cols]
             passed_missing = [c for c in passed_parms
-                              if c != align_on and c not in base_cols]
+                              if c not in keys and c not in base_cols]
             if passed_missing:
                 print(f"Warning: passed_parms not in base '{base_ds.title}' (ignored): {passed_missing}")
 
-            # --- Study side: every study column, anchored and sorted on align_on. ---
+            # --- Study side: every study column, sorted on the keys. ---
             # study_ds.df materializes a fresh slice of the combined frame; ownership
             # already excludes other sets' phantom columns (e.g. the DL_/DLPCT_/
             # METHOD outputs of a previous delta) from the view, so the NaN scan
             # below only spans the study set's own width. It drops the study set's
             # own genuinely all-NaN columns so they are not carried into the result
-            # as empty context — but never the align key or an actual delta parameter.
+            # as empty context — but never a key or an actual delta parameter.
             study_raw = study_ds.df
             if study_raw.columns.duplicated().any():
                 study_raw = study_raw.loc[:, ~study_raw.columns.duplicated()]
-            df_study = study_raw.sort_values(align_on).reset_index(drop=True)
+            df_study = (study_raw.sort_values(sort_cols, kind='stable', na_position='last')
+                        if sort_cols else study_raw).reset_index(drop=True)
             study_all_nan = df_study.isna().all()
             phantom = [c for c in df_study.columns
-                       if c != align_on and c not in valid_parms and study_all_nan[c]]
+                       if c not in keys and c not in valid_parms and study_all_nan[c]]
             if phantom:
                 df_study = df_study.drop(columns=phantom)
 
-            # --- Base side: align_on + (delta parms ∪ passthroughs), renamed *_BASE. ---
+            # --- Base side: keys + (delta parms ∪ passthroughs), renamed *_BASE. ---
             # ds.cols keeps the first occurrence of any duplicated label and only
             # copies the named columns, never the base set's full width.
-            base_need = list(dict.fromkeys([align_on] + valid_parms + passed_valid))
-            df_base = (base_ds.cols(base_need)
-                       .sort_values(align_on).reset_index(drop=True))
+            base_need = list(dict.fromkeys(keys + valid_parms + passed_valid))
+            df_base = base_ds.cols(base_need)
+            if sort_cols:
+                df_base = df_base.sort_values(sort_cols, kind='stable', na_position='last')
+            df_base = df_base.reset_index(drop=True)
             df_base = df_base.rename(
-                columns={c: f"{c}_BASE" for c in df_base.columns if c != align_on})
+                columns={c: f"{c}_BASE" for c in df_base.columns if c not in keys})
+            base_vals = [c for c in df_base.columns if c not in keys]
 
             # Guard against a pathological study column already named like a *_BASE col;
             # base values win for that name so the merge stays clean.
-            overlap = (set(df_study.columns) & set(df_base.columns)) - {align_on}
+            overlap = (set(df_study.columns) & set(df_base.columns)) - set(keys)
             if overlap:
                 print(f"Warning: study column(s) collide with base '*_BASE' names and were "
                       f"dropped in favor of base values: {sorted(overlap)}")
                 df_study = df_study.drop(columns=list(overlap))
 
-            # Build `merged`: align_on + study columns (original names) + base
-            # columns (renamed *_BASE). Two ways to populate it, both yielding
-            # the same column shape so the delta math below is shared:
-            #   - default: nearest/forward/backward merge_asof on the study rows.
-            #   - x_ins:   rows at the requested align_on values, each side read
+            # Build `merged`: keys + study columns (original names) + base
+            # columns (renamed *_BASE). Every mode yields the same column shape
+            # so the delta math below is shared:
+            #   - asof:    nearest/forward/backward merge_asof on the study rows.
+            #   - nearest (several keys) / interp: base read at each study row's
+            #              key point, within each categorical-key group.
+            #   - exact:   left join on the keys.
+            #   - row:     positional pairing.
+            #   - x_ins:   rows at the requested key values, each side read
             #              off an interpolated curve (or nearest raw row).
             base_methods = study_methods = None
             if x_ins is None:
-                merge_kwargs = dict(on=align_on, direction=direction)
-                if tolerance is not None:
-                    merge_kwargs['tolerance'] = tolerance
-                merged = pd.merge_asof(df_study, df_base, **merge_kwargs)
+                if asof:
+                    key = ord_keys[0]
+                    merge_kwargs = dict(on=key, direction=direction)
+                    if cat_keys:
+                        merge_kwargs['by'] = cat_keys
+                    tol = tolerance.get(key) if isinstance(tolerance, dict) else tolerance
+                    if tol is not None:
+                        merge_kwargs['tolerance'] = tol
+                    # merge_asof rejects null keys: match the keyed rows, then
+                    # append the rest (already sorted last) with no base data.
+                    s_ok = df_study[key].notna()
+                    merged = pd.merge_asof(df_study[s_ok], df_base[df_base[key].notna()],
+                                           **merge_kwargs)
+                    if not s_ok.all():
+                        merged = pd.concat([merged, df_study[~s_ok]], ignore_index=True)
+                elif mode == 'exact':
+                    dup = df_base.duplicated(keys)
+                    if dup.any():
+                        print(f"Warning: base '{base_ds.title}' repeats {int(dup.sum())} "
+                              f"key value(s) of {keys}; using the first row of each.")
+                    merged = df_study.merge(df_base[~dup], on=keys, how='left', sort=False)
+                elif mode == 'row':
+                    n_s, n_b = len(df_study), len(df_base)
+                    if n_s != n_b:
+                        print(f"Warning: '{study_ds.title}' has {n_s} rows but base "
+                              f"'{base_ds.title}' has {n_b}; pairing by position "
+                              f"{'leaves the extra study rows without base data' if n_s > n_b else 'drops the extra base rows'}.")
+                    base_part = df_base.iloc[:n_s].reset_index(drop=True).reindex(range(n_s))
+                    merged = pd.concat([df_study, base_part], axis=1)
+                else:
+                    base_part = _match_by_points(df_study, df_base, base_vals,
+                                                 do_interp=(mode == 'interp'), tol=tol_vec)
+                    merged = pd.concat([df_study, base_part], axis=1)
+            elif len(keys) > 1:
+                base_interp = interp in ('base', 'both')
+                study_interp = interp in ('study', 'both')
+                Q = x_arr / scale
+                data = {k: x_arr[:, j] for j, k in enumerate(keys)}
+                base_methods, study_methods = set(), set()
+                for src, cols, do_i, methods in (
+                        (df_study, [c for c in df_study.columns if c not in keys],
+                         study_interp, study_methods),
+                        (df_base, base_vals, base_interp, base_methods)):
+                    P = _key_matrix(src, keys, scale)
+                    fin = np.isfinite(P).all(axis=1)
+                    vals, m = _read_at(src[fin], cols, P[fin], Q, do_i)
+                    for c in cols:
+                        data[c] = vals[c].to_numpy()
+                    methods.update(m)
+                merged = pd.DataFrame(data)
             else:
-                x_arr = np.atleast_1d(x_ins).astype(float)
+                align_on = keys[0]
                 base_spec = kind if kind is not None else base_ds.reg_order
                 study_spec = kind if kind is not None else study_ds.reg_order
                 base_interp = interp in ('base', 'both')
@@ -11284,7 +11604,7 @@ class UnichartNotebook:
                               | {f"{c}_BASE" for c in passed_valid})
 
             # Assemble result with a predictable, plot-friendly column order:
-            #   1. align_on
+            #   1. the keys
             #   2. per-parm block:
             #        numeric     -> <P>, <P>_BASE (if kept), DL_<P>, DLPCT_<P>
             #        non-numeric -> <P>, <P>_BASE            (no delta)
@@ -11292,7 +11612,7 @@ class UnichartNotebook:
             #   4. base passthrough columns (<name>_BASE)
             # Built as an ordered name list + one selection (not per-column
             # inserts, which fragment the frame on wide study sets).
-            ordered = [align_on]
+            ordered = list(keys)
             for parm in valid_parms:
                 ordered.append(parm)                              # study value (original name)
                 b_col = f"{parm}_BASE"
@@ -11319,8 +11639,15 @@ class UnichartNotebook:
             if numeric_parms:
                 nan_frac = result[f"DL_{numeric_parms[0]}"].isna().mean()
                 if nan_frac > 0.5:
+                    hint = {'nearest': ("consider tolerance= or a different direction="
+                                        if len(ord_keys) <= 1 else
+                                        "consider a looser tolerance= or match='interp'"),
+                            'interp': "study points fall outside the base's range",
+                            'exact': "keys rarely match exactly — try match='nearest'",
+                            'row': "check the two sets list the same points in order",
+                            }[mode]
                     print(f"Warning: '{study_ds.title}' — {nan_frac:.0%} of delta rows are NaN "
-                          f"(large alignment gaps; consider tolerance= or a different direction=).")
+                          f"(large alignment gaps; {hint}).")
 
             if name_as_study:
                 new_title = study_ds.title
@@ -11330,12 +11657,13 @@ class UnichartNotebook:
                 new_title = f"Set {study_ds.index} rel. to Set {base_ds.index}"
             ds = self._register_set(result, new_title)
             ds.set_type = 'delta'
-            ds.delta_sets = {'base': base_ds.index, 'study': study_ds.index}
+            ds.delta_sets = {'base': base_ds.index, 'study': study_ds.index,
+                             'align_on': list(keys), 'match': mode}
             # Inherit the study set's formatting so the delta reads as a visual
             # continuation of the study series it was derived from.
             self.copy_format(study_ds, ds)
             if x_ins is not None:
-                ds.delta_sets['x_ins'] = [float(v) for v in x_arr]
+                ds.delta_sets['x_ins'] = x_arr.tolist()
                 ds.delta_sets['interp'] = interp
             print(f"Loaded Set {ds.index}: {new_title}")
             created.append(ds)

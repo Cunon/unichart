@@ -51,3 +51,16 @@ First release on PyPI.
   stem to the bar it sits on (`linestyle` / `linewidth` style the stem),
   still in the set's own color.
   `by='dataset_x'` ignores them with a warning.
+- `delta(align_on=)` takes a list of keys, e.g.
+  `align_on=['altitude', 'mach_number']` to compare across a flight envelope.
+  Each study row is paired with the nearest base point in key space, with each
+  key scaled by the base set's span. String keys are matched exactly, and the
+  numeric keys are matched within each group, as in `align_on=['config', 'alpha']`.
+  The new `match=` option sets how rows are paired: `'nearest'` (the default,
+  unchanged for one key), `'interp'` (base values interpolated at each study
+  point, linear over the triangulated keys when there are several, NaN outside
+  the base data), `'exact'` (a left join on the keys) or `'row'` (pair row *i*
+  with row *i* when the sets have no usable key). `tolerance` also takes a
+  dict per key, and `x_ins` takes a DataFrame, a dict or a list of tuples when
+  there are several keys. Rows with missing key values now come through with
+  NaN deltas, where they used to raise.

@@ -680,9 +680,13 @@ Two consistent rules cover every reset:
 
 - **`delta(base_idx, study_indices, delta_parms=...)`** — compute absolute
   (`DL_<P>`) and percentage (`DLPCT_<P>`) differences of each study dataset
-  against a baseline, aligned by nearest-match merge on a chosen column (with
-  optional interpolation at specified `x_ins`). The delta set inherits the study
-  set's color/marker so it reads as a continuation of that series.
+  against a baseline, aligned on one or more key columns (with optional
+  interpolation at specified `x_ins`). `align_on=['altitude', 'mach_number']`
+  compares across a flight envelope. `match=` picks how rows are paired:
+  `'nearest'` (the default), `'interp'` (base values interpolated at each
+  study point), `'exact'`, or `'row'` (by position, for sets with no usable
+  key). The delta set inherits the study set's color/marker so it reads as a
+  continuation of that series.
 - **`table(...)` / `table_read(...)`** — tabulate columns, or interpolate a
   Y column at arbitrary X inputs (`kind='linear'`, extrapolation controllable).
   `sig_figs=` / `decimals=` round the displayed cells; without them each set's
@@ -1029,7 +1033,8 @@ Dash is imported lazily, so the core toolkit never requires it.
   - `UnichartNotebook_Tutorial.ipynb`, `unichart_data_model_tutorial.ipynb` — start here.
   - `dashboard_demo.ipynb`, `dashboard_contour_demo.ipynb`,
     `dashboard_progression_demo.ipynb` — dashboards.
-  - `delta_demo.ipynb`, `interpolation_table_tests.ipynb` — analysis.
+  - `delta_complete_demo.ipynb` (every `delta()` option, including multi-key
+    `align_on` and `match=`), `delta_demo.ipynb`, `interpolation_table_tests.ipynb` — analysis.
   - `variable_color_formatting_demo.ipynb`, `marker_map_tests.ipynb`,
     `color_map_tests.ipynb`, `environment_presets_demo.ipynb` — styling.
   - `plot_style_demo.ipynb` — the Matplotlib look (`set_plot_style`).
