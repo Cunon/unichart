@@ -1722,6 +1722,44 @@ def _overlay_set_marker_kw(ds, edge_default):
     return dict(marker=marker, opacity=opacity)
 
 
+def _overlay_set_glyph_kw(ds, var_fmt, edge_default, x_vals, values, bar_values=None):
+    """``(trace kwargs, stem kwargs or None)`` for one overlay-set trace.
+
+    The glyph follows the y variable's ``var_format``, as a ``markers=``
+    column's does: ``style`` ('marker' / 'tick' / 'whisker'), and for a
+    whisker ``linestyle`` (stem dash, 'None' hides it) and ``linewidth``.
+    Everything that tells the overlay sets apart (color, symbol, size, fill,
+    alpha) stays the set's own. A whisker stems from the value to
+    ``bar_values`` (the bar it sits on, aligned to ``x_vals``); with no bar
+    it is drawn as a bare tick. A dashed stem comes back as a companion line
+    trace's kwargs, since error-bar stems can't dash."""
+    style = var_fmt.get('style', 'marker')
+    if style not in ('tick', 'whisker'):
+        return _overlay_set_marker_kw(ds, edge_default), None
+    dash = (get_plotly_linestyle(var_fmt['linestyle'])
+            if var_fmt.get('linestyle') is not None else 'solid')
+    width = var_fmt.get('linewidth', 2)
+    alpha = ds.alpha_marker if ds.alpha_marker is not None else ds.alpha
+    alpha = 1 if alpha is None else alpha
+    kw = _overlay_marker_kw(style, None, ds.color, ds.markersize or 10, alpha,
+                            edge_default, values=values, bar_values=bar_values,
+                            stem_dash=dash, stem_width=width)
+    stem = (_whisker_stem_kw(x_vals, values, bar_values, ds.color, alpha, dash, width)
+            if style == 'whisker' and bar_values is not None
+            and dash and dash != 'solid' else None)
+    return kw, stem
+
+
+def _bar_values_at(bar_df, x, col, x_vals):
+    """The bar heights of ``bar_df[col]`` at each of ``x_vals`` (NaN where
+    that bar set has no such category): what an overlay's whisker stems to.
+    With ``agg=False`` a repeated category takes its first row's bar."""
+    if bar_df is None or col not in bar_df.columns:
+        return None
+    heights = bar_df.groupby(x, sort=False, observed=True)[col].first()
+    return x_vals.map(heights)          # keeps x_vals' index, aligned with values
+
+
 # Added to a hollow (fill=False) marker's edgewidth: the outline is the whole
 # marker then, and the stored width reads as too thin on its own.
 _HOLLOW_EDGE_BOOST = 1
@@ -3587,12 +3625,14 @@ def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
     # the traces interleave.
     bar_legend_shown = set()
     marker_legend_shown = set()
+    bar_frames = {}                     # id(bar set) -> its reduced frame
 
     for ds in active_ds:
         if x not in ds.columns: continue
         df = ds.cols([c for c in dict.fromkeys([x] + y_list + markers_list)
                       if c in ds.columns])
         df, n_df = _bar_frame(df, x, list(df.columns), agg_func)
+        bar_frames[id(ds)] = df         # overlay-set whiskers stem to these bars
         offset_group = f"set_{ds.index}"
 
         for idx_y, yi in enumerate(y_list):
@@ -3696,21 +3736,29 @@ def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
     # A paired overlay set (overlay_anchors) instead rides each of its bar
     # sets' offsetgroups, once per bar set, skipping a panel where that bar
     # set has no bar.
+    # The glyph follows the y variable's var_format (style / linestyle /
+    # linewidth); a whisker stems to the paired bar, or to the only bar set's
+    # bar when an unpaired overlay sits over it, and is a bare tick otherwise.
     overlay_anchors = overlay_anchors or {}
+    lone_bar_set = active_ds[0] if len(active_ds) == 1 else None
     for ds, df, n_df in overlay_frames:
-        style_kw = _overlay_set_marker_kw(ds, edge_default)
         anchors = overlay_anchors.get(id(ds))
-        placements = ([(a, {'offsetgroup': f"set_{a.index}", 'alignmentgroup': "bars"}
+        placements = ([(a, a, {'offsetgroup': f"set_{a.index}", 'alignmentgroup': "bars"}
                         if barmode == 'group' else {}) for a in anchors]
-                      if anchors else [(None, overlay_group)])
+                      if anchors else [(None, lone_bar_set, overlay_group)])
         listed = False
         for idx_y, yi in enumerate(y_list):
             if yi not in df.columns: continue
             row, col = (idx_y // ncols) + 1, (idx_y % ncols) + 1
-            for anchor, group_kw in placements:
+            for anchor, stem_to, group_kw in placements:
                 if anchor is not None and (x not in anchor.columns
                                            or yi not in anchor.columns):
                     continue
+                bar_vals = (_bar_values_at(bar_frames.get(id(stem_to)), x, yi, df[x])
+                            if stem_to is not None else None)
+                glyph_kw, stem_kw = _overlay_set_glyph_kw(
+                    ds, variable_formats.get(yi, {}), edge_default,
+                    df[x], df[yi], bar_vals)
                 fig.add_trace(go.Scatter(
                     x=df[x], y=df[yi],
                     mode='markers',
@@ -3718,7 +3766,7 @@ def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
                     legendgroup=f"group_{ds.index}",
                     legendrank=1000 + ds.index,
                     **group_kw,
-                    **style_kw,
+                    **glyph_kw,
                     showlegend=not listed,
                     customdata=None if n_df is None else n_df[yi],
                     hovertemplate=(f"<b>{ds.title}</b><br>{x}: %{{x}}<br>"
@@ -3726,6 +3774,13 @@ def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
                                    f"<extra></extra>")
                 ), row=row, col=col)
                 listed = True
+                if stem_kw:
+                    fig.add_trace(go.Scatter(
+                        name=f"{ds.index}: {ds.title} (stem)",
+                        legendgroup=f"group_{ds.index}",
+                        legendrank=1000 + ds.index,
+                        **group_kw, **stem_kw,
+                    ), row=row, col=col)
 
     _label_outer_axes(fig, n_y, ncols, xlabel or x, ylabel)
     if not ylabel:
@@ -3901,27 +3956,39 @@ def unibar_per_dataset(list_of_datasets, x, y, markers=None, variable_formats=No
             anchors = (overlay_anchors or {}).get(id(o_ds))
             if anchors and all(a is not ds for a in anchors):
                 continue                      # paired with other panels' sets
-            style_kw = _overlay_set_marker_kw(o_ds, edge_default)
             for yi in y_list:
                 if yi not in o_df.columns or yi not in df.columns: continue
                 show = o_ds.index not in overlay_legend_shown
                 if show:
                     overlay_legend_shown.add(o_ds.index)
+                # Glyph from yi's var_format; a whisker stems to this
+                # panel's yi bar.
+                glyph_kw, stem_kw = _overlay_set_glyph_kw(
+                    o_ds, variable_formats.get(yi, {}), edge_default, o_df[x], o_df[yi],
+                    _bar_values_at(df, x, yi, o_df[x]))
+                group_kw = ({'offsetgroup': f"var_{yi}", 'alignmentgroup': "bars"}
+                            if barmode == 'group' else {})
                 fig.add_trace(go.Scatter(
                     x=o_df[x], y=o_df[yi],
                     mode='markers',
                     name=f"{o_ds.index}: {o_ds.title}",
                     legendgroup=f"overlay_{o_ds.index}",
                     legendrank=3000 + o_ds.index,
-                    **({'offsetgroup': f"var_{yi}", 'alignmentgroup': "bars"}
-                       if barmode == 'group' else {}),
-                    **style_kw,
+                    **group_kw,
+                    **glyph_kw,
                     showlegend=show,
                     customdata=None if o_n is None else o_n[yi],
                     hovertemplate=(f"<b>{o_ds.title}</b><br>{x}: %{{x}}<br>"
                                    f"{_agg_hover(agg_name, yi, o_n, o_ds.sig_figs, o_ds.decimals)}"
                                    f"<extra></extra>")
                 ), row=row, col=col)
+                if stem_kw:
+                    fig.add_trace(go.Scatter(
+                        name=f"{o_ds.index}: {o_ds.title} (stem)",
+                        legendgroup=f"overlay_{o_ds.index}",
+                        legendrank=3000 + o_ds.index,
+                        **group_kw, **stem_kw,
+                    ), row=row, col=col)
 
     _label_outer_axes(fig, n_sets, ncols, xlabel or x, ylabel)
     if y_lim: fig.update_yaxes(range=y_lim)
@@ -9788,12 +9855,15 @@ class UnichartNotebook:
         other one; see :meth:`marker_interval` for the forms). Unlike the other keys
         it applies in every scatter/line plot, not just ``plot_ymult``.
 
-        `style` only affects bar-plot overlay columns (the `markers=` argument
-        of `uc.bar`): 'marker' (default symbol overlay), 'tick' (horizontal
-        dash at the value), or 'whisker' (dash plus a stem down/up to the top
-        of the bar). For `style='whisker'`, `linestyle` sets the stem's dash
-        pattern ('-', '--', '-.', ':'; 'None' hides the stem) and `linewidth`
-        its thickness.
+        `style` only affects bar-plot overlays: the overlay columns (the
+        `markers=` argument of `uc.bar`), and the markers `overlay_sets=`
+        draws for a `y` variable: 'marker' (default symbol overlay), 'tick'
+        (horizontal dash at the value), or 'whisker' (dash plus a stem
+        down/up to the top of the bar). For `style='whisker'`, `linestyle`
+        sets the stem's dash pattern ('-', '--', '-.', ':'; 'None' hides the
+        stem) and `linewidth` its thickness. Overlay sets take only `style`,
+        `linestyle` and `linewidth` from here; their color, symbol and size
+        stay the set's own, so the sets stay apart.
 
         Examples
         --------
@@ -13947,6 +14017,17 @@ class UnichartNotebook:
         turned off falls back to its default symbol. Overlay sets are drawn
         whether or not they are selected and are never drawn as bars, and
         only their ``y`` columns are drawn (not ``markers``).
+
+        The glyph follows the ``y`` variable's ``var_format`` ``style``, as an
+        overlay column's does::
+
+            uc.var_format('EGT', style='whisker', linestyle='--', linewidth=3)
+
+        draws each overlay set as a dash at its value, in the set's color,
+        with a stem to the bar it sits on: its paired bar set's bar, the
+        panel's bar in ``by='sets'``, or the bar when a single set draws
+        bars. An unpaired overlay over several bar sets has no one bar to
+        stem to and is drawn as a bare tick.
 
         In ``by='vars'`` the markers sit at the category center, over the bar
         when a single set draws bars. In ``by='sets'`` they appear on every

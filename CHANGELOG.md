@@ -46,4 +46,8 @@ First release on PyPI.
   A dict pairs them with particular bar sets instead,
   `overlay_sets={0: 1, 3: [2, 4]}`: set 1's markers sit over set 0's bars and
   sets 2 and 4 over set 3's (in `by='sets'`, on those sets' panels only).
+  The markers follow the `y` variable's `var_format` `style`, so
+  `var_format('EGT', style='whisker')` draws each overlay set as a dash with a
+  stem to the bar it sits on (`linestyle` / `linewidth` style the stem),
+  still in the set's own color.
   `by='dataset_x'` ignores them with a warning.

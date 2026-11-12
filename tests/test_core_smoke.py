@@ -1319,6 +1319,44 @@ def test_bar_overlay_sets_paired():
     assert replayed == [(t.name, t.offsetgroup) for t in fig.data if t.type == 'scatter']
 
 
+def test_bar_overlay_sets_follow_var_format_style():
+    """An overlay set's glyph follows its y variable's var_format style (tick /
+    whisker, stem linestyle and width) while keeping the set's own color; a
+    whisker stems to the bar it sits on, or is a bare tick with none."""
+    nb = _notebook()
+    nb.select([0, 3])
+    nb.var_format('fuel_kgh', style='whisker', linewidth=3)
+    with redirect_stdout(io.StringIO()):
+        fig = nb.bar(x='phase', y='fuel_kgh', overlay_sets={0: 1, 3: 2})
+    bars = {t.name: dict(zip(t.x, t.y)) for t in fig.data if t.type == 'bar'}
+    for t in (t for t in fig.data if t.type == 'scatter'):
+        idx = int(t.name.split(':')[0])
+        anchor = nb.sets[{1: 0, 2: 3}[idx]].title_format
+        assert t.marker.symbol == 'line-ew' and t.marker.color == nb.sets[idx].color
+        assert t.error_y.thickness == 3
+        # The stem spans value -> paired bar top (up when above, down when below).
+        for xv, v, up, down in zip(t.x, t.y, t.error_y.array, t.error_y.arrayminus):
+            assert abs((v + up - down) - bars[anchor][xv]) < 1e-9
+
+    nb.var_format('fuel_kgh', linestyle='--')
+    with redirect_stdout(io.StringIO()):
+        fig = nb.bar(x='phase', y='fuel_kgh', by='sets', overlay_sets={0: 1, 3: 2})
+    stems = [t for t in fig.data if t.name.endswith('(stem)')]
+    assert len(stems) == 2 and all(t.line.dash == 'dash' for t in stems)
+
+    # Unpaired over two bar sets: no single bar to stem to, so a bare tick.
+    with redirect_stdout(io.StringIO()):
+        fig = nb.bar(x='phase', y='fuel_kgh', overlay_sets=1)
+    mark, = [t for t in fig.data if t.type == 'scatter']
+    assert mark.marker.symbol == 'line-ew' and mark.error_y.array is None
+
+    nb.var_format('fuel_kgh', style='reset', linestyle='reset', linewidth='reset')
+    with redirect_stdout(io.StringIO()):
+        fig = nb.bar(x='phase', y='fuel_kgh', overlay_sets=1)
+    mark, = [t for t in fig.data if t.type == 'scatter']
+    assert mark.marker.symbol != 'line-ew'                  # back to the set's marker
+
+
 def test_warnings_still_point_at_the_callers_line():
     """The defaults wrapper adds a frame, which the warnings aimed at the
     user's line step past. A DeprecationWarning only shows by default when it
